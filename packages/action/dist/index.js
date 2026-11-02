@@ -246298,8 +246298,16 @@ function readTestConfig(kind, path, text) {
       return nested(root, "jest");
     case "vitest-workspace":
       return root.type === "array" ? { container: root } : { notFound: true };
-    default:
+    case "jest":
+    case "playwright":
+    case "mocha":
+    case "pytest-ini":
+    case "tox-ini":
+    case "setup-cfg":
+    case "pyproject":
       return root.type === "object" ? { container: root } : { notFound: true };
+    default:
+      throw new Error(`unknown test config kind: ${kind}`);
   }
 }
 
@@ -246701,8 +246709,13 @@ function familyOf(kind) {
       return { rules: PLAYWRIGHT_RULES, prefix: [], mocha: false };
     case "mocha":
       return { rules: MOCHA_RULES, prefix: [], mocha: true };
-    default:
+    case "pytest-ini":
+    case "tox-ini":
+    case "setup-cfg":
+    case "pyproject":
       return { rules: PYTEST_RULES, prefix: [], mocha: false };
+    default:
+      throw new Error(`unknown test config kind: ${kind}`);
   }
 }
 var UNSET = "(unset)";
@@ -251774,6 +251787,7 @@ var APP_AUDIENCE = "pharn.dev";
 var DEFAULT_APP_URL = "https://pharn.dev";
 var APP_TIMEOUT_MS = 1e4;
 var APP_RETRY_WAIT_MS = 1e3;
+var APP_TOKEN_TIMEOUT_MS = 3e4;
 var APP_MAX_BODY_BYTES = 1048576;
 var APP_URL_ERROR = "the app-url input must be an https origin such as https://pharn.dev, with no credentials, path, query or fragment";
 function parseAppUrl(value) {
@@ -251794,6 +251808,17 @@ var NO_TOKEN_LINE = "pharn-ci: no OIDC token is available for the org policy; gr
 function oidcOffered(deps) {
   return deps.hasOidcEnv === true && deps.getIDToken !== void 0 && deps.setSecret !== void 0;
 }
+async function tokenWithin(getIDToken2, ms) {
+  let timer;
+  const deadline = new Promise((_resolve, reject) => {
+    timer = setTimeout(() => reject(new Error("the OIDC token request timed out")), ms);
+  });
+  try {
+    return await Promise.race([getIDToken2(APP_AUDIENCE), deadline]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 async function requestAppToken(deps, noTokenLine = NO_TOKEN_LINE) {
   const { getIDToken: getIDToken2, setSecret: setSecret2 } = deps;
   if (!oidcOffered(deps) || getIDToken2 === void 0 || setSecret2 === void 0) {
@@ -251802,7 +251827,7 @@ async function requestAppToken(deps, noTokenLine = NO_TOKEN_LINE) {
   }
   let token;
   try {
-    token = await getIDToken2(APP_AUDIENCE);
+    token = await tokenWithin(getIDToken2, deps.tokenTimeoutMs ?? APP_TOKEN_TIMEOUT_MS);
   } catch {
     deps.info(noTokenLine);
     return null;
@@ -252029,6 +252054,11 @@ async function resolvePrNumberTarget(deps, { prNumber, headSha }) {
 var EVENTS = ["pull_request", "merge_group", "push", "workflow_run", "workflow_dispatch"];
 var SHA = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 var ZERO_SHA = /^0+$/;
+var MAX_META_SCOPE_CODE_POINTS = 200;
+var CONTROL2 = new RegExp("\\p{Cc}", "gu");
+function metaScope(workflow, job) {
+  return Array.from(`${workflow}/${job}`.replace(CONTROL2, "")).slice(0, MAX_META_SCOPE_CODE_POINTS).join("");
+}
 function runMeta(context3, opts) {
   const repository = context3.payload.repository?.full_name;
   const { runId, runAttempt } = context3;
@@ -252068,7 +252098,7 @@ function runMeta(context3, opts) {
     prNumber,
     headSha,
     baseSha,
-    scope: `${context3.workflow ?? ""}/${context3.job ?? ""}`,
+    scope: metaScope(context3.workflow ?? "", context3.job ?? ""),
     runId,
     runAttempt,
     ...context3.actor ? { actor: context3.actor } : {},
