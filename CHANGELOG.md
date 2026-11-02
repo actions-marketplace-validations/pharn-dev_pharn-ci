@@ -32,6 +32,10 @@ Releases are cut by a maintainer; see [`docs/RELEASING.md`](./docs/RELEASING.md)
   such a file. This is a deliberate tightening: a repository with an already broken settings or MCP file under a policy
   that reads it now fails where it warned (P02 is in force under every policy, so this applies to any policy
   document). No schema change and no new message code.
+- `SECURITY.md` and the Marketplace listing text no longer say agent setup files are never read (review A7-F1). The
+  Data handling table now says check A7 reads the machine-readable agent config files at `HEAD` for committed secrets
+  and policy mode reads the settings, MCP and instruction files, and a new row says where that text goes: it stays in
+  the job and never reaches the comment, the summary, the log, `report.json` or the upload. Documentation only.
 
 ## [0.4.0] - 2026-10-27
 
