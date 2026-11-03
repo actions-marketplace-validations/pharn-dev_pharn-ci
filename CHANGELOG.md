@@ -11,6 +11,12 @@ Releases are cut by a maintainer; see [`docs/RELEASING.md`](./docs/RELEASING.md)
 
 ### Changed
 
+- TI09 no longer lets a test-runner config made unreadable at HEAD turn a block into a warning (review finding 22):
+  a modified or renamed config whose settings were read at the merge base and that is not found at HEAD (an IIFE or
+  other opaque wrapper) or cannot be read there (padded past the size cap, nested too deep, a syntax error, dropped)
+  is now one `(config)` finding at the mode's level (`block` in `test-integrity: block`; it was a `warn`, or no
+  finding for a refused head). An added config and a config already unreadable at base are unchanged. No schema
+  change and no new message code.
 - `report.json` and the upload now neutralize the same invisible and bidirectional characters the PR comment does
   (U+200B to U+200F, U+202A to U+202E, U+2066 to U+2069 and U+FEFF), besides the control characters: in message
   text, signal details, test names, test-config values and policy violation details each becomes a space or U+FFFD,
