@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { foldCoverageBar } from "./helpers.js";
 
 // E3 item 24a part B (P11), AC-25. Reads the tree with git against the base commit and runs four existing whole-report
 // test files in a child vitest; nothing the build adds is loaded here. The child's PHARN_TEST_RESULTS is removed, so
@@ -56,6 +57,17 @@ describe("existing tests, fixtures and goldens stay as they are", () => {
       .filter((l) => l.length > 0);
     // E3 item 24 (P07): the fixtures of rule P07 are new too, so the two patterns below also accept p07.
     for (const line of changed) {
+      // Re-pinned for comment-coverage-bar (the diff-coverage bar in the PR comment): the four golden report.md files
+      // gained the bar line on purpose. Each must be modified, never added or deleted, and folding the bar line (and
+      // the empty line under it) back out must give its content at the base byte for byte.
+      const barred = /^M\t(fixtures\/golden(?:-cobertura|-exclusions|-multi)?\/report\.md)$/.exec(line);
+      if (barred !== null) {
+        expect(foldCoverageBar(read(barred[1] as string)), line).toBe(git("show", `${BASE}:${barred[1]}`));
+        continue;
+      }
+      // Re-pinned for markdown-byte-compare (review SPEC finding 29): markdown.test.ts's two snapshots moved, unchanged,
+      // into these two new committed files.
+      if (/^A\tfixtures\/markdown\/(?:missing|no-coverable)\.md$/.test(line)) continue;
       // Re-pinned for E3 item 23 (policy settings) and E3 item 24 (P07): their new fixtures under
       // fixtures/policy-settings/ and fixtures/policy-rules/p07/ are added too.
       // Re-pinned for the 2026-11-01 review fixes: their new TI10 and TI14 fixture files are added too.
@@ -75,7 +87,9 @@ describe("existing tests, fixtures and goldens stay as they are", () => {
       // Re-pinned for settings-unparseable-fails-closed (review A3-F2): its new case directories under
       // fixtures/policy-settings/unparseable/ are untracked until committed. Re-pinned for fix/ti09-opaque-head (review
       // finding 22): so are its four new TI09 case directories. Re-pinned for js-ts-extensions (review 2026-11-01,
-      // finding 13): so are its new TI01, TI04 and TI13 case directories.
+      // finding 13): so are its new TI01, TI04 and TI13 case directories. Re-pinned for markdown-byte-compare (review
+      // SPEC finding 29): so are the two files markdown.test.ts's snapshots moved into.
+      if (/^fixtures\/markdown\/(?:missing|no-coverable)\.md$/.test(path)) continue;
       expect(path, "a new fixture").toMatch(
         /^fixtures\/policy-rules\/(?:p11|p07)\/[^/]+\/[^/]+$|^fixtures\/test-integrity\/TI03\/[^\t]+$|^fixtures\/test-integrity\/(?:TI10\/(?:block-colon-only|block-true-only|block-true-or-run|pass-true-then-run)|TI14\/block-threshold-(?:emptied|lowered-nbsp-comment|padded-past-cap))\.diff$|^fixtures\/policy-settings\/unparseable\/[^\t]+$|^fixtures\/test-integrity\/(?:TI01\/(?:block-test-mts-deleted|block-spec-cts-deleted)|TI04\/block-test-mts-it-only|TI13\/pass-test-mts-istanbul)\/[^\t]+$|^fixtures\/test-integrity\/TI09\/(?:block-opaque-head|block-too-deep-head|pass-added-opaque-config|pass-opaque-base-and-head)\/[^\t]+$/,
       );

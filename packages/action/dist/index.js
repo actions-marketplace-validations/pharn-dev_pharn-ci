@@ -249335,7 +249335,7 @@ var MESSAGE_HINTS = {
   TEST_INTEGRITY_OFF: "Set the `test-integrity` input to `warn` or `block` in the workflow to check for weakened tests.",
   TEST_INTEGRITY_TI01: "Restore the deleted tests, or say in the PR why they go so a reviewer can confirm it.",
   TEST_INTEGRITY_TI02: (label) => `Restore the removed tests, or say in the PR why they go; a reviewer who is not the PR author can record that sign-off by applying the accept label ${label}. A test that only moved or was renamed is not reported when its body is the same or close to it.`,
-  TEST_INTEGRITY_TI03: (label) => `A reviewer must decide whether each skipped test may stay, for example one that fails in CI; a reviewer who is not the PR author records that sign-off by applying the accept label ${label}.`,
+  TEST_INTEGRITY_TI03: (label) => `Remove the skip so the test runs again, or say in the PR why it must stay, for example a test that fails in CI; a reviewer who is not the PR author can record that sign-off by applying the accept label ${label}.`,
   TEST_INTEGRITY_TI04: "Remove the marker so the whole suite runs, or say in the PR why only the marked tests should run.",
   TEST_INTEGRITY_TI05: (label) => `Restore the assertions the test had, or say in the PR why it checks less now; a reviewer who is not the PR author can record that sign-off by applying the accept label ${label}.`,
   TEST_INTEGRITY_TI06: (label) => `Restore the stronger matcher, guard or placement of the assertion, or say in the PR why the test checks less now; a reviewer who is not the PR author can record that sign-off by applying the accept label ${label}.`,
@@ -249613,6 +249613,7 @@ function renderMarkdown(report, options = {}) {
     out.push("_No coverable lines changed._", "");
   } else {
     const threshold = dc.threshold === null ? "no threshold" : `threshold ${formatNumber(dc.threshold)}%`;
+    out.push(`${coverageBar(dc.percent)} ${formatNumber(dc.percent)}%`, "");
     out.push(
       `**${formatNumber(dc.percent)}%** of changed lines covered (${dc.coveredLines}/${dc.coverableLines}, ${threshold})`,
       ""
@@ -249682,6 +249683,11 @@ function renderMarkdown(report, options = {}) {
   out.push(`<sub>pharn-ci ${report.tool.version} \xB7 report schema v${report.schemaVersion}${formatNote}</sub>`);
   return `${out.join("\n")}
 `;
+}
+var BAR_CELLS = 20;
+function coverageBar(percent) {
+  const filled = Math.max(0, Math.min(BAR_CELLS, Math.round(percent / 100 * BAR_CELLS)));
+  return `\`${"\u25B0".repeat(filled)}${"\u25B1".repeat(BAR_CELLS - filled)}\``;
 }
 function countFiles(n) {
   return n === 1 ? "1 file" : `${n} files`;
