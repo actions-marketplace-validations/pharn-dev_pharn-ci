@@ -43,8 +43,9 @@ const SECRET_CODES = [
   "POLICY_SETTINGS_INVALID",
   // E3 item 24 (P07): the same appended text also names this rule code. This only states more (toContain).
   "POLICY_P07",
-  // Re-pinned for policy rule P14 (agent PR size cap): the same appended text ends with a " Codes added in v0.6.0:"
-  // text that names this rule code. This only states more (toContain).
+  // Re-pinned for policy-p13 (Horizon 2 item H1) and policy rule P14 (agent PR size cap): the same appended text ends
+  // with a " Codes added in v0.6.0:" text that names these two rule codes. This only states more (toContain).
+  "POLICY_P13",
   "POLICY_P14",
 ];
 

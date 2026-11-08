@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { withoutSchemaLevelEdits } from "./level-edits.js";
+import { V060_CODE_TEXT } from "./v060-codes.js";
 
 // E3 item 22 (policy rules), AC-18. Reads the repository's docs, schema and sources as text, and the schema at the
 // base commit with git; nothing the build adds is loaded. The base is c8fdc65 (E3 item 21, which appended
@@ -31,11 +32,6 @@ const POLICY_SETTINGS_TEXT =
 // It is an exact appended-text pin, so it only adds.
 const P07_TEXT =
   " POLICY_P07 (warn by default, error when the org policy sets setup.consistency or the rule to block, info when it sets info or the agent instruction files could not be read: agent instruction files in the same directory name different package managers or JavaScript test runners, or some of them could not be compared; the message names up to 20 files, and each violation a path, a line and the tools as fixed words, never the file's text).";
-
-// Re-pinned for policy rule P14 (agent PR size cap): the same description then gains exactly this text after P07_TEXT,
-// which names the code POLICY_P14. It is an exact appended-text pin, so it only adds.
-const P14_TEXT =
-  " Codes added in v0.6.0: POLICY_P14 (error, or the level the org policy sets for P14: an agent pull request changes more files or lines than the org policy's agents.max_files or agents.max_changed_lines allow, not counting lockfiles, snapshots, *.generated.* files and coverage.exclude paths, or could not be checked because the diff, or the policy file at the merge base, could not be read; the message names the counts, the caps, up to 10 top-level directories and the evidence as fixed words, never file text).";
 
 const REPINNED = [
   "packages/core/test/ac-policy3-unchanged.test.ts",
@@ -80,10 +76,13 @@ describe("docs, schema and sources for the policy rules", { timeout: 60_000 }, (
     const base = codeDescription(atCommit(BASE, "schema/report.v2.json"));
     // Re-pinned by docs-schema-levels: the two insertions that state the block-mode levels of DIFF_UNAVAILABLE and
     // TEST_INTEGRITY_INDEX_UNAVAILABLE are taken out first (level-edits.ts); every other byte stays pinned.
+    // Re-pinned for policy-p13 (Horizon 2 item H1) and policy rule P14 (agent PR size cap): the one appended v0.6.0
+    // code text (POLICY_P13, then POLICY_P14) follows P07_TEXT; v060-codes.ts pins it exactly. It is an exact
+    // appended-text pin, so it only adds.
     const now = codeDescription(withoutSchemaLevelEdits(read("schema/report.v2.json")));
     expect(base.endsWith("the check ran in full).")).toBe(true);
     expect(now.startsWith(base)).toBe(true);
-    expect(now.slice(base.length)).toBe(APPENDED + P11_TEXT + POLICY_SETTINGS_TEXT + P07_TEXT + P14_TEXT);
+    expect(now.slice(base.length)).toBe(APPENDED + P11_TEXT + POLICY_SETTINGS_TEXT + P07_TEXT + V060_CODE_TEXT);
     expect(words(now.slice(base.length))).toEqual(
       [
         "AGENT_PR_DETECTION_INCOMPLETE",
@@ -96,6 +95,7 @@ describe("docs, schema and sources for the policy rules", { timeout: 60_000 }, (
         "POLICY_P08",
         "POLICY_P09",
         "POLICY_P11",
+        "POLICY_P13",
         "POLICY_P14",
         "POLICY_SETTINGS_INVALID",
       ].sort(),

@@ -10,6 +10,7 @@ import {
 } from "../src/index.js";
 import { AGENT_FACTS, appPolicy, p14Messages, policyFixture, runP14 } from "./p14-run.js";
 import { purityViolations } from "./purity-check.js";
+import { V060_CODE_TEXT } from "./v060-codes.js";
 
 // Policy rule P14 (agent PR size cap): the PR comment's Policy section, the code in the report schema and the README,
 // and the purity of the new module.
@@ -70,9 +71,10 @@ describe("org policy rule P14 in the PR comment, the schema and the docs", () =>
   it("schema/report.v2.json names POLICY_P14 among the codes added in v0.6.0, and the README's codes table and rules list name it", () => {
     const schema = JSON.parse(read("schema/report.v2.json"));
     const description: string = schema.$defs.message.properties.code.description;
-    expect(description).toContain(
-      " Codes added in v0.6.0: POLICY_P14 (error, or the level the org policy sets for P14:",
-    );
+    // Re-pinned when main (P14) was merged with policy-p13: the one v0.6.0 sentence lists POLICY_P13 first, then
+    // POLICY_P14 with P14's own words (v060-codes.ts pins the whole sentence).
+    expect(description).toContain(V060_CODE_TEXT);
+    expect(description).toContain(", POLICY_P14 (error, or the level the org policy sets for P14:");
     const readme = read("README.md");
     expect(readme).toContain("| `POLICY_P14` |");
     expect(readme).toContain("- **P14**, agent PR too large:");

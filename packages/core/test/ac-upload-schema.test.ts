@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { Ajv2020 } from "ajv/dist/2020.js";
 import { describe, expect, it } from "vitest";
 import { withoutSchemaLevelEdits } from "./level-edits.js";
+import { V060_CODE_TEXT, V060_CODES } from "./v060-codes.js";
 
 // The schemas, report.ts and fixtures/upload/bundle-golden/meta.json are read inside each test body: the build writes
 // or changes them after this test. The base is main at f563d7d, read with git.
@@ -60,10 +61,6 @@ const POLICY_SETTINGS_CODES = [
 // report.ts gains that MessageCode member. Nothing else may change.
 const P07_TEXT =
   " POLICY_P07 (warn by default, error when the org policy sets setup.consistency or the rule to block, info when it sets info or the agent instruction files could not be read: agent instruction files in the same directory name different package managers or JavaScript test runners, or some of them could not be compared; the message names up to 20 files, and each violation a path, a line and the tools as fixed words, never the file's text).";
-// Re-pinned for policy rule P14 (agent PR size cap): the same description then gains exactly this text, which names the
-// code POLICY_P14; report.ts gains that MessageCode member. Nothing else may change.
-const P14_TEXT =
-  " Codes added in v0.6.0: POLICY_P14 (error, or the level the org policy sets for P14: an agent pull request changes more files or lines than the org policy's agents.max_files or agents.max_changed_lines allow, not counting lockfiles, snapshots, *.generated.* files and coverage.exclude paths, or could not be checked because the diff, or the policy file at the merge base, could not be read; the message names the counts, the caps, up to 10 top-level directories and the evidence as fixed words, never file text).";
 
 /** Every object schema inside a JSON Schema document (by `type` naming object, or by `properties`). */
 function objectSchemas(value: unknown, path = "$", out: Array<[string, Json]> = []): Array<[string, Json]> {
@@ -155,8 +152,11 @@ describe("schema/upload-meta.v1.json and the report schema", { timeout: 60_000 }
     const baseDescription = strings(JSON.parse(v2Base)).find((s) => s.includes(" Codes added in v0.4.0:"));
     expect(baseDescription, "control: the base has the v0.4.0 text").toBeDefined();
     const description = strings(JSON.parse(v2)).find((s) => s.includes(" Codes added in v0.4.0:"));
+    // Re-pinned for policy-p13 (Horizon 2 item H1) and policy rule P14 (agent PR size cap): the one v0.6.0 code text
+    // (POLICY_P13, POLICY_P14, v060-codes.ts) follows P07_TEXT, and both codes join the added code words of the schema
+    // and report.ts below.
     expect(description).toBe(
-      `${baseDescription}${SENTENCE}${POLICY_RULES_TEXT}${P11_TEXT}${POLICY_SETTINGS_TEXT}${P07_TEXT}${P14_TEXT}`,
+      `${baseDescription}${SENTENCE}${POLICY_RULES_TEXT}${P11_TEXT}${POLICY_SETTINGS_TEXT}${P07_TEXT}${V060_CODE_TEXT}`,
     );
     expect(v2.split(" Codes added in v0.4.0:").length - 1).toBe(1);
 
@@ -177,7 +177,7 @@ describe("schema/upload-meta.v1.json and the report schema", { timeout: 60_000 }
         ...P11_CODES,
         ...POLICY_SETTINGS_CODES,
         "POLICY_P07",
-        "POLICY_P14",
+        ...V060_CODES,
         "UPLOAD_TOO_LARGE",
       ].sort(),
     );
@@ -190,7 +190,7 @@ describe("schema/upload-meta.v1.json and the report schema", { timeout: 60_000 }
         ...P11_CODES,
         ...POLICY_SETTINGS_CODES,
         "POLICY_P07",
-        "POLICY_P14",
+        ...V060_CODES,
         "UPLOAD_TOO_LARGE",
       ].sort(),
     );
