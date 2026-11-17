@@ -21,8 +21,11 @@ admin applies a change after it merges, from an up-to-date `main` checkout. The
     ([`SECURITY.md`](../../SECURITY.md#maintainer-model-one-person-today)).
 - [`release-tags.json`](release-tags.json) (ruleset ID `24927486`) makes every `v*` tag immutable:
   no update, no force-push, no deletion, and no bypass for anyone. Tags can be created (that is how
-  [`release.yml`](../workflows/release.yml) cuts a release), never moved. See
-  [`docs/RELEASING.md`](../../docs/RELEASING.md).
+  [`release.yml`](../workflows/release.yml) cuts a release), never moved. Creation is not limited
+  to the release job: a ruleset with a `creation` rule and the GitHub Actions integration (ID
+  `15368`) as its bypass actor was tried on 2026-11-17 and GitHub refused it (`Actor GitHub Actions
+  integration must be part of the ruleset source or owner organization`). See
+  [`docs/RELEASING.md`](../../docs/RELEASING.md) and [`SECURITY.md`](../../SECURITY.md).
 
 The check names are a contract with the workflows: the job ids `ci` and `gitleaks`, the job name
 `Action pins` and the CodeQL job name `Analyze (${{ matrix.language }})`. Renaming a job blocks
