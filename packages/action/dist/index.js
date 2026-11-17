@@ -25997,6 +25997,11 @@ function hasUnsafeChar(text) {
 function replaceUnsafeChars(text, replacement) {
   return text.replace(UNSAFE_PATTERN, replacement);
 }
+function escapeLogLine(text) {
+  const line = replaceUnsafeChars(text, "\uFFFD").replaceAll("##[", "##\\[");
+  const lead = line.length - line.trimStart().length;
+  return line.startsWith("::", lead) ? `${line.slice(0, lead)}\\${line.slice(lead)}` : line;
+}
 function byCodeUnit(a, b) {
   return a < b ? -1 : a > b ? 1 : 0;
 }
@@ -47051,9 +47056,11 @@ function applyRequestPolicy(octokit, opts = {}) {
   });
 }
 function withRequestPolicy(build, opts = {}) {
+  const log = opts.log;
+  const policy = log === void 0 ? opts : { ...opts, log: (message) => log(escapeLogLine(message)) };
   return (token) => {
     const octokit = build(token);
-    applyRequestPolicy(octokit, opts);
+    applyRequestPolicy(octokit, policy);
     return octokit;
   };
 }
@@ -47937,7 +47944,8 @@ var TRUNCATED_NOTE = "\n\n_Truncated: the full report is in the job summary and 
 var MAX_SUMMARY_BYTES = 1e6;
 var SUMMARY_TRUNCATED_NOTE = "\n\n_Truncated: the full report is in report.json._\n";
 var FALLBACK_ROWS = [25, 12, 6, 3, 1, 0];
-async function run(deps) {
+async function run(actionDeps) {
+  const deps = { ...actionDeps, info: (message) => actionDeps.info(escapeLogLine(message)) };
   try {
     return await runUnsafe(deps);
   } catch (err) {
