@@ -1,6 +1,6 @@
 # pharn-ci — Limits
 
-What pharn-ci does **not** guarantee, stated plainly. pharn-ci is pre-1.0 (latest release: `v0.10.0`).
+What pharn-ci does **not** guarantee, stated plainly. pharn-ci is pre-1.0 (latest release: `v0.11.0`).
 These are the design's inherent limits and the known gaps in what is built. For the security design
 see [`THREAT-MODEL.md`](./THREAT-MODEL.md).
 
@@ -80,6 +80,9 @@ see [`THREAT-MODEL.md`](./THREAT-MODEL.md).
   than matched literally: braces, `[...]` classes, negation (`!`), backslashes, unanchored
   gitignore-style patterns (`foo/` or `*.ts` matching in subdirectories: use `**/*.ts`), `..`
   segments, and case-insensitive matching.
+- **A pattern has at most 1,024 characters.** An exclusion glob (from `coverage.exclude`, `--exclude`, the Action's
+  `exclude` input, a coverage-file glob or a `--junit` glob) longer than 1,024 characters after trimming is a config
+  error (exit 2 on the CLI) that names the limit and quotes only the pattern's first 40 characters.
 - **Coverage paths must be relative to the repository root.** `SF:` paths are matched exactly
   (case-sensitive) against repo-relative diff paths. Absolute paths under the repo root are
   relativized. In a monorepo, a coverage file whose paths are relative to a package directory
@@ -860,7 +863,8 @@ must-not-trigger case exist; it does not mean every spelling is seen (see the Py
   `COVERAGE_FORMAT_UNSUPPORTED`, `COVERAGE_PATHS_UNMATCHED` and `DIFF_UNAVAILABLE` are errors, and the verdict is `fail`, when a
   threshold is set (0 included): a gate that cannot measure fails closed. Without a threshold they
   are warnings. `DIFF_UNAVAILABLE` is also an error in `test-integrity: block`, threshold or not: block
-  asked for a test-integrity gate, and a gate that cannot see the change fails closed.
+  asked for a test-integrity gate, and a gate that cannot see the change fails closed. A run with no diff and no
+  coverage file reports `DIFF_UNAVAILABLE` only; the coverage problem shows on the next run, once the diff is available.
 - **`DIFF_UNAVAILABLE` has several causes.** It is reported when there is no base to diff against (a
   push without a previous commit, or no `base-ref` outside a pull request or merge queue), when
   neither local git nor the GitHub API can produce the diff (for example a shallow checkout and an
@@ -879,12 +883,13 @@ must-not-trigger case exist; it does not mean every spelling is seen (see the Py
   `TEST_INTEGRITY_INDEX_UNAVAILABLE` is an error in mode `block` only when TI02 and TI05, or TI09, did
   not run at all (the test text could not be read and a test file or a test-runner config is
   modified). The per-file form, where some touched files could not be compared or some added test
-  files could not be read, stays a warning in block. With no coverage file and no diff, block reports the coverage problem (a warning without a
-  threshold). A7 and P02–P07 need a local diff (`fetch-depth: 0`). Their "did not run" message is
+  files could not be read, stays a warning in block. A7 and P02–P07 need a local diff (`fetch-depth: 0`). Their "did not run" message is
   a warning, except that `POLICY_SETTINGS_INVALID` for unread settings is an error under a required
-  app policy or a policy that lists `required_permissions_deny` or `required_hooks` at block (P03,
-  P06): a demand that cannot be checked is not met, so a shallow checkout or `pr-number` mode fails
-  the step there. In `pr-number` mode the test text is never available, so block fails there when a
+  app policy or a policy that sets one of the lists `forbidden_permissions`, `required_permissions_deny`,
+  `allowed_mcp_servers`, `forbidden_mcp_servers` or `required_hooks` with its rule (P02 to P06) at
+  block: a demand that cannot be checked is not met, so a shallow checkout or `pr-number` mode fails
+  the step there, and the message says to check out with `fetch-depth: 0`. P02's fixed checks
+  (`defaultMode`, `additionalDirectories`) need no list and do not make it an error on their own. In `pr-number` mode the test text is never available, so block fails there when a
   test file or a test-runner config is modified; use `test-integrity: warn` for that flow.
 - **`fail-on-verdict: false` makes the step report, not gate.** As its old name `fail-on-threshold` did not say,
   it covers every cause of a `fail` verdict: diff coverage, test-integrity blocks and org policy violations and
@@ -1021,6 +1026,9 @@ for ten shapes of secret by prefix and position. It is a heuristic, not a secret
 - **Shapes, not provider checks.** A key is recognized by its prefix and length, or by a secret-named key with a long,
   high-entropy value. Nothing asks the provider whether a key is live (no network call), so a revoked or made-up key is
   reported, and a key of a provider or format not in the ten shapes is missed.
+- **A token's body is matched 512 characters at a time.** The prefixed shapes (S01, S02, S03, S06, S07) read at most
+  512 characters after the prefix in one match, so a long line costs linear time. A match that reaches 512 is read on
+  to the end of its run, so a longer token is still one span, reported and redacted whole.
 - **Low-entropy passwords are missed.** S10 needs 20 characters and 3.5 bits of entropy per character; `hunter2` is
   not reported by S10 (S11 may name it when the file also loads other secrets from the environment).
 - **Encoded or split values are missed.** A base64-wrapped value, a secret split across two strings or lines, a value
@@ -1110,6 +1118,12 @@ a text filter for content aimed at the next agent, not a judgement of what a tex
   outside emoji, U+2028 and U+2029, and other default-ignorable code points are not on PI01's list. ZWJ and ZWNJ pass
   between two letters or marks of any non-Latin script and between emoji parts, so one hidden there is missed;
   directional marks pass on any line that holds a right-to-left letter.
+- **Subdivision flags pass.** Tag characters (U+E0000 to U+E007F) are skipped in one shape only: the waving black flag
+  U+1F3F4, then 3 to 6 tag lower-case letters (U+E0061 to U+E007A) or tag digits (U+E0030 to U+E0039), then the cancel
+  tag U+E007F. That covers the England (`gbeng`), Scotland (`gbsct`) and Wales (`gbwls`) flags and any other id of that
+  shape (`usca`), so up to six hidden letters or digits per flag are missed; each such sequence shows as a flag. Any
+  other run after the flag is flagged: longer or shorter, with a tag space, capital, punctuation or control tag, or with
+  no cancel tag. A seven-character subdivision id (a three-digit region code and a four-character suffix) is flagged.
 - **Images, binaries and generated files.** Text inside an image, a PDF, an archive, a notebook's output or a file the
   diff shows as binary is not read.
 - **Hidden Markdown is a short list.** PI02 reads HTML comments, reference definitions and quoted link titles. Image alt
@@ -1121,6 +1135,10 @@ a text filter for content aimed at the next agent, not a judgement of what a tex
 - **Vendored directories by name.** PI05 knows six directory names and the inventory's instruction kinds; an
   instruction file under another vendoring layout (`external/`, `deps/`, a git submodule) is not flagged, and a modified
   one in a vendored directory is not either (only added or renamed-in files).
+- **Only the last 8 segments below a vendored directory.** PI05 classifies at most the last 8 path segments under the
+  last vendored directory, so a path of thousands of segments is read in linear time. An instruction file whose kind
+  needs more of the path is missed: `node_modules/x/.cursor/rules/a/b/c/d/e/f/r.mdc` (9 segments from `.cursor`) is
+  not flagged, while `node_modules/x/CLAUDE.md` at any depth is.
 - **Caps.** The scan keeps the first 50,000 added lines of a file and 8,000,000 characters of added text across the
   diff, in diff order: a file past either cap is named in `INJECTION_TEXT_TRUNCATED` (`warn`) and a finding past the
   cut is not seen. At most 20 findings per signal and file and 200 in all are listed; the messages count the rest.

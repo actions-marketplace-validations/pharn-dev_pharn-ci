@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { MAX_VENDORED_TAIL_SEGMENTS, vendoredInstruction } from "../src/injection/paths.js";
 import { DEFAULT_INJECTION_SEVERITIES, injectionSettingsOf } from "../src/injection/policy.js";
 import {
   detectInjection,
@@ -64,6 +65,27 @@ describe("PI01: invisible and bidirectional Unicode", () => {
     expect(findings("emoji-zwj.diff.txt")).toEqual([]);
   });
 
+  it("flags tag characters after a flag unless they are a well-formed subdivision flag (CORE-41)", () => {
+    const list = findings("pi01-flag-trigger.diff.txt");
+    expect(list).toEqual([
+      // 40 tag characters spelling a sentence, then the cancel tag: 41 tag characters flagged.
+      { id: "PI01", path: "AGENTS.md", line: 3, detail: "tag character U+E0000-U+E007F and 40 more" },
+      { id: "PI01", path: "docs/flags.md", line: 1, detail: "tag character U+E0000-U+E007F and 7 more" },
+      { id: "PI01", path: "docs/flags.md", line: 2, detail: "tag character U+E0000-U+E007F and 6 more" },
+      { id: "PI01", path: "docs/flags.md", line: 3, detail: "tag character U+E0000-U+E007F and 5 more" },
+      { id: "PI01", path: "docs/flags.md", line: 4, detail: "tag character U+E0000-U+E007F and 2 more" },
+      { id: "PI01", path: "docs/flags.md", line: 5, detail: "tag character U+E0000-U+E007F and 4 more" },
+      { id: "PI01", path: "docs/flags.md", line: 6, detail: "tag character U+E0000-U+E007F and 1 more" },
+    ]);
+    expectFixedDetails(list);
+    // No detail carries a tag character or the flag.
+    for (const finding of list) expect(finding.detail).not.toMatch(/[\u{E0000}-\u{E007F}\u{1F3F4}]/u);
+  });
+
+  it("accepts the England, Scotland and Wales flags and other 3 to 6 character subdivision flags (CORE-41)", () => {
+    expect(findings("pi01-flag-clean.diff.txt")).toEqual([]);
+  });
+
   it("accepts the directional marks and soft hyphens of locale files, but not an override there", () => {
     expect(findings("locale.diff.txt")).toEqual([
       { id: "PI01", path: "app/locales/de.json", line: 3, detail: "right-to-left override U+202E" },
@@ -88,6 +110,17 @@ describe("PI02: hidden Markdown that addresses an agent", () => {
 
   it("leaves ordinary comments, link titles, visible text and non-Markdown files alone", () => {
     expect(findings("pi02-clean.diff.txt")).toEqual([]);
+  });
+
+  it("reads a title nested in a link, a second link's title and an unclosed link's title (CORE-43)", () => {
+    // The search goes on past each link's `)` (linear time); a nested `](` ends at the same `)`, so no title is lost.
+    const list = findings("pi02-links.diff.txt");
+    expect(list).toEqual([
+      { id: "PI02", path: "docs/links.md", line: 1, detail: "phrase PH01 in a link title" },
+      { id: "PI02", path: "docs/links.md", line: 2, detail: "phrase PH03 in a link title" },
+      { id: "PI02", path: "docs/links.md", line: 3, detail: "phrase PH02 in a link title" },
+    ]);
+    expectFixedDetails(list);
   });
 
   it("does not carry an open comment across a gap in the line numbers", () => {
@@ -193,6 +226,23 @@ describe("PI05: instruction files added inside vendored code", () => {
 
   it("leaves modified, deleted and non-instruction vendored files and look-alike directories alone", () => {
     expect(findings("pi05-clean.diff.txt")).toEqual([]);
+  });
+
+  it("classifies at most the last 8 segments below the vendored directory (CORE-43)", () => {
+    expect(MAX_VENDORED_TAIL_SEGMENTS).toBe(8);
+    const below = (depth: number, tail: string) => `node_modules/${"d/".repeat(depth)}${tail}`;
+    // A Cursor rules file whose `.cursor` is the 8th segment from the end is found; one level deeper it is not.
+    const rules = ".cursor/rules/a/b/c/d/e/x.mdc";
+    expect(rules.split("/").length).toBe(8);
+    expect(vendoredInstruction(below(3, rules))).toEqual({ dir: "node_modules", kind: "cursor-rules" });
+    expect(vendoredInstruction(below(3, ".cursor/rules/a/b/c/d/e/f/x.mdc"))).toBeNull();
+    expect(vendoredInstruction(`node_modules/${rules}`)).toEqual({ dir: "node_modules", kind: "cursor-rules" });
+    // A 5,000-segment path below node_modules/ still gives its instruction file, as a finding of the scan.
+    const deep = below(4_998, "CLAUDE.md");
+    expect(deep.split("/").length).toBe(5_000);
+    expect(vendoredInstruction(deep)).toEqual({ dir: "node_modules", kind: "claude-md" });
+    const scanned = scanInjection(parseForInjection(addedFileDiff(deep, ["# Notes"]))).findings;
+    expect(scanned).toEqual([{ id: "PI05", path: deep, line: null, detail: "claude-md file under node_modules/" }]);
   });
 });
 

@@ -25997,6 +25997,11 @@ function hasUnsafeChar(text) {
 function replaceUnsafeChars(text, replacement) {
   return text.replace(UNSAFE_PATTERN, replacement);
 }
+function escapeLogLine(text) {
+  const line = replaceUnsafeChars(text, "\uFFFD").replaceAll("##[", "##\\[");
+  const lead = line.length - line.trimStart().length;
+  return line.startsWith("::", lead) ? `${line.slice(0, lead)}\\${line.slice(lead)}` : line;
+}
 function byCodeUnit(a, b) {
   return a < b ? -1 : a > b ? 1 : 0;
 }
@@ -26854,7 +26859,7 @@ function formatNumber(n) {
 // ../core/src/acceptLabel.ts
 var DEFAULT_ACCEPT_LABEL = "pharn/accepted";
 var MAX_ACCEPT_LABEL_LENGTH = 50;
-var GITHUB_LOGIN = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}$/;
+var GITHUB_LOGIN = /^(?:[A-Za-z0-9][A-Za-z0-9-]{0,38}|(?=[A-Za-z0-9_-]{1,39}$)[A-Za-z0-9][A-Za-z0-9-]*_[A-Za-z0-9]{3,8})$/;
 var INVALID_LABEL = "the accept-label input must be at most 50 characters and must not contain control or invisible formatting characters";
 function validateAcceptLabel(raw) {
   const label = raw.trim();
@@ -26993,7 +26998,7 @@ var MAX_CO_AUTHORS = 20;
 var MAX_META_LABELS = 100;
 var MAX_META_LABEL_CODE_POINTS = 50;
 var TRAILER_PREFIX = "co-authored-by:";
-var LOGIN_PATTERN = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}(\[bot\])?$/;
+var LOGIN_PATTERN = /^(?:[A-Za-z0-9][A-Za-z0-9-]{0,38}(\[bot\])?|(?=[A-Za-z0-9_-]{1,39}$)[A-Za-z0-9][A-Za-z0-9-]*_[A-Za-z0-9]{3,8})$/;
 var NOREPLY_PATTERN = /^(?:[0-9]+\+)?([^@+]+)@users\.noreply\.github\.com$/i;
 function isSpaceUnit(c) {
   return c <= 32 || c === 127 || c === 160 || c === 5760 || c >= 8192 && c <= 8202 || c === 8232 || c === 8233 || c === 8239 || c === 8287 || c === 12288 || c === 65279;
@@ -27702,11 +27707,18 @@ function validateCoverageFile(value) {
   }
   return one(value);
 }
+var MAX_EXCLUDE_PATTERN_CHARS = 1024;
+var QUOTED_PATTERN_CHARS = 40;
 function parseExcludePattern(pattern, label = "exclude pattern") {
   let start = 0;
   const trimmed = pattern.trim();
   while (trimmed.startsWith("./", start)) start += 2;
   const p = trimmed.slice(start);
+  if (p.length > MAX_EXCLUDE_PATTERN_CHARS) {
+    throw new ConfigError(
+      `${label} "${p.slice(0, QUOTED_PATTERN_CHARS)}..." is ${p.length} characters long; the limit is ${MAX_EXCLUDE_PATTERN_CHARS} characters`
+    );
+  }
   const reject = (reason) => {
     throw new ConfigError(`${label} "${pattern}" ${reason}`);
   };
@@ -30732,6 +30744,7 @@ function instructionKindOf(path) {
   const kind = classifySetupPath(path);
   return kind !== null && INSTRUCTION_KIND_SET2.has(kind) ? kind : null;
 }
+var MAX_VENDORED_TAIL_SEGMENTS = 8;
 function vendoredInstruction(path) {
   const segments = path.split("/");
   let last = -1;
@@ -30739,7 +30752,7 @@ function vendoredInstruction(path) {
     if (VENDORED_DIRS.includes(segments[i])) last = i;
   }
   if (last === -1) return null;
-  const rest = segments.slice(last + 1);
+  const rest = segments.slice(Math.max(last + 1, segments.length - MAX_VENDORED_TAIL_SEGMENTS));
   for (let start = 0; start < rest.length; start++) {
     const kind = instructionKindOf(rest.slice(start).join("/"));
     if (kind !== null) return { dir: segments[last], kind };
@@ -30907,6 +30920,11 @@ var TAG_FIRST = 917504;
 var TAG_LAST = 917631;
 var TAG_CANCEL = 917631;
 var WAVING_BLACK_FLAG = 127988;
+var SUBDIVISION_MIN = 3;
+var SUBDIVISION_MAX = 6;
+function isSubdivisionTag(cp) {
+  return cp !== void 0 && (cp >= 917601 && cp <= 917626 || cp >= 917552 && cp <= 917561);
+}
 var LETTER = new RegExp("^\\p{L}$", "u");
 var LETTER_OR_MARK = /^[\p{L}\p{M}]$/u;
 var LATIN = new RegExp("^\\p{Script=Latin}$", "u");
@@ -30957,8 +30975,8 @@ function scanInvisible(text, options) {
     const cp = cps[i];
     if (cp === WAVING_BLACK_FLAG) {
       let j = i + 1;
-      while (j < cps.length && cps[j] >= 917536 && cps[j] <= 917630) j++;
-      if (j > i + 1 && cps[j] === TAG_CANCEL) i = j;
+      while (j < cps.length && j - i <= SUBDIVISION_MAX && isSubdivisionTag(cps[j])) j++;
+      if (j - i - 1 >= SUBDIVISION_MIN && cps[j] === TAG_CANCEL) i = j;
       continue;
     }
     if (cp >= TAG_FIRST && cp <= TAG_LAST) {
@@ -30996,18 +31014,17 @@ function isReferenceDefinition(text) {
 }
 function linkTitles(text) {
   const titles = [];
-  for (let at = text.indexOf("]("); at !== -1; at = text.indexOf("](", at + 2)) {
+  for (let at = text.indexOf("]("); at !== -1; ) {
     const end = text.indexOf(")", at + 2);
-    const inner = end === -1 ? text.slice(at + 2) : text.slice(at + 2, end);
-    let quote = -1;
-    for (let i = 0; i < inner.length; i++) {
-      if (inner[i] === '"' || inner[i] === "'") {
-        quote = i;
+    const stop = end === -1 ? text.length : end;
+    for (let i = at + 2; i < stop; i++) {
+      if (text[i] === '"' || text[i] === "'") {
+        titles.push(text.slice(i + 1, stop));
         break;
       }
     }
-    if (quote !== -1) titles.push(inner.slice(quote + 1));
     if (end === -1) break;
+    at = text.indexOf("](", end + 1);
   }
   return titles;
 }
@@ -33604,6 +33621,7 @@ function reportedProblems(problems, setup2, inForce) {
 var MAX_RULE_VIOLATIONS = 50;
 var SETTINGS_READERS = ["P02", "P03", "P04", "P05", "P06"];
 var SETTINGS_RULES = SETTINGS_READERS;
+var SEVERITY_RANK = { block: 0, warn: 1, info: 2 };
 function evaluatePolicyRules(input) {
   const { policy } = input;
   const document2 = policy.document;
@@ -33644,20 +33662,26 @@ function evaluatePolicyRules(input) {
   const supplying = /* @__PURE__ */ new Set();
   const sources = input.settingsSources;
   if (inForce && sources !== void 0) {
+    const setup2 = document2.setup;
+    const listed2 = {
+      P02: (setup2?.forbidden_permissions?.length ?? 0) > 0,
+      P03: (setup2?.required_permissions_deny?.length ?? 0) > 0,
+      P04: (setup2?.allowed_mcp_servers?.length ?? 0) > 0,
+      P05: (setup2?.forbidden_mcp_servers?.length ?? 0) > 0,
+      P06: (setup2?.required_hooks?.length ?? 0) > 0
+    };
     if ("unavailable" in sources) {
-      const setup2 = document2.setup;
-      const demands = (id, listed2) => listed2 && resolveSeverity(policy, id, "block").severity === "block";
-      const required = policy.source === "app" && document2.policy?.required === true || demands("P03", (setup2?.required_permissions_deny?.length ?? 0) > 0) || demands("P06", (setup2?.required_hooks?.length ?? 0) > 0);
+      const required = policy.source === "app" && document2.policy?.required === true || SETTINGS_READERS.some((id) => listed2[id] && resolveSeverity(policy, id, "block").severity === "block");
       settings2 = { unavailable: { reason: sources.unavailable, level: required ? "error" : "warn" }, problems: [] };
     } else {
-      const setup2 = document2.setup;
-      const on = (id, listed2) => listed2 && resolveSeverity(policy, id, "block").severity !== null;
+      const on = (id, listed3) => listed3 && resolveSeverity(policy, id, "block").severity !== null;
       const active = {
+        // P02 also runs with no list: its fixed checks of defaultMode and additionalDirectories need none.
         P02: on("P02", true),
-        P03: on("P03", (setup2?.required_permissions_deny?.length ?? 0) > 0),
-        P04: on("P04", (setup2?.allowed_mcp_servers?.length ?? 0) > 0),
-        P05: on("P05", (setup2?.forbidden_mcp_servers?.length ?? 0) > 0),
-        P06: on("P06", (setup2?.required_hooks?.length ?? 0) > 0)
+        P03: on("P03", listed2.P03),
+        P04: on("P04", listed2.P04),
+        P05: on("P05", listed2.P05),
+        P06: on("P06", listed2.P06)
       };
       const model = readSettingsModel(sources, document2);
       const over = compareUnits(model, setup2, { p02: active.P02, p03: active.P03, p05: active.P05 }) > COMPARE_BUDGET;
@@ -33707,7 +33731,7 @@ function evaluatePolicyRules(input) {
   }
   let violations = [...first, ...resolve2(detectP09(input, view))];
   violations.sort(
-    (a, b) => byCodeUnit(a.id, b.id) || (a.path === b.path ? 0 : a.path === null ? -1 : b.path === null ? 1 : byCodeUnit(a.path, b.path)) || (a.line === b.line ? 0 : a.line === null ? -1 : b.line === null ? 1 : a.line - b.line) || byCodeUnit(a.detail, b.detail)
+    (a, b) => byCodeUnit(a.id, b.id) || SEVERITY_RANK[a.severity] - SEVERITY_RANK[b.severity] || (a.path === b.path ? 0 : a.path === null ? -1 : b.path === null ? 1 : byCodeUnit(a.path, b.path)) || (a.line === b.line ? 0 : a.line === null ? -1 : b.line === null ? 1 : a.line - b.line) || byCodeUnit(a.detail, b.detail)
   );
   const omitted = {};
   const seen = /* @__PURE__ */ new Map();
@@ -33897,13 +33921,14 @@ var RULE_MESSAGES = {
     return sentences.join(" ");
   }
 };
+var SETTINGS_UNREAD_FIX = "Run the check on a checkout of the pull request head with full history (`actions/checkout` with `fetch-depth: 0`) so they can be read.";
 function settingsInvalidMessage(settings2) {
   if (settings2.unavailable !== null) {
     return {
       level: settings2.unavailable.level,
       code: "POLICY_SETTINGS_INVALID",
       // The reason can carry git text: control, invisible and bidirectional characters become spaces (see text.ts).
-      text: `The agent settings files were not read (${replaceUnsafeChars(settings2.unavailable.reason, " ")}), so P02\u2013P06 did not run.`
+      text: `The agent settings files were not read (${replaceUnsafeChars(settings2.unavailable.reason, " ")}), so P02\u2013P06 did not run. ${SETTINGS_UNREAD_FIX}`
     };
   }
   if (settings2.problems.length === 0) return null;
@@ -34152,16 +34177,42 @@ function prefixed(text, source, accept) {
   }
   return found;
 }
-var findS01 = (text) => prefixed(text, /gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{50,}/);
-var findS02 = (text) => prefixed(text, /sk-ant-[A-Za-z0-9_-]{20,}/);
+var MAX_TOKEN_BODY_CHARS = 512;
+function prefixedToken(text, prefix, cls, min, accept) {
+  const re = new RegExp(`${prefix}${cls}{${min},${MAX_TOKEN_BODY_CHARS}}`, "g");
+  const tail = new RegExp(`${cls}*`, "y");
+  const found = [];
+  for (let m = re.exec(text); m !== null; m = re.exec(text)) {
+    const start = m.index;
+    if (start > 0 && isKeyCharCode(text.charCodeAt(start - 1))) {
+      re.lastIndex = start + 1;
+      continue;
+    }
+    tail.lastIndex = start + m[0].length;
+    const end = tail.lastIndex + (tail.exec(text)?.[0].length ?? 0);
+    if (accept !== void 0 && !accept(text.slice(start, end))) {
+      re.lastIndex = start + 1;
+      continue;
+    }
+    found.push([start, end]);
+    re.lastIndex = end;
+  }
+  return found;
+}
+var byStart = (a, b) => a[0] - b[0];
+var findS01 = (text) => [
+  ...prefixedToken(text, "gh[pousr]_", "[A-Za-z0-9]", 36),
+  ...prefixedToken(text, "github_pat_", "[A-Za-z0-9_]", 50)
+].sort(byStart);
+var findS02 = (text) => prefixedToken(text, "sk-ant-", "[A-Za-z0-9_-]", 20);
 var findS03 = (text) => [
-  ...prefixed(text, /sk-proj-[A-Za-z0-9_-]{20,}/),
-  ...prefixed(text, /sk-[A-Za-z0-9_-]{40,}/, (match) => /[0-9]/.test(match))
-].sort((a, b) => a[0] - b[0]);
+  ...prefixedToken(text, "sk-proj-", "[A-Za-z0-9_-]", 20),
+  ...prefixedToken(text, "sk-", "[A-Za-z0-9_-]", 40, (match) => /[0-9]/.test(match))
+].sort(byStart);
 var findS04 = (text) => prefixed(text, /AIza[A-Za-z0-9_-]{35}(?![A-Za-z0-9_-])/);
 var findS05 = (text) => prefixed(text, /A[KS]IA[A-Z0-9]{16}(?![A-Za-z0-9])/, (match) => !match.endsWith("EXAMPLE"));
-var findS06 = (text) => prefixed(text, /xox[baprs]-[A-Za-z0-9-]{10,}/);
-var findS07 = (text) => prefixed(text, /[sr]k_live_[A-Za-z0-9]{16,}/);
+var findS06 = (text) => prefixedToken(text, "xox[baprs]-", "[A-Za-z0-9-]", 10);
+var findS07 = (text) => prefixedToken(text, "[sr]k_live_", "[A-Za-z0-9]", 16);
 var PRIVATE_KEY_BEGIN = /-----BEGIN (?:(?:RSA|EC|DSA|OPENSSH|ENCRYPTED|PGP) )?PRIVATE KEY(?: BLOCK)?-----/g;
 var PRIVATE_KEY_END = /-----END (?:[A-Z]+ )?PRIVATE KEY(?: BLOCK)?-----/g;
 function findS08(text) {
@@ -42693,6 +42744,13 @@ function check(input) {
     ...junit?.flaky === void 0 ? {} : { flaky: junit.flaky },
     ...junit === null || junit.messages.length === 0 ? {} : { flakyMessages: junit.messages }
   };
+  if ("unavailable" in input.diff) {
+    return buildReport({
+      ...base,
+      diffCoverage: null,
+      missing: { reason: "diff-unavailable", detail: input.diff.unavailable }
+    });
+  }
   if ("kind" in coverageInput) {
     return buildReport({ ...base, diffCoverage: null, missing: { reason: "coverage-not-discovered" } });
   }
@@ -42704,13 +42762,6 @@ function check(input) {
         missing: { reason: "coverage-file-missing", coverageFile: file.missingFile }
       });
     }
-  }
-  if ("unavailable" in input.diff) {
-    return buildReport({
-      ...base,
-      diffCoverage: null,
-      missing: { reason: "diff-unavailable", detail: input.diff.unavailable }
-    });
   }
   const maps = [];
   const formats = /* @__PURE__ */ new Set();
@@ -43225,8 +43276,11 @@ var POLICY_PATTERNS = {
   ROOT: String.raw`^(?!\s)(?![\s\S]*\s$)(?![/-])(?![A-Za-z]:)(?!\./)(?![\s\S]*/$)(?![\s\S]*//)(?!(?:[\s\S]*/)?\.\.(?:/|$))[^\u0000-\u001F\u007F\\]*$`,
   /** `Tool` or `Tool(pattern)`. */
   PERM: String.raw`^(?![\s\S]*[\u0000-\u001F\u007F])[A-Za-z][A-Za-z0-9_-]*(\(.+\))?$`,
-  /** A GitHub login, optionally followed by `[bot]`. */
-  LOGIN: String.raw`^[A-Za-z0-9][A-Za-z0-9-]{0,38}(\[bot\])?$`,
+  /**
+   * A GitHub login, optionally followed by `[bot]`, or an Enterprise Managed User login `handle_shortcode` of at most
+   * 39 characters (the same regex as `LOGIN_PATTERN` in agents.ts, which documents the two forms).
+   */
+  LOGIN: String.raw`^(?:[A-Za-z0-9][A-Za-z0-9-]{0,38}(\[bot\])?|(?=[A-Za-z0-9_-]{1,39}$)[A-Za-z0-9][A-Za-z0-9-]*_[A-Za-z0-9]{3,8})$`,
   /** A hook event name. */
   EVENT: "^[A-Za-z]+$",
   /** A registry host name: ASCII letters, digits, `.` and `-`. */
@@ -44323,9 +44377,9 @@ function signalHint(id, label) {
 }
 var MAX_FINDINGS = 20;
 var OPEN_FINDINGS = 10;
-var SEVERITY_RANK = { block: 0, warn: 1, info: 2 };
+var SEVERITY_RANK2 = { block: 0, warn: 1, info: 2 };
 function bySeverity(signals) {
-  const rank = (s) => SEVERITY_RANK[s.severity] ?? 3;
+  const rank = (s) => SEVERITY_RANK2[s.severity] ?? 3;
   return signals.map((signal2, index) => ({ signal: signal2, index })).sort((a, b) => rank(a.signal) - rank(b.signal) || a.index - b.index).map(({ signal: signal2 }) => signal2);
 }
 function listedSignals(report) {
@@ -44333,12 +44387,18 @@ function listedSignals(report) {
 }
 var SIGNAL_MESSAGE_CODE = /^TEST_INTEGRITY_TI\d\d$/;
 var SEVERITY_ICON = { block: LEVEL_ICON.error, warn: LEVEL_ICON.warn, info: LEVEL_ICON.info };
+var DIFF_NOT_CHECKED = "Not checked: the diff is unavailable";
+function diffUnavailable(report) {
+  return report.messages.some((m) => m.code === "DIFF_UNAVAILABLE");
+}
 function testIntegrityLines(report) {
   const { mode, signals } = report.testIntegrity;
   const label = acceptLabelOf(report);
   const lines = [];
   if (signals.length === 0) {
-    lines.push(mode === "off" ? "Test integrity is off for this run." : `No test-integrity findings (mode: ${mode}).`);
+    lines.push(
+      mode === "off" ? "Test integrity is off for this run." : diffUnavailable(report) ? `${DIFF_NOT_CHECKED}.` : `No test-integrity findings (mode: ${mode}).`
+    );
   } else {
     const listed2 = listedSignals(report);
     const findingLines = (signal2) => {
@@ -44857,7 +44917,7 @@ function countOf(n, one, many) {
 function integrityCell(report) {
   const { mode, signals } = report.testIntegrity;
   if (mode === "off") return "off";
-  if (signals.length === 0) return `none (${mode})`;
+  if (signals.length === 0) return diffUnavailable(report) ? DIFF_NOT_CHECKED : `none (${mode})`;
   const blocking = signals.filter((s) => s.severity === "block").length;
   const icon = blocking > 0 ? LEVEL_ICON.error : signals.some((s) => s.severity === "warn") ? LEVEL_ICON.warn : LEVEL_ICON.info;
   return `${icon} ${countOf(signals.length, "finding", "findings")}${blocking > 0 ? `, ${blocking} blocking` : ""}`;
@@ -45586,7 +45646,7 @@ function buildUploadTar(entries) {
 }
 
 // ../core/src/version.ts
-var VERSION7 = "0.10.0";
+var VERSION7 = "0.11.0";
 
 // ../node-io/src/gitBlobs.ts
 var OBJECT_ID = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
@@ -47035,9 +47095,11 @@ function applyRequestPolicy(octokit, opts = {}) {
   });
 }
 function withRequestPolicy(build, opts = {}) {
+  const log = opts.log;
+  const policy = log === void 0 ? opts : { ...opts, log: (message) => log(escapeLogLine(message)) };
   return (token) => {
     const octokit = build(token);
-    applyRequestPolicy(octokit, opts);
+    applyRequestPolicy(octokit, policy);
     return octokit;
   };
 }
@@ -47331,7 +47393,7 @@ function parsePolicyInput(value) {
 }
 
 // src/policy-fetch.ts
-var REPOSITORY = /^[A-Za-z0-9-]{1,39}\/[A-Za-z0-9._-]{1,100}$/;
+var REPOSITORY = /^(?:[A-Za-z0-9-]{1,39}|(?=[A-Za-z0-9_-]{1,39}\/)[A-Za-z0-9][A-Za-z0-9-]*_[A-Za-z0-9]{3,8})\/[A-Za-z0-9._-]{1,100}$/;
 var JSON_CONTENT_TYPE = /^application\/json\s*(?:;|$)/i;
 async function fetchAppPolicy(deps, options) {
   let settings2;
@@ -47921,7 +47983,8 @@ var TRUNCATED_NOTE = "\n\n_Truncated: the full report is in the job summary and 
 var MAX_SUMMARY_BYTES = 1e6;
 var SUMMARY_TRUNCATED_NOTE = "\n\n_Truncated: the full report is in report.json._\n";
 var FALLBACK_ROWS = [25, 12, 6, 3, 1, 0];
-async function run(deps) {
+async function run(actionDeps) {
+  const deps = { ...actionDeps, info: (message) => actionDeps.info(escapeLogLine(message)) };
   try {
     return await runUnsafe(deps);
   } catch (err) {

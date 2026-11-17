@@ -9,6 +9,14 @@ Releases are cut by a maintainer; see [`docs/RELEASING.md`](./docs/RELEASING.md)
 
 ### Added
 
+### Changed
+
+### Security
+
+## [0.11.0] - 2026-11-17
+
+### Added
+
 - Test-integrity signal TI17, an assertion that always passes, and its message code `TEST_INTEGRITY_TI17`. In a JS/TS
   or Python test file it reads the added lines of the diff alone (no test source, no Python index) for three forms: a
   call to a custom matcher added to `expect` whose every `pass` is the constant true, an `assert` or
@@ -23,8 +31,52 @@ Releases are cut by a maintainer; see [`docs/RELEASING.md`](./docs/RELEASING.md)
 - A pull request that adds an assertion which always passes can now go from `pass` to `warn`. Report consumers see the
   new signal id `TI17` in `schema/report.v2.json` (the signal id pattern and the known message codes) and org policies
   can set the new `TI17` key in `schema/policy.v1.json`; both are additive within their versions.
+- Fixed: Enterprise Managed User logins (`handle_shortcode`, such as `mona-lisa_acme`) are valid logins. Before, a pull
+  request by such a user read as an unknown author and so counted as an agent PR (P11, P13 and P14 applied to it), the
+  accept label applied by such a reviewer was never honoured, a policy that listed such a login in
+  `agents.extra_logins` was invalid, and a policy request for a repository an EMU user owns stopped with
+  `no-repository`. The form is GitHub's: the handle, one `_` and a shortcode of 3 to 8 letters or digits, at most 39
+  characters, never with `[bot]`. The `login` pattern of `schema/policy.v1.json` accepts it (additive, still v1).
+- An exclusion glob longer than 1,024 characters (`coverage.exclude`, `--exclude`, the Action's `exclude` input, a
+  coverage-file glob or a `--junit` glob) is now a config error that names the limit: a config, flag or input with a
+  longer pattern, which was accepted before, now fails the run (exit 2 on the CLI) (`docs/LIMITS.md`).
+- An unavailable diff is always reported. A run with no diff and a missing or undiscovered coverage file now names the
+  diff first (`DIFF_UNAVAILABLE`, an error in `test-integrity: block` or under a threshold), so block no longer passes a
+  change nothing was checked against; the coverage problem shows on the next run, once the diff is available. Whenever
+  the diff is unavailable, the comment's Test integrity section and summary cell say "Not checked: the diff is
+  unavailable" instead of "No test-integrity findings" and `none (<mode>)`.
 
 ### Security
+
+- The invisible-Unicode scan (PI01) no longer skips a hidden instruction written in tag characters after a flag emoji.
+  After U+1F3F4 it now skips only a well-formed subdivision flag, 3 to 6 tag lower-case letters or tag digits closed by
+  the cancel tag (England, Scotland, Wales, `usca`); before, any run of tag characters closed by the cancel tag was
+  skipped, whatever its length or content. Any other run is a PI01 finding (`block` by default), so a change that hid
+  text that way now fails the check (`docs/LIMITS.md`, "Subdivision flags pass").
+- The per-rule cap of 50 org-policy violations now keeps blocking violations first (block, then warn, then info, then
+  path, line and detail, the order the test-integrity cap already used). A pull request could add 50 decoy agent
+  settings files whose paths sort before the real one (`.a00/.claude/settings.json`), each giving a warning of the same
+  rule, and push a blocking P02 out of the kept set, so the run passed; the same trick turned a P09 block for an edit of
+  the `file:` policy into a warning. `policy.violations` now lists a rule's block violations before its warnings; the
+  counts of omitted violations are unchanged.
+- `POLICY_SETTINGS_INVALID` for agent settings files that were not read is now an error when the org policy sets
+  `forbidden_permissions` (P02), `allowed_mcp_servers` (P04) or `forbidden_mcp_servers` (P05) with that rule at block,
+  as it already was for `required_permissions_deny` (P03) and `required_hooks` (P06): a demand that cannot be checked is
+  not met. This makes a run stricter for a team that blocks on P02, P04 or P05 and checks out shallow (the
+  `actions/checkout` default) or uses `pr-number` mode: the step now fails, and the message, which now ends with how to
+  fix it, says to check out the pull request head with `fetch-depth: 0`. A policy with none of the five lists still
+  gets a warning.
+- A file name can no longer write a GitHub Actions workflow command into the job log. A tracked directory whose name
+  held a newline and `::stop-commands::<token>` (or `##[...]`, the older spelling) reached the log through coverage
+  auto-discovery, and could stop the runner from honouring the `::add-mask::` that hides the upload's OIDC token and
+  signed URL. The Action now writes every `core.info` message as one line, with control characters replaced by U+FFFD,
+  `##[` written `##\[` and a `\` before a leading `::`; the CLI escapes its stderr the same way
+  (`docs/THREAT-MODEL.md`, row B4).
+- One long line in a pull request no longer makes the prompt-injection scan or the agent-config secret scan run for
+  many seconds. PI02 reads link titles in linear time (one Markdown line of 120 KB took 24 s), the prefixed secret
+  shapes S01, S02, S03, S06 and S07 match at most 512 body characters at a time and read a longer token on to its end,
+  so findings and redaction are unchanged (a 127 KiB run of `xoxb-` took 3.2 s), and PI05 classifies at most the last
+  8 segments below a vendored directory (`docs/LIMITS.md`).
 
 ## [0.10.0] - 2026-11-09
 

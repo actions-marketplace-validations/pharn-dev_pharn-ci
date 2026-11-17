@@ -90,6 +90,22 @@ describe("existing tests, fixtures and goldens stay as they are", () => {
         ).toBe(git("show", `${BASE}:${unknownTi[1]}`));
         continue;
       }
+      // Re-pinned for CORE-44 (Enterprise Managed User logins): login-grammar.json listed octo_cat as an invalid login,
+      // which is now a valid EMU login, so it lists octo_ca (a 2-character shortcode); with octo_ca turned back into
+      // octo_cat it is its content at the base byte for byte. Its new fixtures under fixtures/emu-logins/, the valid
+      // policy fixture emu-logins.json and the invalid login-emu-grammar pair are added.
+      if (line === "M\tfixtures/policy/invalid/login-grammar.json") {
+        expect(read("fixtures/policy/invalid/login-grammar.json").replace('"octo_ca"', '"octo_cat"'), line).toBe(
+          git("show", `${BASE}:fixtures/policy/invalid/login-grammar.json`),
+        );
+        continue;
+      }
+      if (
+        /^A\tfixtures\/(?:emu-logins\/[^/]+|policy\/valid\/emu-logins\.json|policy\/invalid\/login-emu-grammar\.(?:json|paths))$/.test(
+          line,
+        )
+      )
+        continue;
       // Re-pinned for markdown-byte-compare (review SPEC finding 29): markdown.test.ts's two snapshots moved, unchanged,
       // into these two new committed files.
       if (/^A\tfixtures\/markdown\/(?:missing|no-coverable)\.md$/.test(line)) continue;
@@ -113,7 +129,8 @@ describe("existing tests, fixtures and goldens stay as they are", () => {
         // Re-pinned for H4 (prompt-injection scan): its fixtures under fixtures/injection/ are added too.
         // Re-pinned for flaky tests (A6): its new fixtures under fixtures/junit/ are added too.
         // Re-pinned for dependency safety (A13, v0.8.0): its fixtures under fixtures/dependencies/ are added too.
-        /^A\tfixtures\/junit\/[^/]+$|^A\tfixtures\/stale-instructions\/[^/]+$|^A\tfixtures\/(?:dependencies|exercise|injection)\/[^\t]+$|^A\tfixtures\/policy-rules\/(?:p07|p13|p14)\/[^/]+\/[^/]+$|^A\tfixtures\/policy-settings\/[^\t]+$|^A\tfixtures\/test-integrity\/TI03\/[^\t]+$|^A\tfixtures\/test-integrity\/TI17\/[^\t]+$|^A\tfixtures\/test-integrity\/(?:TI10\/(?:block-colon-only|block-true-only|block-true-or-run|pass-true-then-run)|TI14\/block-threshold-(?:emptied|lowered-nbsp-comment|padded-past-cap))\.diff$|^A\tfixtures\/test-integrity\/(?:TI01\/(?:block-test-mts-deleted|block-spec-cts-deleted)|TI04\/block-test-mts-it-only|TI13\/pass-test-mts-istanbul)\/[^\t]+$|^A\tfixtures\/test-integrity\/TI09\/(?:block-opaque-head|block-too-deep-head|pass-added-opaque-config|pass-opaque-base-and-head)\/[^\t]+$|^A\tfixtures\/test-integrity\/(?:index-unavailable\/(?:added-broken|added-parseable|added-python|added-six-broken|mixed|mixed-python)|TI01\/block-same-stem-(?:unparsed|dropped))\/[^\t]+$/,
+        // Re-pinned for CORE-39 (job-log escaping): its cases under fixtures/log-escape/ are added too.
+        /^A\tfixtures\/junit\/[^/]+$|^A\tfixtures\/stale-instructions\/[^/]+$|^A\tfixtures\/(?:dependencies|exercise|injection|log-escape)\/[^\t]+$|^A\tfixtures\/policy-rules\/(?:p07|p13|p14)\/[^/]+\/[^/]+$|^A\tfixtures\/policy-settings\/[^\t]+$|^A\tfixtures\/test-integrity\/TI03\/[^\t]+$|^A\tfixtures\/test-integrity\/TI17\/[^\t]+$|^A\tfixtures\/test-integrity\/(?:TI10\/(?:block-colon-only|block-true-only|block-true-or-run|pass-true-then-run)|TI14\/block-threshold-(?:emptied|lowered-nbsp-comment|padded-past-cap))\.diff$|^A\tfixtures\/test-integrity\/(?:TI01\/(?:block-test-mts-deleted|block-spec-cts-deleted)|TI04\/block-test-mts-it-only|TI13\/pass-test-mts-istanbul)\/[^\t]+$|^A\tfixtures\/test-integrity\/TI09\/(?:block-opaque-head|block-too-deep-head|pass-added-opaque-config|pass-opaque-base-and-head)\/[^\t]+$|^A\tfixtures\/test-integrity\/(?:index-unavailable\/(?:added-broken|added-parseable|added-python|added-six-broken|mixed|mixed-python)|TI01\/block-same-stem-(?:unparsed|dropped))\/[^\t]+$/,
       );
     }
     for (const path of nonEmpty(git("ls-files", "--others", "--exclude-standard", "--", "fixtures/"))) {
@@ -131,7 +148,8 @@ describe("existing tests, fixtures and goldens stay as they are", () => {
       expect(path, "a new fixture").toMatch(
         // Re-pinned for H4 (prompt-injection scan): its fixtures under fixtures/injection/ are untracked until committed.
         // Re-pinned for flaky tests (A6): its fixtures under fixtures/junit/ are untracked until committed.
-        /^fixtures\/junit\/[^/]+$|^fixtures\/stale-instructions\/[^/]+$|^fixtures\/(?:dependencies|exercise|injection)\/[^\t]+$|^fixtures\/policy-rules\/(?:p07|p13|p14)\/[^/]+\/[^/]+$|^fixtures\/test-integrity\/TI03\/[^\t]+$|^fixtures\/test-integrity\/TI17\/[^\t]+$|^fixtures\/test-integrity\/(?:TI10\/(?:block-colon-only|block-true-only|block-true-or-run|pass-true-then-run)|TI14\/block-threshold-(?:emptied|lowered-nbsp-comment|padded-past-cap))\.diff$|^fixtures\/policy-settings\/unparseable\/[^\t]+$|^fixtures\/test-integrity\/(?:TI01\/(?:block-test-mts-deleted|block-spec-cts-deleted)|TI04\/block-test-mts-it-only|TI13\/pass-test-mts-istanbul)\/[^\t]+$|^fixtures\/test-integrity\/TI09\/(?:block-opaque-head|block-too-deep-head|pass-added-opaque-config|pass-opaque-base-and-head)\/[^\t]+$|^fixtures\/test-integrity\/(?:index-unavailable\/(?:added-broken|added-parseable|added-python|added-six-broken|mixed|mixed-python)|TI01\/block-same-stem-(?:unparsed|dropped))\/[^\t]+$/,
+        // Re-pinned for CORE-39 (job-log escaping): so are its cases under fixtures/log-escape/.
+        /^fixtures\/junit\/[^/]+$|^fixtures\/stale-instructions\/[^/]+$|^fixtures\/(?:dependencies|exercise|injection|log-escape)\/[^\t]+$|^fixtures\/policy-rules\/(?:p07|p13|p14)\/[^/]+\/[^/]+$|^fixtures\/test-integrity\/TI03\/[^\t]+$|^fixtures\/test-integrity\/TI17\/[^\t]+$|^fixtures\/test-integrity\/(?:TI10\/(?:block-colon-only|block-true-only|block-true-or-run|pass-true-then-run)|TI14\/block-threshold-(?:emptied|lowered-nbsp-comment|padded-past-cap))\.diff$|^fixtures\/policy-settings\/unparseable\/[^\t]+$|^fixtures\/test-integrity\/(?:TI01\/(?:block-test-mts-deleted|block-spec-cts-deleted)|TI04\/block-test-mts-it-only|TI13\/pass-test-mts-istanbul)\/[^\t]+$|^fixtures\/test-integrity\/TI09\/(?:block-opaque-head|block-too-deep-head|pass-added-opaque-config|pass-opaque-base-and-head)\/[^\t]+$|^fixtures\/test-integrity\/(?:index-unavailable\/(?:added-broken|added-parseable|added-python|added-six-broken|mixed|mixed-python)|TI01\/block-same-stem-(?:unparsed|dropped))\/[^\t]+$/,
       );
     }
 

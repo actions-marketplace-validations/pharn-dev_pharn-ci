@@ -11,7 +11,7 @@ leans on most: tests that actually run the new code, and the setup files that te
 behave. AI-agnostic, no telemetry, and stateless unless you opt in to the upload to pharn.dev.
 
 ```yaml
-- uses: pharn-dev/pharn-ci@v0.10.0
+- uses: pharn-dev/pharn-ci@v0.11.0
   with:
     coverage-file: coverage/lcov.info
     threshold: 80
@@ -26,7 +26,7 @@ behave. AI-agnostic, no telemetry, and stateless unless you opt in to the upload
 
 </div>
 
-> **Status:** pre-1.0; the latest release is `v0.10.0` ([changelog](CHANGELOG.md)). Pin the tag's
+> **Status:** pre-1.0; the latest release is `v0.11.0` ([changelog](CHANGELOG.md)). Pin the tag's
 > full commit SHA for integrity. The report schema is stable within a version (v2 from 0.2.0). Before 1.0, inputs, outputs and message
 > codes are never removed, and a renamed input keeps working under its old name, with a warning, for
 > at least one minor release; defaults change only in a minor release and the changelog says so. The
@@ -177,7 +177,7 @@ jobs:
           fetch-depth: 0
       # ...set up your toolchain and run tests with lcov or Cobertura output, e.g.:
       - run: npx vitest run --coverage --coverage.reporter=lcov
-      - uses: pharn-dev/pharn-ci@v0.10.0 # or, better, the tag's full commit SHA
+      - uses: pharn-dev/pharn-ci@v0.11.0 # or, better, the tag's full commit SHA
         timeout-minutes: 5
         with:
           coverage-file: coverage/lcov.info
@@ -337,7 +337,7 @@ flowchart LR
 >
 > ---
 >
-> <sub>pharn-ci 0.10.0 · report schema v2 · coverage format lcov</sub>
+> <sub>pharn-ci 0.11.0 · report schema v2 · coverage format lcov</sub>
 
 On PRs from forks the token cannot comment; pharn-ci then warns and uses the job summary only.
 
@@ -954,7 +954,9 @@ check are unaffected, so a run below its threshold still fails.
   organization) and not the PR author, compared case-insensitively. Otherwise the label is ignored, the blocks stand,
   and `TEST_INTEGRITY_ACCEPT_IGNORED` (`warn`) says why: the author applied it, a non-user account applied it, no
   labeling event was found, or the pull request or its events could not be read. Anything the Action cannot read counts
-  as ignored.
+  as ignored. A login is read as GitHub spells it: a letter or digit, then up to 38 letters, digits or `-`, or an
+  Enterprise Managed User login `handle_shortcode` (such as `reviewer_acme`: the handle, one `_` and a shortcode of 3
+  to 8 letters or digits, at most 39 characters). An actor whose login is neither is unreadable.
 - **Where it is set.** Only the `accept-label` input in the workflow. `test_integrity.accept_label` in `.pharn/ci.yml`
   is refused with an error, because the change under review can edit that file.
 - **When it is looked at.** On `pull_request` runs and `pr-number` runs, in `test-integrity: block`, with at least one
@@ -995,7 +997,7 @@ jobs:
           persist-credentials: false
       # ...set up your toolchain and run tests with lcov or Cobertura output, e.g.:
       - run: npx vitest run --coverage --coverage.reporter=lcov
-      - uses: pharn-dev/pharn-ci@v0.10.0 # or, better, the tag's full commit SHA
+      - uses: pharn-dev/pharn-ci@v0.11.0 # or, better, the tag's full commit SHA
         with:
           coverage-file: coverage/lcov.info
           threshold: 80
@@ -1047,7 +1049,7 @@ jobs:
         env:
           PR_FILE: ${{ runner.temp }}/pharn-ci-input/pr-number
         run: echo "number=$(tr -dc '0-9' < "$PR_FILE" | head -c 10)" >> "$GITHUB_OUTPUT"
-      - uses: pharn-dev/pharn-ci@v0.10.0 # or, better, the tag's full commit SHA
+      - uses: pharn-dev/pharn-ci@v0.11.0 # or, better, the tag's full commit SHA
         with:
           coverage-file: ${{ runner.temp }}/pharn-ci-input/coverage/lcov.info
           pr-number: ${{ steps.pr.outputs.number }}
@@ -1285,7 +1287,7 @@ message `code`s, not on text:
 | `POLICY_P04` | An MCP server is not on the org policy's allowlist, or `enableAllProjectMcpServers` is set (`error`, or the level the policy sets for P04). The text names up to 20 locations and the count |
 | `POLICY_P05` | An MCP server matches an entry the org policy forbids, by name, command or URL (`error`, or the level the policy sets for P05). The text names up to 20 locations and the count |
 | `POLICY_P06` | A settings directory lacks a command hook the org policy requires, or `disableAllHooks` is set (`error`, or the level the policy sets for P06). The text names up to 20 locations and the count |
-| `POLICY_SETTINGS_INVALID` | P02 to P06 could not fully use an agent settings or MCP file, or did not run: the files were not read, a file was dropped, unparseable or has an entry the grammar does not know (`warn`; `error` for a file pharn-ci could not read, a problem a required list depends on, or settings not read at all under a required app policy or a policy that lists `required_permissions_deny` or `required_hooks` at block). The text names up to 20 problems as path, line and reason, never file text |
+| `POLICY_SETTINGS_INVALID` | P02 to P06 could not fully use an agent settings or MCP file, or did not run: the files were not read, a file was dropped, unparseable or has an entry the grammar does not know (`warn`; `error` for a file pharn-ci could not read, a problem a required list depends on, or settings not read at all under a required app policy or a policy that sets `forbidden_permissions`, `required_permissions_deny`, `allowed_mcp_servers`, `forbidden_mcp_servers` or `required_hooks` with its rule at block). The text names up to 20 problems as path, line and reason, never file text |
 | `POLICY_P14` | An agent pull request changes more files or lines than the org policy's `agents.max_files` or `agents.max_changed_lines` allow, not counting lockfiles, snapshots, `*.generated.*` files and `coverage.exclude` paths, or could not be checked because the diff, or the policy file at the merge base, could not be read (`error`, or the level the policy sets for P14). The text names the counts, the caps, up to 10 top-level directories and the evidence as fixed words, never file text |
 | `INJECTION_PI01` | An added line carries an invisible or bidirectional Unicode character ([Prompt-injection scan](#prompt-injection-scan)) (`error`, which fails the check; or the level an app policy sets). The text names up to 5 paths and lines; each signal names the character and its code point, never file text |
 | `INJECTION_PI02` | An HTML comment, reference definition or link title added to a Markdown or agent instruction file holds a phrase that addresses an agent (`warn`, or the level the policy sets). Each signal names the phrase id and the kind of hidden text |
@@ -1349,7 +1351,10 @@ counts as an agent PR (fail closed): an unknown author, commits that cannot be l
 `file:` policy that the pull request edits and that cannot be read at the merge base). Only trailers of known agents are
 recorded, as a hint and an address; a human co-author never is. A run with no pull request records `isAgentPr: false`,
 and the CLI does not set the field. The org policy's `agents.labels` and `agents.extra_logins` add to the defaults (for
-a `file:` policy that the pull request edits, the lists at the merge base and at head both count). Only the org policy
+a `file:` policy that the pull request edits, the lists at the merge base and at head both count). A login in
+`agents.extra_logins`, like the PR author's, is a GitHub login (a letter or digit, then up to 38 letters, digits or
+`-`), optionally followed by `[bot]`, or an Enterprise Managed User login `handle_shortcode` (such as `dev_acme`: one
+`_` and a shortcode of 3 to 8 letters or digits, at most 39 characters, never with `[bot]`). Only the org policy
 adds to the lists; `.pharn/ci.yml` and the inputs cannot change them. See
 [`docs/LIMITS.md`](docs/LIMITS.md) §9 and [`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md) (A5).
 
