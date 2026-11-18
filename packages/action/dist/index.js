@@ -26087,6 +26087,8 @@ var MAX_KEPT_LINES = 5e3;
 var MAX_KEPT_LINE_CHARS = 400;
 var MAX_ADDED_TEXT_LINES = 5e4;
 var MAX_ADDED_TEXT_CHARS = 8e6;
+var MAX_PRIORITY_ADDED_TEXT_CHARS = MAX_ADDED_TEXT_CHARS;
+var MAX_OTHER_ADDED_TEXT_CHARS = MAX_ADDED_TEXT_CHARS;
 var HUNK_HEADER = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
 function parseUnifiedDiff(text, options = {}) {
   return parseUnifiedDiffLines(text.split(/\r?\n/), options);
@@ -26100,7 +26102,8 @@ function createUnifiedDiffReader(options = {}) {
   const entries = [];
   const keepText = options.keepText;
   const keepAddedText = options.keepAddedText;
-  let addedBudget = MAX_ADDED_TEXT_CHARS;
+  const priorityAddedText = options.priorityAddedText;
+  const budget = { priority: MAX_PRIORITY_ADDED_TEXT_CHARS, other: MAX_OTHER_ADDED_TEXT_CHARS };
   let current;
   let oldRemaining = 0;
   let newRemaining = 0;
@@ -26121,6 +26124,7 @@ function createUnifiedDiffReader(options = {}) {
       keptLines: 0,
       truncated: false,
       keepAdded: void 0,
+      priority: false,
       addedText: [],
       addedCut: false
     };
@@ -26142,22 +26146,25 @@ function createUnifiedDiffReader(options = {}) {
     if (e.keepAdded === void 0) {
       const paths = pathsOf2(e);
       e.keepAdded = keepAddedText !== void 0 && paths !== null && keepAddedText(paths);
+      e.priority = e.keepAdded && priorityAddedText !== void 0 && paths !== null && priorityAddedText(paths);
     }
     return e.keepAdded;
   };
   const keepAddedLine = (e, line, text) => {
     if (e.addedCut) return;
-    if (e.addedText.length >= MAX_ADDED_TEXT_LINES || addedBudget <= 0) {
+    const which2 = e.priority ? "priority" : "other";
+    const left = budget[which2];
+    if (e.addedText.length >= MAX_ADDED_TEXT_LINES || left <= 0) {
       e.addedCut = true;
       return;
     }
-    if (text.length > addedBudget) {
+    if (text.length > left) {
       e.addedCut = true;
-      e.addedText.push({ line, text: cutCodeUnits(text, addedBudget, { marker: false }) });
-      addedBudget = 0;
+      e.addedText.push({ line, text: cutCodeUnits(text, left, { marker: false }) });
+      budget[which2] = 0;
       return;
     }
-    addedBudget -= text.length;
+    budget[which2] = left - text.length;
     e.addedText.push({ line, text });
   };
   const keepLine = (e, kind, line, text) => {
@@ -26638,15 +26645,23 @@ function buildReport(input) {
     });
   }
   if (input.trackedCoverageFile !== void 0) {
-    messages.push({
-      level: "warn",
-      code: "COVERAGE_FILE_TRACKED",
-      text: `The coverage file ${codeSpan(input.trackedCoverageFile)} is tracked in the repository, so the change under review can supply its own coverage numbers.`
-    });
+    const path = input.trackedCoverageFile;
+    const supplied = input.trackedCoverageChanged === true && input.threshold !== null;
+    messages.push(
+      supplied ? {
+        level: "error",
+        code: "COVERAGE_FILE_TRACKED",
+        text: `The coverage file ${codeSpan(path)} is tracked in the repository and this change adds or edits it, so the change supplies the coverage numbers its threshold is checked against. Remove the report from git (${codeSpan(`git rm --cached ${path}`)}) and let the test run write it.`
+      } : {
+        level: "warn",
+        code: "COVERAGE_FILE_TRACKED",
+        text: `The coverage file ${codeSpan(path)} is tracked in the repository, so the change under review can supply its own coverage numbers.`
+      }
+    );
   }
   if (input.binaryCoveredPaths !== void 0 && input.binaryCoveredPaths.length > 0) {
     messages.push({
-      level: "warn",
+      level: input.threshold === null ? "warn" : "error",
       code: "DIFF_BINARY_COVERED_FILE",
       text: `The diff shows ${pathList(input.binaryCoveredPaths)} as binary, so their added lines were not measured; check .gitattributes for -diff or binary on source files.`
     });
@@ -28035,6 +28050,58 @@ function coverageChoiceLine(choice, file) {
   return `${prefix}${choice.format} (${choice.how})`;
 }
 
+// ../core/src/coverage/match.ts
+var BACKSLASH_STAND_IN = "\0";
+function literalBackslashKey(raw, separated, resolve2) {
+  if (!raw.includes("\\") || raw.includes(BACKSLASH_STAND_IN)) return separated;
+  const literal2 = resolve2(raw.replace(/\\/g, BACKSLASH_STAND_IN)).split(BACKSLASH_STAND_IN).join("\\");
+  return literal2 !== separated && normalizePath(literal2) === separated ? literal2 : separated;
+}
+function resolveBackslashPaths(coverage2, tracked, combine) {
+  const moves = (path) => path.includes("\\") && !tracked.has(path);
+  if (![...coverage2.keys()].some(moves)) return coverage2;
+  const resolved = /* @__PURE__ */ new Map();
+  for (const [path, lines] of coverage2) {
+    const key = moves(path) ? normalizePath(path) : path;
+    const target = resolved.get(key);
+    if (target === void 0) {
+      resolved.set(key, new Map(lines));
+      continue;
+    }
+    for (const [line, hits] of lines) {
+      const before = target.get(line);
+      target.set(line, before === void 0 ? hits : combine(before, hits));
+    }
+  }
+  return resolved;
+}
+function matchCoveragePaths(coverage2, repoFiles, coverageRoot) {
+  const tracked = new Set(repoFiles);
+  const unmatched = [...coverage2.keys()].filter((path) => !tracked.has(path)).sort();
+  const total = coverage2.size;
+  return {
+    total,
+    unmatched,
+    suggestedRoot: unmatched.length === total ? suggestRoot(unmatched, repoFiles, coverageRoot) : null
+  };
+}
+function suggestRoot(unmatched, repoFiles, coverageRoot) {
+  const relative = new Set(unmatched.filter((path) => !isAbsolutePath(path)));
+  if (relative.size === 0) return null;
+  const rootPrefix = coverageRoot === void 0 || coverageRoot === "." ? null : `${coverageRoot}/`;
+  let best = null;
+  for (const file of repoFiles) {
+    for (let i = file.indexOf("/"); i > 0; i = file.indexOf("/", i + 1)) {
+      const suffix = file.slice(i + 1);
+      if (!relative.has(suffix)) continue;
+      const prefix = file.slice(0, i);
+      const candidate = rootPrefix !== null && suffix.startsWith(rootPrefix) ? `${prefix}/${coverageRoot}` : prefix;
+      if (best === null || candidate < best) best = candidate;
+    }
+  }
+  return best;
+}
+
 // ../core/src/coverage/cobertura.ts
 function parseCoberturaCounted(text, options = {}) {
   const sources = [];
@@ -28099,7 +28166,8 @@ function parseCoberturaCounted(text, options = {}) {
   const resolve2 = makeResolver([...new Set(sources)], options.repoRoot, options.coverageRoot);
   const map = /* @__PURE__ */ new Map();
   for (const [filename, lines] of perFile) {
-    const key = resolve2(filename);
+    const separated = resolve2(filename);
+    const key = options.literalBackslashes === true ? literalBackslashKey(filename, separated, resolve2) : separated;
     let target = map.get(key);
     if (!target) {
       target = /* @__PURE__ */ new Map();
@@ -28202,12 +28270,14 @@ function createLcovReader(options = {}) {
   const map = /* @__PURE__ */ new Map();
   let current;
   let skipped = 0;
+  const resolve2 = (raw) => options.coverageRoot !== void 0 && !isAbsolutePath(raw.trim()) ? normalizePath(joinCoverageRoot(raw, options.coverageRoot), options.repoRoot) : normalizePath(raw, options.repoRoot);
   return {
     push(raw) {
       const line = raw.trim();
       if (line.startsWith("SF:")) {
         const raw2 = line.slice(3);
-        const path = options.coverageRoot !== void 0 && !isAbsolutePath(raw2.trim()) ? normalizePath(joinCoverageRoot(raw2, options.coverageRoot), options.repoRoot) : normalizePath(raw2, options.repoRoot);
+        const separated = resolve2(raw2);
+        const path = options.literalBackslashes === true ? literalBackslashKey(raw2, separated, resolve2) : separated;
         current = map.get(path);
         if (!current) {
           current = /* @__PURE__ */ new Map();
@@ -28254,34 +28324,6 @@ function parseCoverageCounted(text, format, options = {}) {
     case "cobertura":
       return parseCoberturaCounted(text, options);
   }
-}
-
-// ../core/src/coverage/match.ts
-function matchCoveragePaths(coverage2, repoFiles, coverageRoot) {
-  const tracked = new Set(repoFiles);
-  const unmatched = [...coverage2.keys()].filter((path) => !tracked.has(path)).sort();
-  const total = coverage2.size;
-  return {
-    total,
-    unmatched,
-    suggestedRoot: unmatched.length === total ? suggestRoot(unmatched, repoFiles, coverageRoot) : null
-  };
-}
-function suggestRoot(unmatched, repoFiles, coverageRoot) {
-  const relative = new Set(unmatched.filter((path) => !isAbsolutePath(path)));
-  if (relative.size === 0) return null;
-  const rootPrefix = coverageRoot === void 0 || coverageRoot === "." ? null : `${coverageRoot}/`;
-  let best = null;
-  for (const file of repoFiles) {
-    for (let i = file.indexOf("/"); i > 0; i = file.indexOf("/", i + 1)) {
-      const suffix = file.slice(i + 1);
-      if (!relative.has(suffix)) continue;
-      const prefix = file.slice(0, i);
-      const candidate = rootPrefix !== null && suffix.startsWith(rootPrefix) ? `${prefix}/${coverageRoot}` : prefix;
-      if (best === null || candidate < best) best = candidate;
-    }
-  }
-  return best;
 }
 
 // ../core/src/coverage/merge.ts
@@ -30301,6 +30343,9 @@ function trackedCoverageFile(file, repoRoot, repoFiles) {
   const path = normalizePath(file, repoRoot);
   return repoFiles.includes(path) ? path : null;
 }
+function trackedCoverageInDiff(path, diff) {
+  return diff.some((file) => file.status !== "deleted" && file.path === path);
+}
 function binaryCoveredPaths(diff, coverage2) {
   const found = /* @__PURE__ */ new Set();
   for (const file of diff) {
@@ -30309,102 +30354,6 @@ function binaryCoveredPaths(diff, coverage2) {
     else if (coverage2.has(file.oldPath)) found.add(file.oldPath);
   }
   return [...found].sort(byCodeUnit);
-}
-
-// ../core/src/injection/policy.ts
-var INJECTION_SIGNAL_IDS = ["PI01", "PI02", "PI03", "PI04", "PI05"];
-var DEFAULT_INJECTION_SEVERITIES = {
-  PI01: "block",
-  PI02: "warn",
-  PI03: "warn",
-  PI04: "warn",
-  PI05: "warn"
-};
-var RANK = { off: 0, info: 1, warn: 2, block: 3 };
-function tidy(...lists) {
-  const out = /* @__PURE__ */ new Set();
-  for (const list of lists) {
-    if (!Array.isArray(list)) continue;
-    for (const value of list) if (typeof value === "string") out.add(value);
-  }
-  return [...out].sort(byCodeUnit);
-}
-function injectionSettingsOf(policy, base) {
-  const severities = { ...DEFAULT_INJECTION_SEVERITIES };
-  const settings2 = { exempt: [], phrases: [], severities, ignored: [] };
-  const document2 = policy?.document;
-  if (policy === void 0 || policy.source === "none" || document2 === null || document2 === void 0) return settings2;
-  const injection2 = document2.injection;
-  if (injection2 === void 0) return settings2;
-  const wanted = injection2.signals ?? {};
-  if (policy.source === "app") {
-    settings2.exempt = tidy(injection2.exempt);
-    settings2.phrases = tidy(injection2.phrases);
-    for (const id of INJECTION_SIGNAL_IDS) {
-      const value = Object.hasOwn(wanted, id) ? wanted[id] : void 0;
-      if (value !== void 0) severities[id] = value === "off" ? null : value;
-    }
-    return settings2;
-  }
-  const basePhrases = base?.kind === "document" ? base.document.injection?.phrases : void 0;
-  settings2.phrases = tidy(injection2.phrases, basePhrases);
-  if (injection2.exempt !== void 0 && injection2.exempt.length > 0) {
-    settings2.ignored.push({ setting: "injection.exempt", layer: "policy-file", reason: "not-allowed" });
-  }
-  for (const id of INJECTION_SIGNAL_IDS) {
-    const value = Object.hasOwn(wanted, id) ? wanted[id] : void 0;
-    if (value === void 0) continue;
-    const fallback = DEFAULT_INJECTION_SEVERITIES[id];
-    if (RANK[value] > RANK[fallback]) severities[id] = value;
-    else if (RANK[value] < RANK[fallback]) {
-      settings2.ignored.push({ setting: `injection.signals.${id}`, layer: "policy-file", reason: "looser" });
-    }
-  }
-  return settings2;
-}
-
-// ../core/src/injection/messages.ts
-var MAX_LOCATIONS = 5;
-var MAX_CUT_FILES = 5;
-var CODES = {
-  PI01: "INJECTION_PI01",
-  PI02: "INJECTION_PI02",
-  PI03: "INJECTION_PI03",
-  PI04: "INJECTION_PI04",
-  PI05: "INJECTION_PI05"
-};
-var SENTENCES = {
-  PI01: "This change adds invisible or bidirectional Unicode characters, which can hide text from a reviewer or reorder what an agent reads (PI01)",
-  PI02: "This change adds hidden Markdown text (an HTML comment, a link title or a reference definition) that addresses an agent (PI02)",
-  PI03: "This change adds known prompt-injection phrases (PI03)",
-  PI04: "This change adds a long base64 or hex blob to an agent instruction file, which an agent may decode and follow (PI04)",
-  PI05: "This change adds agent instruction files inside a vendored directory, where an agent may read them as instructions (PI05)"
-};
-function locations2(signals) {
-  const named = signals.slice(0, MAX_LOCATIONS).map((signal2) => signal2.line === null ? codeSpan(signal2.path) : `${codeSpan(signal2.path)} line ${signal2.line}`).join(", ");
-  const more = signals.length - MAX_LOCATIONS;
-  return more > 0 ? `${named} and ${more} more` : named;
-}
-function injectionMessages(signals, omitted, cut) {
-  const messages = [];
-  for (const id of INJECTION_SIGNAL_IDS) {
-    const own = signals.filter((signal2) => signal2.id === id);
-    if (own.length === 0) continue;
-    const level = own.some((s) => s.severity === "block") ? "error" : own.some((s) => s.severity === "warn") ? "warn" : "info";
-    const left = omitted.filter((entry) => entry.id === id).reduce((sum, entry) => sum + entry.count, 0);
-    const notListed = left > 0 ? ` ${left} more ${left === 1 ? "finding is" : "findings are"} not listed.` : "";
-    messages.push({ level, code: CODES[id], text: `${SENTENCES[id]}: ${locations2(own)}.${notListed}` });
-  }
-  if (cut.length > 0) {
-    const named = cut.slice(0, MAX_CUT_FILES).map(codeSpan).join(", ");
-    const more = cut.length - MAX_CUT_FILES;
-    messages.push({
-      level: "warn",
-      code: "INJECTION_TEXT_TRUNCATED",
-      text: `This change is too large to scan in full for hidden instructions: the content scan reads the first ${MAX_ADDED_TEXT_LINES} added lines of a file and ${MAX_ADDED_TEXT_CHARS} characters of added text in all, so a finding past them is not seen in ${named}${more > 0 ? ` and ${more} more` : ""}.`
-    });
-  }
-  return messages;
 }
 
 // ../core/src/setup/instructions.ts
@@ -31016,12 +30965,113 @@ function extensionOf(path) {
 }
 var MARKDOWN_EXTENSIONS = /* @__PURE__ */ new Set(["md", "mdx", "markdown", "mdc", "mdown", "mkd"]);
 var PROSE_EXTENSIONS = /* @__PURE__ */ new Set(["txt", "rst", "adoc", "asciidoc", "org", "text"]);
+var PRIORITY_MARKDOWN_EXTENSIONS = /* @__PURE__ */ new Set(["md", "mdx", "markdown", "mdc"]);
+function isPriorityInjectionPath(path) {
+  return PRIORITY_MARKDOWN_EXTENSIONS.has(extensionOf(path)) || instructionKindOf(path) !== null;
+}
 function isMarkdownPath(path) {
   return MARKDOWN_EXTENSIONS.has(extensionOf(path)) || instructionKindOf(path) !== null;
 }
 function isProsePath(path) {
   const extension = extensionOf(path);
   return extension === "" || PROSE_EXTENSIONS.has(extension) || isMarkdownPath(path);
+}
+
+// ../core/src/injection/policy.ts
+var INJECTION_SIGNAL_IDS = ["PI01", "PI02", "PI03", "PI04", "PI05"];
+var DEFAULT_INJECTION_SEVERITIES = {
+  PI01: "block",
+  PI02: "warn",
+  PI03: "warn",
+  PI04: "warn",
+  PI05: "warn"
+};
+var RANK = { off: 0, info: 1, warn: 2, block: 3 };
+function tidy(...lists) {
+  const out = /* @__PURE__ */ new Set();
+  for (const list of lists) {
+    if (!Array.isArray(list)) continue;
+    for (const value of list) if (typeof value === "string") out.add(value);
+  }
+  return [...out].sort(byCodeUnit);
+}
+function injectionSettingsOf(policy, base) {
+  const severities = { ...DEFAULT_INJECTION_SEVERITIES };
+  const settings2 = { exempt: [], phrases: [], severities, ignored: [] };
+  const document2 = policy?.document;
+  if (policy === void 0 || policy.source === "none" || document2 === null || document2 === void 0) return settings2;
+  const injection2 = document2.injection;
+  if (injection2 === void 0) return settings2;
+  const wanted = injection2.signals ?? {};
+  if (policy.source === "app") {
+    settings2.exempt = tidy(injection2.exempt);
+    settings2.phrases = tidy(injection2.phrases);
+    for (const id of INJECTION_SIGNAL_IDS) {
+      const value = Object.hasOwn(wanted, id) ? wanted[id] : void 0;
+      if (value !== void 0) severities[id] = value === "off" ? null : value;
+    }
+    return settings2;
+  }
+  const basePhrases = base?.kind === "document" ? base.document.injection?.phrases : void 0;
+  settings2.phrases = tidy(injection2.phrases, basePhrases);
+  if (injection2.exempt !== void 0 && injection2.exempt.length > 0) {
+    settings2.ignored.push({ setting: "injection.exempt", layer: "policy-file", reason: "not-allowed" });
+  }
+  for (const id of INJECTION_SIGNAL_IDS) {
+    const value = Object.hasOwn(wanted, id) ? wanted[id] : void 0;
+    if (value === void 0) continue;
+    const fallback = DEFAULT_INJECTION_SEVERITIES[id];
+    if (RANK[value] > RANK[fallback]) severities[id] = value;
+    else if (RANK[value] < RANK[fallback]) {
+      settings2.ignored.push({ setting: `injection.signals.${id}`, layer: "policy-file", reason: "looser" });
+    }
+  }
+  return settings2;
+}
+
+// ../core/src/injection/messages.ts
+var MAX_LOCATIONS = 5;
+var MAX_CUT_FILES = 5;
+var CODES = {
+  PI01: "INJECTION_PI01",
+  PI02: "INJECTION_PI02",
+  PI03: "INJECTION_PI03",
+  PI04: "INJECTION_PI04",
+  PI05: "INJECTION_PI05"
+};
+var SENTENCES = {
+  PI01: "This change adds invisible or bidirectional Unicode characters, which can hide text from a reviewer or reorder what an agent reads (PI01)",
+  PI02: "This change adds hidden Markdown text (an HTML comment, a link title or a reference definition) that addresses an agent (PI02)",
+  PI03: "This change adds known prompt-injection phrases (PI03)",
+  PI04: "This change adds a long base64 or hex blob to an agent instruction file, which an agent may decode and follow (PI04)",
+  PI05: "This change adds agent instruction files inside a vendored directory, where an agent may read them as instructions (PI05)"
+};
+function locations2(signals) {
+  const named = signals.slice(0, MAX_LOCATIONS).map((signal2) => signal2.line === null ? codeSpan(signal2.path) : `${codeSpan(signal2.path)} line ${signal2.line}`).join(", ");
+  const more = signals.length - MAX_LOCATIONS;
+  return more > 0 ? `${named} and ${more} more` : named;
+}
+function injectionMessages(signals, omitted, cut) {
+  const messages = [];
+  for (const id of INJECTION_SIGNAL_IDS) {
+    const own = signals.filter((signal2) => signal2.id === id);
+    if (own.length === 0) continue;
+    const level = own.some((s) => s.severity === "block") ? "error" : own.some((s) => s.severity === "warn") ? "warn" : "info";
+    const left = omitted.filter((entry) => entry.id === id).reduce((sum, entry) => sum + entry.count, 0);
+    const notListed = left > 0 ? ` ${left} more ${left === 1 ? "finding is" : "findings are"} not listed.` : "";
+    messages.push({ level, code: CODES[id], text: `${SENTENCES[id]}: ${locations2(own)}.${notListed}` });
+  }
+  if (cut.length > 0) {
+    const named = cut.slice(0, MAX_CUT_FILES).map(codeSpan).join(", ");
+    const more = cut.length - MAX_CUT_FILES;
+    const p = cut.some(isPriorityInjectionPath);
+    messages.push({
+      level: p ? "error" : "warn",
+      code: "INJECTION_TEXT_TRUNCATED",
+      text: `This change is too large to scan in full for hidden instructions: the content scan reads the first ${MAX_ADDED_TEXT_LINES} added lines of a file and ${MAX_ADDED_TEXT_CHARS} characters of added text per budget, so a finding past them is not seen in ${named}${more > 0 ? ` and ${more} more` : ""}. The cut files count against ${p && !cut.every(isPriorityInjectionPath) ? "both budgets" : `the budget for ${p ? "instruction and Markdown" : "other"} files`}.`
+    });
+  }
+  return messages;
 }
 
 // ../core/src/injection/phrases.ts
@@ -31254,6 +31304,9 @@ var MAX_INJECTION_FINDINGS_PER_FILE = 20;
 var MAX_INJECTION_FINDINGS = 200;
 function keepInjectionText(file) {
   return !isDefaultExemptPath(file.path);
+}
+function injectionTextPriority(file) {
+  return isPriorityInjectionPath(file.path);
 }
 function isReferenceDefinition(text) {
   let i = 0;
@@ -36913,7 +36966,7 @@ function testsOf(result, imports) {
   } : { ok: false, reason: result.reason };
 }
 function pythonLookupOf(index) {
-  const mapOf = (files) => new Map(files.map((file) => [file.path, file.result]));
+  const mapOf = (files) => new Map(files.map((file) => [file.path, file]));
   if (index === void 0) return { unavailable: "python-not-found", base: /* @__PURE__ */ new Map(), head: /* @__PURE__ */ new Map() };
   if (!index.available) return { unavailable: index.reason, base: /* @__PURE__ */ new Map(), head: /* @__PURE__ */ new Map() };
   return { unavailable: null, base: mapOf(index.base), head: mapOf(index.head) };
@@ -37013,7 +37066,8 @@ function indexTouchedTestFiles(diff, sources, python) {
       if (pythonSide.unavailable !== null) return { ok: false, reason: pythonSide.unavailable };
       const found = pythonSide[side].get(path);
       if (found === void 0) return { ok: false, reason: "missing" };
-      result = found;
+      result = found.result;
+      imports = found.imports ?? [];
     } else {
       const indexed2 = indexTestFileWithImports(path, text);
       result = indexed2.result;
@@ -37090,13 +37144,14 @@ function isConfigFile(path) {
   const basename = path.slice(path.lastIndexOf("/") + 1);
   return basename.startsWith(".") || basename.includes(".config.") || isTestConfigFile(path);
 }
-function exerciseCandidates(diff, excluded) {
+function exerciseCandidates(diff, excluded, python = true) {
   const skipped = EXERCISE_SKIPPED_FILES.map((glob) => compileGlob(glob));
   const paths = /* @__PURE__ */ new Set();
   for (const file of diff) {
     if (file.status === "deleted" || file.binary === true || file.addedLines.length === 0) continue;
     const path = file.path;
-    if (languageOf(path) === null || languageOf(path) === "py") continue;
+    const language = languageOf(path);
+    if (language === null || language === "py" && !python) continue;
     if (isTestFile(path) || DECLARATION_SUFFIXES.some((suffix) => path.endsWith(suffix)) || isConfigFile(path)) {
       continue;
     }
@@ -37110,8 +37165,30 @@ function assertionsOf(tests) {
   for (const test2 of tests) total += test2.assertionCount;
   return total;
 }
-function detectUnexercisedChanges(diff, touched, repoFiles, excluded) {
-  const candidates = exerciseCandidates(diff, excluded);
+function moduleSegmentOk(segment) {
+  return segment !== "" && !segment.includes("/") && !segment.includes("\\");
+}
+function pythonModulePaths(testPath, name) {
+  let dots = 0;
+  while (dots < name.length && name[dots] === ".") dots++;
+  const rest = name.slice(dots);
+  const parts = rest === "" ? [] : rest.split(".");
+  if (!parts.every(moduleSegmentOk)) return [];
+  if (dots === 0) {
+    if (parts.length === 0) return [];
+    const module2 = parts.join("/");
+    return ["", "src/"].flatMap((root) => [`${root}${module2}.py`, `${root}${module2}/__init__.py`]);
+  }
+  const dir = testPath.split("/").slice(0, -1);
+  const up = dots - 1;
+  if (up > dir.length) return [];
+  const base = dir.slice(0, dir.length - up);
+  if (parts.length === 0) return [[...base, "__init__.py"].join("/")];
+  const module = [...base, ...parts].join("/");
+  return [`${module}.py`, `${module}/__init__.py`];
+}
+function detectUnexercisedChanges(diff, touched, repoFiles, excluded, python = true) {
+  const candidates = exerciseCandidates(diff, excluded, python);
   if (candidates.length === 0) return null;
   const known2 = new Set(repoFiles);
   const edited = /* @__PURE__ */ new Set();
@@ -37135,9 +37212,15 @@ function detectUnexercisedChanges(diff, touched, repoFiles, excluded) {
   const wanted = new Set(candidates);
   const exercised = /* @__PURE__ */ new Set();
   for (const { path, imports } of evidence) {
+    if (languageOf(path) === "py") {
+      for (const name of imports) {
+        for (const target of pythonModulePaths(path, name)) if (wanted.has(target)) exercised.add(target);
+      }
+      continue;
+    }
     for (const specifier of imports) {
       const target = resolveRelativeModule(path, specifier, lookup2);
-      if (target !== null && wanted.has(target)) exercised.add(target);
+      if (target !== null && wanted.has(target) && languageOf(target) !== "py") exercised.add(target);
     }
   }
   return { checked: candidates.length, notExercised: candidates.filter((path) => !exercised.has(path)) };
@@ -43259,6 +43342,22 @@ function detectTI17(diff) {
   return signals.sort((a, b) => byCodeUnit(a.path, b.path));
 }
 
+// ../core/src/testIndex/pythonSides.ts
+function sideFiles(side) {
+  if ("unavailable" in side) return [];
+  return side.files.filter((file) => file.path.endsWith(".py") && isTestFile(file.path));
+}
+function pythonTestSourceFiles(sources) {
+  return [...sideFiles(sources.base), ...sideFiles(sources.head)];
+}
+function pythonTestIndexFromRun(sources, run2) {
+  if (!run2.available) return { available: false, reason: run2.reason };
+  const baseCount = sideFiles(sources.base).length;
+  const total = baseCount + sideFiles(sources.head).length;
+  if (run2.files.length !== total) return { available: false, reason: "bad-output" };
+  return { available: true, base: run2.files.slice(0, baseCount), head: run2.files.slice(baseCount) };
+}
+
 // ../core/src/check.ts
 function sortSignals2(signals) {
   return signals.sort(
@@ -43274,7 +43373,8 @@ function check(input) {
   const agentSetup = scanAgentSetup(input.repoFiles);
   const parsedDiff = "text" in input.diff ? parseUnifiedDiff(input.diff.text, {
     keepText: keepSignalFileText(input.configPath, input.repoRoot),
-    keepAddedText: keepInjectionText
+    keepAddedText: keepInjectionText,
+    priorityAddedText: injectionTextPriority
   }) : "parsed" in input.diff ? input.diff.parsed : null;
   const configPaths = parsedDiff === null ? [] : changedConfigPaths(parsedDiff, input.configPath, input.repoRoot);
   const testPaths = parsedDiff === null ? [] : deletedTestFiles(parsedDiff);
@@ -43367,7 +43467,9 @@ function check(input) {
     testIntegritySignals.push(...detectTI03(parsedDiff, testIntegrity2.mode, input.testSources, ti03Pairs));
     sortSignals2(testIntegritySignals);
   }
-  const testExercise = parsedDiff !== null && touched !== null && touched.notRun === null && input.testSources !== void 0 && !("unavailable" in input.testSources.head) ? detectUnexercisedChanges(parsedDiff, touched, input.repoFiles, isExcluded) ?? void 0 : void 0;
+  const pythonIndex = input.pythonTestIndex;
+  const noInterpreter = pythonIndex === void 0 ? input.testSources !== void 0 && pythonTestSourceFiles(input.testSources).length > 0 : !pythonIndex.available && (pythonIndex.reason === "python-not-found" || pythonIndex.reason === "python-too-old");
+  const testExercise = parsedDiff !== null && touched !== null && touched.notRun === null && input.testSources !== void 0 && !("unavailable" in input.testSources.head) ? detectUnexercisedChanges(parsedDiff, touched, input.repoFiles, isExcluded, !noInterpreter) ?? void 0 : void 0;
   const textTruncatedFiles = parsedDiff === null || testIntegrity2.mode === "off" ? [] : textCutSignalFiles(parsedDiff, input.configPath, input.repoRoot);
   const textTruncatedTestFiles = parsedDiff === null || testIntegrity2.mode === "off" ? [] : textCutModifiedTestFiles(parsedDiff);
   const coverageInput = input.coverage;
@@ -43389,10 +43491,17 @@ function check(input) {
     selection = coverageInput.format;
   }
   let trackedCoverage = null;
+  let trackedCoverageChanged = false;
   for (const file of files) {
     if ("missingFile" in file) continue;
-    trackedCoverage = trackedCoverageFile(file.file, input.repoRoot, input.repoFiles);
-    if (trackedCoverage !== null) break;
+    const path = trackedCoverageFile(file.file, input.repoRoot, input.repoFiles);
+    if (path === null) continue;
+    trackedCoverage ??= path;
+    if (parsedDiff !== null && trackedCoverageInDiff(path, parsedDiff)) {
+      trackedCoverage = path;
+      trackedCoverageChanged = true;
+      break;
+    }
   }
   const bytes = input.repoFileBytes;
   const emptyAgentSetupFiles = bytes === void 0 ? [] : agentSetup.files.filter((file) => bytes.get(file.path) === 0).map((file) => file.path);
@@ -43495,6 +43604,7 @@ function check(input) {
     ...configPaths.length > 0 ? { changedConfigPaths: configPaths } : {},
     ...testPaths.length > 0 ? { deletedTestFiles: testPaths } : {},
     ...trackedCoverage === null ? {} : { trackedCoverageFile: trackedCoverage },
+    ...trackedCoverageChanged ? { trackedCoverageChanged: true } : {},
     ...emptyAgentSetupFiles.length > 0 ? { emptyAgentSetupFiles } : {},
     ...input.meta === void 0 ? {} : {
       meta: detection === void 0 || agentFacts === void 0 ? input.meta : { ...input.meta, ...agentPrMetaFields(detection, agentFacts) }
@@ -43541,6 +43651,7 @@ function check(input) {
   const maps = [];
   const formats = /* @__PURE__ */ new Set();
   let skippedLines = 0;
+  const tracked = new Set(input.repoFiles);
   for (const file of files) {
     if ("missingFile" in file) continue;
     const coverageFile = file.file ?? null;
@@ -43567,11 +43678,13 @@ function check(input) {
     } else {
       const counted2 = parseCoverageCounted(file.text, choice.format, {
         ...input.repoRoot === void 0 ? {} : { repoRoot: input.repoRoot },
-        ...coverageRoot === void 0 ? {} : { coverageRoot }
+        ...coverageRoot === void 0 ? {} : { coverageRoot },
+        literalBackslashes: true
       });
       parsed = counted2.map;
       skippedLines += counted2.skipped;
     }
+    parsed = resolveBackslashPaths(parsed, tracked, choice.format === "lcov" ? (a, b) => a + b : Math.max);
     if (parsed.size === 0) {
       return buildReport({
         ...base,
@@ -43698,7 +43811,8 @@ async function readDiffChunks(chunks, options = {}) {
   const splitter = createLineSplitter();
   const reader = createUnifiedDiffReader({
     keepText: keepSignalFileText(options.configPath, options.repoRoot),
-    keepAddedText: keepInjectionText
+    keepAddedText: keepInjectionText,
+    priorityAddedText: injectionTextPriority
   });
   for await (const chunk of chunks) {
     for (const line of splitter.push(chunk)) reader.push(line);
@@ -45787,8 +45901,20 @@ function rangeParts(lines) {
   return parts;
 }
 function code(path) {
-  const safe = replaceUnsafeChars(path, "\uFFFD").replace(/\\/g, "\\\\").replace(/\|/g, "\\|").replace(/`/g, "'");
-  return `\`${safe}\``;
+  return `\`${escapeCellPipes(replaceUnsafeChars(path, "\uFFFD")).replace(/`/g, "'")}\``;
+}
+function escapeCellPipes(text) {
+  let out = "";
+  let run2 = "";
+  for (const char of text) {
+    if (char === "\\") {
+      run2 += char;
+      continue;
+    }
+    out += char === "|" ? `${run2}${run2}\\|` : `${run2}${char}`;
+    run2 = "";
+  }
+  return out + run2;
 }
 var MARKDOWN_ACTIVE = /[\\`*_[\]#!|~]/g;
 function inlineText(text) {
@@ -45876,6 +46002,7 @@ var BLOCK_KINDS = ["describe", "test", "hook"];
 var REFUSAL_REASONS = ["syntax-error", "too-deep", "too-large", "parser-threw"];
 var REFUSED_KEYS = ["id", "parsed", "reason"];
 var PARSED_KEYS = ["id", "parsed", "normalized", "tests", "mocks"];
+var OPTIONAL_PARSED_KEYS = ["imports"];
 var BLOCK_KEYS = [
   "kind",
   "name",
@@ -46000,6 +46127,17 @@ function mapMock(value, where) {
   const specifier = raw.specifier === null ? null : checkString(raw.specifier, where, "mock specifier");
   return { callee, specifier, line: checkInt(raw.line, where, "mock line", 1) };
 }
+function mapImports(raw, where) {
+  if (!Object.hasOwn(raw, "imports")) return void 0;
+  const list = checkArray(raw.imports, where, "imports");
+  if (list.length > MAX_TEST_IMPORTS) return bad(where, `imports is longer than ${MAX_TEST_IMPORTS}`);
+  return list.map((name) => {
+    const text = checkString(name, where, "import");
+    if (text === "") return bad(where, "import is empty");
+    if (text.length > MAX_TEST_NAME_CHARS) return bad(where, `import is longer than ${MAX_TEST_NAME_CHARS}`);
+    return text;
+  });
+}
 function mapEntry(value, index) {
   const where = `entry ${index}`;
   if (!isObject2(value)) return bad(where, "is not an object");
@@ -46008,9 +46146,9 @@ function mapEntry(value, index) {
     if (raw2.id !== index) return bad(where, "id is not its position");
     const reason = checkString(raw2.reason, where, "refusal reason");
     if (!REFUSAL_REASONS.includes(reason)) return bad(where, "refusal reason is unknown");
-    return { parsed: false, reason };
+    return { result: { parsed: false, reason }, imports: void 0 };
   }
-  const raw = checkKeys(value, PARSED_KEYS, where, "a parsed entry");
+  const raw = checkKeys(value, PARSED_KEYS, where, "a parsed entry", OPTIONAL_PARSED_KEYS);
   if (raw.id !== index) return bad(where, "id is not its position");
   if (raw.parsed !== true) return bad(where, "parsed is not a boolean");
   const normalized = checkString(raw.normalized, where, "normalized");
@@ -46018,7 +46156,7 @@ function mapEntry(value, index) {
     (block, i) => mapBlock(block, normalized, `${where} test ${i}`)
   );
   const mocks = checkArray(raw.mocks, where, "mocks").map((mock, i) => mapMock(mock, `${where} mock ${i}`));
-  return { parsed: true, syntaxErrors: 0, tests, mocks };
+  return { result: { parsed: true, syntaxErrors: 0, tests, mocks }, imports: mapImports(raw, where) };
 }
 function pythonIndexFromRaw(stdout, count2) {
   try {
@@ -46030,8 +46168,12 @@ function pythonIndexFromRaw(stdout, count2) {
     }
     const entries = checkArray(parsed, "output", "the top level");
     if (entries.length !== count2) return bad("output", "the number of entries is not the number of files sent");
-    const results = entries.map((entry, index) => mapEntry(entry, index));
-    return { available: true, results };
+    const mapped = entries.map((entry, index) => mapEntry(entry, index));
+    return {
+      available: true,
+      results: mapped.map((entry) => entry.result),
+      imports: mapped.map((entry) => entry.imports)
+    };
   } catch (error2) {
     if (!(error2 instanceof BadOutput)) throw error2;
     return { available: false, reason: "bad-output", detail: error2.detail };
@@ -46115,22 +46257,6 @@ function planPythonIndex(files) {
 }
 function pythonIndexStdin(send) {
   return JSON.stringify(send.map((entry) => ({ id: entry.id, text: entry.text })));
-}
-
-// ../core/src/testIndex/pythonSides.ts
-function sideFiles(side) {
-  if ("unavailable" in side) return [];
-  return side.files.filter((file) => file.path.endsWith(".py") && isTestFile(file.path));
-}
-function pythonTestSourceFiles(sources) {
-  return [...sideFiles(sources.base), ...sideFiles(sources.head)];
-}
-function pythonTestIndexFromRun(sources, run2) {
-  if (!run2.available) return { available: false, reason: run2.reason };
-  const baseCount = sideFiles(sources.base).length;
-  const total = baseCount + sideFiles(sources.head).length;
-  if (run2.files.length !== total) return { available: false, reason: "bad-output" };
-  return { available: true, base: run2.files.slice(0, baseCount), head: run2.files.slice(baseCount) };
 }
 
 // ../core/src/testSourceText.ts
@@ -46604,7 +46730,8 @@ async function readCoverageFiles(deps, options) {
     }
     const { choice, parsed, skipped } = await readCoverageChunks(chunks, format, {
       repoRoot,
-      ...coverageRoot === void 0 ? {} : { coverageRoot }
+      ...coverageRoot === void 0 ? {} : { coverageRoot },
+      literalBackslashes: true
     });
     log(coverageChoiceLine(choice, nameFiles ? entry : void 0));
     coverageFiles.push({ parsed, format: choice.format, file: name(entry), ...skipped > 0 ? { skipped } : {} });
@@ -46997,6 +47124,8 @@ MODULE_SKIPS = ("pytest.importorskip", "pytest.skip")
 SKIP_MODIFIERS = ("skip", "skipIf", "runIf", "fails")
 # The longest name and path entry the index writes, in characters, as core's MAX_TEST_NAME_CHARS.
 MAX_NAME = 500
+# The most distinct module names the index writes per file, as core's MAX_TEST_IMPORTS for the TS index's imports.
+MAX_IMPORTS = 1000
 CLASS_HOOKS = (
     "setup_method", "teardown_method", "setup_class", "teardown_class",
     "setUp", "tearDown", "setUpClass", "tearDownClass", "asyncSetUp", "asyncTearDown",
@@ -47063,6 +47192,34 @@ def import_aliases(tree):
                     target = node.module + "." + item.name
                 aliases[item.asname or item.name] = target
     return aliases
+
+
+def module_imports(tree):
+    """The module names of every import and from-import statement anywhere in the module (ast.walk order), each once,
+    at most MAX_IMPORTS; a name longer than MAX_NAME UTF-16 code units is left out. import a.b gives a.b; from a.b
+    import c gives a.b and a.b.c; a relative import keeps its dots (from . import c gives .c); a star adds nothing."""
+    names = []
+    seen = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            found = [item.name for item in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            prefix = "." * (node.level or 0)
+            members = [item.name for item in node.names if item.name != "*"]
+            if node.module:
+                found = [prefix + node.module] + [prefix + node.module + "." + member for member in members]
+            else:
+                found = [prefix + member for member in members]
+        else:
+            continue
+        for name in found:
+            if name in seen or utf16_length(name) > MAX_NAME:
+                continue
+            if len(names) >= MAX_IMPORTS:
+                return names
+            seen.add(name)
+            names.append(name)
+    return names
 
 
 def canonical(name, table, aliases):
@@ -47591,12 +47748,16 @@ def build(text):
                 for a in block["assertions"]
             ],
         }))
-    return {
+    out = {
         "parsed": True,
         "normalized": normalized,
         "tests": out_blocks,
         "mocks": [{"callee": m[2], "specifier": m[3], "line": m[0]} for m in mocks],
     }
+    imports = module_imports(tree)
+    if imports:
+        out["imports"] = imports
+    return out
 
 
 def switch_off(entry, ctx, removed_at):
@@ -47792,11 +47953,14 @@ async function indexPythonTests(files, deps = {}) {
   }
   if (!outcome.available) return outcome;
   const results = outcome.results;
+  const imports = outcome.imports;
   return {
     available: true,
     files: plan.entries.map((entry) => {
-      const result = "refused" in entry ? { parsed: false, reason: entry.refused } : results[entry.id];
-      return { path: entry.path, result };
+      if ("refused" in entry) return { path: entry.path, result: { parsed: false, reason: entry.refused } };
+      const result = results[entry.id];
+      const names = imports[entry.id];
+      return names === void 0 ? { path: entry.path, result } : { path: entry.path, result, imports: names };
     })
   };
 }

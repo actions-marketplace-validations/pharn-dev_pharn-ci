@@ -2,7 +2,7 @@ import { type AgentPrFacts, agentPrMetaFields, detectAgentPr } from "./agents.js
 import { parseAgentToolNames, parseCoverageRoot, parseExcludePattern } from "./config.js";
 import { chooseCoverageFormat, type DetectedCoverageFormat } from "./coverage/detect.js";
 import { parseCoverageCounted } from "./coverage/index.js";
-import { matchCoveragePaths } from "./coverage/match.js";
+import { matchCoveragePaths, resolveBackslashPaths } from "./coverage/match.js";
 import { mergeCoverageMaps } from "./coverage/merge.js";
 import type { CoverageFormat, CoverageFormatSelection, CoverageMap } from "./coverage/types.js";
 import type { CoverageDiscoveryNotFound } from "./coverageDiscovery.js";
@@ -11,11 +11,17 @@ import type { DependencyLookups } from "./dependencies/lookup.js";
 import { type DependencySettingsLayers, resolveDependencySettings } from "./dependencies/settings.js";
 import { type DiffFile, parseUnifiedDiff } from "./diff/unified.js";
 import { computeDiffCoverage } from "./diffCoverage.js";
-import { binaryCoveredPaths, changedConfigPaths, configRepoPath, trackedCoverageFile } from "./gateInputs.js";
+import {
+  binaryCoveredPaths,
+  changedConfigPaths,
+  configRepoPath,
+  trackedCoverageFile,
+  trackedCoverageInDiff,
+} from "./gateInputs.js";
 import { compileGlob } from "./glob.js";
 import { injectionMessages } from "./injection/messages.js";
 import { injectionSettingsOf } from "./injection/policy.js";
-import { detectInjection, keepInjectionText } from "./injection/scan.js";
+import { detectInjection, injectionTextPriority, keepInjectionText } from "./injection/scan.js";
 import { junitReport } from "./junit/flaky.js";
 import type { JunitResults } from "./junit/results.js";
 import { agentPolicyOf, type PolicyFileBase } from "./policy/agents.js";
@@ -70,7 +76,7 @@ import { detectTI15 } from "./signals/ti15.js";
 import { detectTI16 } from "./signals/ti16.js";
 import { detectTI17 } from "./signals/ti17.js";
 import { deletedTestFiles } from "./testFiles.js";
-import type { PythonTestIndex } from "./testIndex/pythonSides.js";
+import { type PythonTestIndex, pythonTestSourceFiles } from "./testIndex/pythonSides.js";
 import { resolveTestIntegrityMode, type TestIntegrityModeSettings } from "./testIntegrityMode.js";
 import type { TestSources } from "./testSources.js";
 import { byCodeUnit } from "./text.js";
@@ -291,6 +297,7 @@ export function check(input: CheckInput): Report {
       ? parseUnifiedDiff(input.diff.text, {
           keepText: keepSignalFileText(input.configPath, input.repoRoot),
           keepAddedText: keepInjectionText,
+          priorityAddedText: injectionTextPriority,
         })
       : "parsed" in input.diff
         ? input.diff.parsed
@@ -422,14 +429,23 @@ export function check(input: CheckInput): Report {
     sortSignals(testIntegritySignals);
   }
   // The tests-exercise check (A8 step 1) reads the imports of the touched test files: only when they were indexed, so
-  // with the sources' head side readable, a diff and a mode that is not off; otherwise it is silent.
+  // with the sources' head side readable, a diff and a mode that is not off; otherwise it is silent. Python source files
+  // are asked unless the run found no usable Python interpreter for the touched Python test files (CORE-104): without
+  // python3 their imports could not be read, and the index-unavailable message already names those files. An absent
+  // index with Python test text to index reads as python-not-found, as the comparison reads it.
+  const pythonIndex = input.pythonTestIndex;
+  const noInterpreter =
+    pythonIndex === undefined
+      ? input.testSources !== undefined && pythonTestSourceFiles(input.testSources).length > 0
+      : !pythonIndex.available &&
+        (pythonIndex.reason === "python-not-found" || pythonIndex.reason === "python-too-old");
   const testExercise =
     parsedDiff !== null &&
     touched !== null &&
     touched.notRun === null &&
     input.testSources !== undefined &&
     !("unavailable" in input.testSources.head)
-      ? (detectUnexercisedChanges(parsedDiff, touched, input.repoFiles, isExcluded) ?? undefined)
+      ? (detectUnexercisedChanges(parsedDiff, touched, input.repoFiles, isExcluded, !noInterpreter) ?? undefined)
       : undefined;
   // A file whose kept text was cut can hide a finding past the cut; the report names it rather than stay silent.
   const textTruncatedFiles =
@@ -463,12 +479,21 @@ export function check(input: CheckInput): Report {
     selection = coverageInput.format;
   }
 
-  // With several files, the first tracked one is named: one is enough for the change to grade itself.
+  // With several files, the first tracked one the diff adds, modifies or renames to is named, else the first tracked
+  // one: one is enough for the change to grade itself. A tracked file the diff writes fails a gated run (CORE-92), so
+  // it is preferred over one the diff leaves alone. An unavailable diff shows no file as written.
   let trackedCoverage: string | null = null;
+  let trackedCoverageChanged = false;
   for (const file of files) {
     if ("missingFile" in file) continue;
-    trackedCoverage = trackedCoverageFile(file.file, input.repoRoot, input.repoFiles);
-    if (trackedCoverage !== null) break;
+    const path = trackedCoverageFile(file.file, input.repoRoot, input.repoFiles);
+    if (path === null) continue;
+    trackedCoverage ??= path;
+    if (parsedDiff !== null && trackedCoverageInDiff(path, parsedDiff)) {
+      trackedCoverage = path;
+      trackedCoverageChanged = true;
+      break;
+    }
   }
   const bytes = input.repoFileBytes;
   const emptyAgentSetupFiles =
@@ -639,6 +664,7 @@ export function check(input: CheckInput): Report {
     ...(configPaths.length > 0 ? { changedConfigPaths: configPaths } : {}),
     ...(testPaths.length > 0 ? { deletedTestFiles: testPaths } : {}),
     ...(trackedCoverage === null ? {} : { trackedCoverageFile: trackedCoverage }),
+    ...(trackedCoverageChanged ? { trackedCoverageChanged: true } : {}),
     ...(emptyAgentSetupFiles.length > 0 ? { emptyAgentSetupFiles } : {}),
     ...(input.meta === undefined
       ? {}
@@ -698,6 +724,8 @@ export function check(input: CheckInput): Report {
   const maps: CoverageMap[] = [];
   const formats = new Set<CoverageFormat>();
   let skippedLines = 0;
+  // A backslash in a coverage path is part of the file name when the path read that way is tracked (CORE-101).
+  const tracked = new Set(input.repoFiles);
   for (const file of files) {
     if ("missingFile" in file) continue;
     const coverageFile = file.file ?? null;
@@ -725,10 +753,13 @@ export function check(input: CheckInput): Report {
       const counted = parseCoverageCounted(file.text, choice.format, {
         ...(input.repoRoot === undefined ? {} : { repoRoot: input.repoRoot }),
         ...(coverageRoot === undefined ? {} : { coverageRoot }),
+        literalBackslashes: true,
       });
       parsed = counted.map;
       skippedLines += counted.skipped;
     }
+    // Merged within the file by the format's own rule, as the parser merges a file it lists twice.
+    parsed = resolveBackslashPaths(parsed, tracked, choice.format === "lcov" ? (a, b) => a + b : Math.max);
     // An empty or unreadable report would otherwise make every change look uncovered-but-untracked
     // and pass as NO_COVERABLE_CHANGES. Say so instead.
     if (parsed.size === 0) {

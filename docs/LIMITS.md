@@ -881,9 +881,10 @@ findings. It is the Action's alone; the CLI never honours it.
 
 ### What the tests-exercise check misses
 
-The tests-exercise check (`TESTS_NOT_EXERCISING_CHANGES`, A8 step 1) asks, for each changed JavaScript or TypeScript
-source file, whether a JS/TS test file the change adds or modifies imports it directly and keeps or raises its
-assertion count. It reads only the touched test files' text that the signals above already read; it reads no source
+The tests-exercise check (`TESTS_NOT_EXERCISING_CHANGES`, A8 step 1) asks, for each changed JavaScript, TypeScript or
+Python source file, whether a test file of the same language (JS/TS for JS/TS, Python for Python) the change adds or
+modifies imports it directly and keeps or raises its assertion count. It reads only the touched test files' text that
+the signals above already read (a Python test file through the Python index, the same `ast` pass); it reads no source
 file and runs no test. It is a warning in every mode and never fails the check.
 
 - **No per-test coverage.** lcov and Cobertura give coverage summed over every test, so the check cannot say which test
@@ -893,7 +894,7 @@ file and runs no test. It is a warning in every mode and never fails the check.
 - **Direct imports only.** A source file counts only when a changed test file imports it itself. A file reached
   through another source file (a re-export from an `index.ts`, a helper that imports it) is not followed, because the
   check does not read source files.
-- **Relative specifiers only.** `./` and `../` specifiers are resolved against the tracked files and the diff's new
+- **Relative specifiers only (JS/TS).** `./` and `../` specifiers are resolved against the tracked files and the diff's new
   paths: the path itself, its TypeScript twin for a `.js`, `.jsx`, `.mjs` or `.cjs` spelling, then the path with each
   of the eight JS/TS extensions (TypeScript first), then its `/index` file. Bare specifiers, tsconfig `paths` aliases
   (`@/cart`, `~/cart`), `#` subpath imports, workspace packages (`@scope/pkg`) and absolute paths are not resolved, so a
@@ -904,18 +905,37 @@ file and runs no test. It is a warning in every mode and never fails the check.
   (`import type`, or named bindings that are all `type`) do not, nor does a mock path (`vi.mock`, `vi.doMock`,
   `jest.mock`, `jest.doMock`, or a dynamic import passed straight to one), nor a computed specifier. At most 1000
   distinct specifiers are kept per test file.
-- **Which changes are asked.** Only added, modified or renamed JS/TS files with at least one added line. Not asked:
-  test files (by the test globs of TI01), declaration files (`.d.ts`, `.d.mts`, `.d.cts`), config files (a dotfile, a
-  basename with `.config.` in it, or a test-runner config), lockfiles, snapshots, `*.generated.*`, files under `dist/`,
-  `vendor/` or `node_modules/`, minified files (`*.min.*`), files matched by `coverage.exclude`, binary entries, deleted
-  files, renames without edits and changes that only remove lines. Python, Go and every other language are not
-  checked. A source file that is really a test helper outside a test directory is asked like any other.
+- **Python module names (CORE-104).** A Python test file's `import` and `from … import` statements count wherever
+  they are in the file, inside a test function too. `import a.b` (with or without `as`) gives `a.b`; `from a.b import
+  c` gives `a.b` and `a.b.c`; a star import gives the module alone. A name `a.b` means `a/b.py` or `a/b/__init__.py`,
+  at the repository root or under `src/`. A relative import resolves from the test file's directory (one dot is that
+  directory, each further dot one level up), so `from . import billing` beside `billing.py` counts; one that climbs
+  above the root means nothing. At most 1000 distinct module names are kept per Python test file (the same cap as the
+  JS/TS specifiers, core's `MAX_TEST_IMPORTS`), in the order Python's `ast.walk` meets them (the module's own
+  statements first), and a name longer than 500 characters is left out. Not resolved, so a test that reaches its
+  subject only this way does not count: dynamic imports (`importlib.import_module`, `__import__`), namespace packages
+  (a package without `__init__.py` imported by its own name, or one spread over several directories), source roots
+  other than the repository root and `src/` (`lib/`, a monorepo package directory), `sys.path` edits, fixtures defined
+  in `conftest.py` and plugins named in `pytest_plugins`, and an import of the source through another source file.
+  The message's closing sentence still says "(a relative import)", the JS/TS rule; for a Python file this rule applies.
+- **Which changes are asked.** Only added, modified or renamed JS/TS and Python (`.py`) files with at least one added
+  line. Not asked: test files (by the test globs of TI01, `test_*.py` and `*_test.py` included), declaration files
+  (`.d.ts`, `.d.mts`, `.d.cts`, and `.pyi` stubs), config files (a dotfile, a basename with `.config.` in it, or a
+  test-runner config such as `conftest.py`), lockfiles, snapshots, `*.generated.*`, files under `dist/`, `vendor/` or
+  `node_modules/`, minified files (`*.min.*`), files matched by `coverage.exclude`, binary entries, deleted files,
+  renames without edits and changes that only remove lines. Python files are not asked when the run found no usable
+  Python interpreter for the touched Python test files (`python-not-found` or `python-too-old`): their imports could
+  not be read, and `TEST_INTEGRITY_INDEX_UNAVAILABLE` already names those test files. When no Python test file is
+  touched the interpreter is not needed, and Python files are asked. Go and every other language are not checked. A
+  source file that is really a test helper outside a test directory, or a script such as `setup.py`, is asked like any
+  other.
 - **Which tests count.** An added JS/TS test file with at least one assertion at head, or a modified test file (or one
   renamed between test paths) whose diff adds or removes a line and whose head has at least one assertion and no fewer
   than its base, counting the assertions of its tests (an assertion in a hook does not count). A test file the test
   index refused, or that was not read (a drop reason of section 8, the 200-file cap included), gives no evidence, so its
   sources are reported as not exercised; the file itself is named in `TEST_INTEGRITY_INDEX_UNAVAILABLE`. A Python test
-  file gives no evidence.
+  file counts by the same rule, with the assertions the Python index records, and only for Python source files; a
+  JS/TS test file counts only for JS/TS source files.
 - **When it is silent.** In mode `off`, without a diff, without test sources (a GitHub compare API diff, PR-number
   mode), when the head side of the sources could not be read, or when the touched test files were not compared
   because a side could not be read.
@@ -935,7 +955,7 @@ label misses". A file whose changed lines run past 5000 is read only up to that 
 report names it with `TEST_INTEGRITY_TEXT_TRUNCATED` (section 8).
 
 The benchmark for what is not seen is Skylos's list of nine ways to hide a failing test. The nine cases are reproduced
-in vitest under `fixtures/skylos-nine/` and pinned by tests. The signals of this release catch **8 of 9**.
+in vitest under `fixtures/skylos-nine/` and pinned by tests. The signals of v0.11.0 catch **8 of 9**.
 
 The same nine are reproduced for pytest under `fixtures/skylos-nine-pytest/`, where the signals catch **8 of 9**; the
 case-by-case table is in [PRECISION.md](./PRECISION.md#3-skylos-nine-what-pharn-ci-catches). The lists below are the
@@ -1360,12 +1380,20 @@ a text filter for content aimed at the next agent, not a judgement of what a tex
   last vendored directory, so a path of thousands of segments is read in linear time. An instruction file whose kind
   needs more of the path is missed: `node_modules/x/.cursor/rules/a/b/c/d/e/f/r.mdc` (9 segments from `.cursor`) is
   not flagged, while `node_modules/x/CLAUDE.md` at any depth is.
-- **Caps.** The scan keeps the first 50,000 added lines of a file and 8,000,000 characters of added text across the
-  diff, in diff order: a file past either cap is named in `INJECTION_TEXT_TRUNCATED` (`warn`) and a finding past the
-  cut is not seen. At most 20 findings per signal and file and 200 in all are listed; the messages count the rest.
+- **Caps.** The scan keeps the first 50,000 added lines of a file and two budgets of 8,000,000 characters of added
+  text across the diff, each in diff order: one for agent instruction files and Markdown files (`.md`, `.mdx`,
+  `.markdown`, `.mdc`, in any case), one for every other file. A file counts only against its own budget, so a large
+  generated file cannot use up the one that guards `AGENTS.md`; the reader holds at most 16,000,000 characters of
+  added text. A file past a cap is named in `INJECTION_TEXT_TRUNCATED` and a finding past the cut is not seen: the
+  message is an `error` (verdict `fail`) when an instruction or Markdown file was cut, and a `warn` when only other
+  files were. Many large Markdown files in one change (generated docs, a long changelog past 50,000 lines) fail
+  the check for that reason; split the change. The rarer Markdown extensions (`.mdown`, `.mkd`) and plain text
+  count against the budget for other files, so a cut there only warns. At most 20 findings per signal and file and 200 in
+  all are listed; the messages count the rest.
   At most 100 of an app policy's phrases are matched.
 - **A pre-parsed diff must carry the text.** A program that calls `check()` with a diff it parsed itself gets no
-  findings unless it parsed with `readDiffChunks` or the reader's `keepAddedText` option.
+  findings unless it parsed with `readDiffChunks` or the reader's `keepAddedText` option (and, for the separate
+  budget of instruction and Markdown files, `priorityAddedText: injectionTextPriority`).
 - **A finding is not a removal.** An instruction that already reached an agent's context, a cache or a fork stays
   there after the line is removed.
 
@@ -1765,10 +1793,15 @@ run. What it does not do:
 - **A PR controls the inputs that grade it.** Besides the config and the workflow, it can add a
   committed coverage file or change `.gitattributes`: `*.ts -diff` makes `git diff` print
   `Binary files ... differ` with no line counts, so those files' added lines are never measured.
-  pharn-ci flags these with three warnings, `CONFIG_CHANGED_IN_DIFF` (the diff touches the config in
+  pharn-ci flags these with three messages, `CONFIG_CHANGED_IN_DIFF` (the diff touches the config in
   use or a file under `.github/workflows/`), `COVERAGE_FILE_TRACKED` (the coverage file is a tracked
   file) and `DIFF_BINARY_COVERED_FILE` (the diff shows a file the coverage report knows as binary).
-  Those three input warnings are warnings only, never a `fail`. The same attribute also hides the text of a
+  `CONFIG_CHANGED_IN_DIFF` is a warning only, never a `fail`. `DIFF_BINARY_COVERED_FILE` is an `error` when a
+  diff-coverage threshold is set (0 included), because the gate cannot measure the binary file, and a warning without
+  one. `COVERAGE_FILE_TRACKED` is a warning too, with one exception: with a threshold (0 included), a tracked coverage
+  file that the diff adds, edits or renames to makes it an error, because the change then wrote the numbers it is
+  graded by. A tracked report the diff leaves alone stays a warning, so a report committed before the change, or one
+  that `.pharn/ci.yml` repoints to without the diff writing it, is not blocked. The same attribute also hides the text of a
   test file, `package.json`, workflow file, test-runner config or pharn-ci config, so these are reported too, at the
   mode's level (error in mode `block`, warn in mode `warn`): a deleted or renamed-away JS/TS, Python or Go test file
   that git shows as binary is TI01; a modified or renamed JS/TS or Python test file that git shows as binary makes
@@ -1838,6 +1871,16 @@ run. What it does not do:
 - **Paths are matched exactly against `git ls-files`.** After normalization, every path in the
   coverage report is compared with the tracked files, case-sensitively. pharn-ci reads no files,
   so a tracked path is the only evidence a coverage path names a real file.
+- **A backslash is part of the file name only when that names a tracked file.** A Windows report writes
+  `src\a.js` for `src/a.js`, while on Linux and macOS `\` is a legal character in a file name. A coverage path with a
+  backslash is first read with the backslash as part of the name (every other step of normalization as usual); when
+  that path is a tracked file, the record is that file's (lcov `SF:src/a\b.js` covers the tracked `src/a\b.js`).
+  Otherwise each backslash is a separator, as before. With both `src/a\b.js` and `src/a/b.js` tracked, each record
+  goes to the file its literal path names. A path where reading the backslash as part of the name would change what
+  a `..` removes, whether it lies under the repo root, or which Cobertura `<source>` it joins (a `..` next to a
+  backslash, a Windows drive path under a coverage root) is always read with backslashes as separators. With an empty
+  tracked-files list every backslash is a separator. In the PR comment the name is shown in a code span with its
+  backslash as written; only a run of backslashes right before a `|` is doubled, so the name cannot open a table cell.
 - **No path matches: `COVERAGE_PATHS_UNMATCHED`.** Diff coverage is not computed, and the report
   says so instead of passing as `NO_COVERABLE_CHANGES`. It is an error, and the verdict `fail`,
   with a threshold (0 included), and a warning without one. When a tracked file ends in a
@@ -1875,7 +1918,8 @@ limited by git, Node or GitHub alone.
   naming it (`warn`, or `error` in mode `block` for a JS/TS, Python or Go test file the change modifies), so a change cannot pass in silence by padding a file past the cut. A deleted file is not named:
   TI01 already counts a cut test file. For the prompt-injection scan it also keeps the full text of the added lines
   of every file outside the scan's default exemptions, apart from that: at most 50,000 lines per file and 8,000,000
-  characters across the diff (`addedTextCut` marks a file cut there, and `INJECTION_TEXT_TRUNCATED` names it). The 120 s git
+  characters across the diff for agent instruction and Markdown files plus 8,000,000 for all other files
+  (`addedTextCut` marks a file cut there, and `INJECTION_TEXT_TRUNCATED` names it). The 120 s git
   timeout still applies. From the GitHub compare API (the
   Action's fallback, and PR-number mode) it is limited by GitHub's own compare limit; past it the
   diff is unavailable and the report says `DIFF_UNAVAILABLE`.

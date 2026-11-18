@@ -11,6 +11,15 @@ Releases are cut by a maintainer; see [`docs/RELEASING.md`](./docs/RELEASING.md)
 
 ### Changed
 
+- The prompt-injection scan and binary covered files fail closed (CORE-100, part 1). The diff reader keeps added text
+  against two budgets of 8,000,000 characters, one for agent instruction files and Markdown files (`.md`, `.mdx`,
+  `.markdown`, `.mdc`) and one for every other file, where it kept one budget for the whole diff in diff order: an
+  8.1 MB generated file first in the diff no longer hides a bidi character in a later `AGENTS.md`.
+  `INJECTION_TEXT_TRUNCATED` is now an error (verdict `fail`) when an instruction or Markdown file was cut, and stays
+  a warning when only other files were (a 9 MB bundle); its text says which budget the cut files count against.
+  `DIFF_BINARY_COVERED_FILE` is now an error when a diff-coverage threshold is set (0 included), where it was a
+  warning, since a source file the diff shows as binary has no added lines to measure; it stays a warning without
+  a threshold. No new message code and no schema change.
 - Dependency safety fails closed on a manifest or lockfile it could not read (CORE-100, part 2). A file the pull
   request can make unreadable (not valid, over a cap, binary, missing at its revision or at an unsafe path) now gives
   `DEPENDENCY_CHECK_INCOMPLETE` at level error and fails the check, where it was a warning, so a broken or oversized
@@ -18,6 +27,21 @@ Releases are cut by a maintainer; see [`docs/RELEASING.md`](./docs/RELEASING.md)
   past. It stays a warning when git could not read a side at all (a diff not from local git, a shallow clone). The cap
   for one file rises from 5 MiB to 32 MiB, the same as for one side, so an honest large lockfile is read (a generated
   20 MiB `pnpm-lock.yaml` is read and judged in about 0.2 s). With `dependencies: never` nothing changes.
+- The tests-exercise warning covers Python (CORE-104). `TESTS_NOT_EXERCISING_CHANGES` now also asks for each changed
+  `.py` source file whether an added or modified Python test file imports it (`import pkg.billing`, `from pkg.billing
+  import total`, `from . import billing`, anywhere in the test file) and keeps or raises its assertion count, so a pull
+  request that adds `src/pkg/billing.py` with no test now gets the warning, as the same change in TypeScript did. A
+  module name maps to `pkg/billing.py` or `pkg/billing/__init__.py` at the repository root or under `src/`. The Python
+  index returns the import names (at most 1000 per file) from the same `ast` pass. Still a warning; no new code or
+  report field. Without a usable `python3` for the touched Python test files, Python files are not asked.
+- Docs: `docs/LIMITS.md` names the release whose test-integrity signals catch 8 of the Skylos nine: "the signals of
+  v0.11.0 catch **8 of 9**", as the README does, where it said "the signals of this release" (CORE-129).
+- A coverage report the pull request commits fails a gated run (CORE-92). With a threshold (0 included),
+  `COVERAGE_FILE_TRACKED` is now an error, so the verdict is fail and the CLI exits 1, when the diff adds, edits or
+  renames to the tracked coverage file the gate reads; its text names the path and says to remove the report from git
+  (`git rm --cached <path>`) and let the test run write it. A tracked report the diff leaves alone, or a run with no
+  threshold, still gets the warning. A repository that commits regenerated coverage in its pull requests must untrack
+  the file, or every such pull request now fails under a threshold.
 - Docs: the five workflows in `examples/workflows/` no longer say the step never fails without a threshold (CORE-127).
   Their headers name what fails it by default: a secret in an agent config file (S01-S09), invisible Unicode (PI01),
   a dependency from outside the registry (D05), a dependency change the lockfile does not record (D04) and a run
@@ -57,6 +81,12 @@ Releases are cut by a maintainer; see [`docs/RELEASING.md`](./docs/RELEASING.md)
   file no test imports at 0%, so it counts against diff coverage instead of being left out. The vitest, jest and pytest
   example workflows name the setting and its config file; the cargo and .NET ones say an untested file is already
   reported. `docs/LIMITS.md` links to it.
+- Fixed: a changed file with a backslash in its name is no longer dropped from diff coverage (CORE-101). On Linux
+  and macOS `\` is a legal file-name character, but every coverage path's backslashes were turned into `/`, so lcov
+  `SF:src/a\b.js` matched no tracked file and the file's untested lines passed the gate. A backslash is now part of
+  the name when the path read that way is a tracked file, and a separator (a Windows report) otherwise; with both
+  `src/a\b.js` and `src/a/b.js` tracked, each record goes to the file it names. lcov and Cobertura alike. The PR
+  comment shows such a name with one backslash, not two.
 - Docs: `docs/PRECISION.md` gains a Python precision corpus (CORE-72): 600 merged PRs of `langchain-ai/langchain`,
   `pydantic/pydantic` and `python-poetry/poetry`, frozen in `docs/precision/corpus-python/`, with every block finding
   reviewed by hand. TI02 falsely blocks 6 of 600 Python PRs (1.0 %, tests renamed in place and rewritten); TI01 0.7 %;

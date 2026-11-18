@@ -421,7 +421,10 @@ changes. A changed JavaScript or TypeScript source file (one with at least one a
 config files such as `vite.config.ts` or `.eslintrc.cjs`, `dist/`, `vendor/`, `node_modules/`, minified, `*.generated.*`
 and `coverage.exclude` files are not asked) counts as exercised when a JS/TS test file the change adds or modifies
 imports it directly with a relative import (`./cart`, `../src/cart.js`, a directory's `index`) and keeps or raises its
-assertion count. When at least one changed source file is not exercised, the report carries one
+assertion count. A changed Python source file counts as exercised when a Python test file the change adds or modifies
+imports it (`import pkg.cart`, `from pkg.cart import total`, `from . import cart`, at the repository root or under
+`src/`) and keeps or raises its assertion count; without a usable `python3` for the touched Python test files, Python
+files are not asked. When at least one changed source file is not exercised, the report carries one
 `TESTS_NOT_EXERCISING_CHANGES` warning with the counts and up to 10 paths, `testIntegrity.exercise` lists up to 200
 paths, and the comment shows one line under "Test integrity" with a collapsed list. It is a warning in every mode and
 never fails the check; many pull requests that change code without a test will see it, on purpose. It reads only the
@@ -574,9 +577,12 @@ comment's 🧬 Content section, each with a hint. A message names up to 5 paths 
 fixed name and code point (`right-to-left override U+202E`), a phrase id, a run length or a kind and directory, never
 file text.
 
-**Caps.** The scan keeps the first 50,000 added lines of a file and 8,000,000 characters of added text in the whole
-diff, lists 20 findings per signal and file and 200 in all (the messages count the rest), and matches at most 100
-policy phrases. A file it could not read in full is named in `INJECTION_TEXT_TRUNCATED` (`warn`). What it misses
+**Caps.** The scan keeps the first 50,000 added lines of a file and two budgets of 8,000,000 characters of added text
+in the whole diff: one for agent instruction files and Markdown files (`.md`, `.mdx`, `.markdown`, `.mdc`), one for
+every other file, so a large generated file cannot use up the budget that guards `AGENTS.md`. It lists 20 findings per
+signal and file and 200 in all (the messages count the rest), and matches at most 100 policy phrases. A file it could
+not read in full is named in `INJECTION_TEXT_TRUNCATED`: an `error` (verdict `fail`) when an instruction or Markdown
+file was cut, a `warn` when only other files were (a 9 MB bundle). What it misses
 (encodings, homoglyphs, instructions split across lines, images, unchanged lines) is in
 [docs/LIMITS.md](./docs/LIMITS.md#prompt-injection-scan).
 
@@ -1282,8 +1288,8 @@ message `code`s, not on text:
 | `COVERAGE_PATHS_PARTIALLY_UNMATCHED` | Some coverage paths are not tracked files; their coverage is not used (`info`) |
 | `COVERAGE_LINES_SKIPPED`        | Malformed lcov `DA` records or Cobertura `<line>` elements were skipped; the text gives their number (`info`) |
 | `CONFIG_CHANGED_IN_DIFF`        | The change edits the pharn-ci config in use or a workflow under `.github/workflows/` (`warn`) |
-| `COVERAGE_FILE_TRACKED`         | The coverage file is tracked in the repository, so the change can supply it (`warn`) |
-| `DIFF_BINARY_COVERED_FILE`      | The diff shows a covered source file as binary, so its changes were not measured (`warn`) |
+| `COVERAGE_FILE_TRACKED`         | The coverage file is tracked in the repository, so the change can supply it (`error` with a threshold when the diff adds or edits it, else `warn`) |
+| `DIFF_BINARY_COVERED_FILE`      | The diff shows a covered source file as binary, so its changes were not measured (`error` with a threshold, `warn` without) |
 | `TEST_FILES_DELETED`            | The change deletes a test file or renames one to a non-test name (`info`) |
 | `TEST_INTEGRITY_MODE_IGNORED`   | `.pharn/ci.yml` sets `test_integrity.mode` looser than the workflow input or the default, so the stricter mode applies (`warn`) |
 | `TEST_INTEGRITY_OFF`            | The effective test-integrity mode is `off`, so no test-integrity signal is checked (`info`) |
@@ -1306,7 +1312,7 @@ message `code`s, not on text:
 | `TEST_INTEGRITY_TI16`           | TI16: the change adds a comment that switches off a linter or type checker in a JS/TS or Python test file (`info`; it never blocks and leaves the verdict at `pass`). Every finding is in `testIntegrity.signals` |
 | `TEST_INTEGRITY_TI17`           | TI17: the change adds an assertion that always passes to a JS/TS or Python test file: a custom matcher whose pass is always true, a helper that always returns True, or a wildcard in place of an expected value (`warn` in modes `block` and `warn`; it never blocks unless an org policy sets it). One finding per test file, in `testIntegrity.signals` |
 | `TEST_INTEGRITY_TEXT_TRUNCATED` | A file a test-integrity signal reads has more than 5000 changed lines, so the signals read only the first 5000 and a finding past them is not seen (`warn`, or `error` in mode `block` for a JS/TS, Python or Go test file the change modifies, which the accept label lowers to `warn`; not in mode `off`). The text names the files |
-| `TESTS_NOT_EXERCISING_CHANGES` | Changed JS/TS source files that no JS/TS test file the change adds or modifies imports directly with a relative import while keeping or raising its assertion count (`warn` in every mode, never an error; not in mode `off`, without a diff, or when the touched test files were not read). The text names the count checked, the count not exercised and up to 10 paths; `testIntegrity.exercise` lists up to 200 |
+| `TESTS_NOT_EXERCISING_CHANGES` | Changed JS/TS source files that no JS/TS test file the change adds or modifies imports directly with a relative import, and changed Python source files that no Python test file the change adds or modifies imports, while keeping or raising its assertion count (`warn` in every mode, never an error; not in mode `off`, without a diff, or when the touched test files were not read). The text names the count checked, the count not exercised and up to 10 paths; `testIntegrity.exercise` lists up to 200 |
 | `TEST_INTEGRITY_ACCEPTED`       | A reviewer who is not the PR author applied the [accept label](#accept-label), so every block signal, and every per-file `TEST_INTEGRITY_INDEX_UNAVAILABLE` and `TEST_INTEGRITY_TEXT_TRUNCATED` error, was downgraded to `warn` (`info`; Action only). `testIntegrity.accepted` names the label and the reviewer |
 | `TEST_INTEGRITY_ACCEPT_IGNORED` | The accept label was looked at and does not count: the PR author applied it, a non-user account applied it, no labeling event was found, or the pull request or its events could not be read (`warn`; Action only). The block signals stand |
 | `NO_AGENT_SETUP_FILES`          | The repo has none of the agent setup files pharn-ci looks for  |
@@ -1349,7 +1355,7 @@ message `code`s, not on text:
 | `INJECTION_PI03` | An added line holds a known prompt-injection phrase, or one of the org policy's `injection.phrases` (`warn`, or the level the policy sets). Each signal names the phrase id |
 | `INJECTION_PI04` | A line added to an agent instruction file holds a base64 or hex run of more than 200 characters (`warn`, or the level the policy sets). Each signal names the run's kind and length |
 | `INJECTION_PI05` | An agent instruction file is added inside a vendored directory (`warn`, or the level the policy sets). Each signal names the file's kind and the directory |
-| `INJECTION_TEXT_TRUNCATED` | A file had more added text than the scan reads (50,000 lines, or 8,000,000 characters across the diff), so a finding past the cut is not seen (`warn`). The text names up to 5 files |
+| `INJECTION_TEXT_TRUNCATED` | A file had more added text than the scan reads (50,000 lines, or past its budget of 8,000,000 characters across the diff: one budget for agent instruction and Markdown files, one for all other files), so a finding past the cut is not seen (`error` when an instruction or Markdown file was cut, `warn` otherwise). The text names up to 5 files and which budget they count against |
 | `DEPENDENCY_D01` | An added npm or PyPI package the Action looked up does not exist in the registry ([Dependency safety](#dependency-safety)) (`error`). One message per code; the text names counts, thresholds and up to 10 `path:line` locations, never a package name or file text, and the findings are in `dependencies.signals` |
 | `DEPENDENCY_D02` | An added package was first published fewer than `dependencies.min_age_days` days before the head commit (`warn`) |
 | `DEPENDENCY_D03` | An added unscoped npm package was downloaded fewer than `dependencies.min_weekly_downloads` times last week (`warn`) |

@@ -126,6 +126,8 @@ export {
   MAX_ADDED_TEXT_LINES,
   MAX_KEPT_LINE_CHARS,
   MAX_KEPT_LINES,
+  MAX_OTHER_ADDED_TEXT_CHARS,
+  MAX_PRIORITY_ADDED_TEXT_CHARS,
   parseUnifiedDiff,
   type UnifiedDiffOptions,
 } from "./diff/unified.js";
@@ -167,6 +169,7 @@ export {
   detectInjection,
   type InjectionFinding,
   type InjectionSignal,
+  injectionTextPriority,
   keepInjectionText,
   longestBlob,
   MAX_BLOB_CHARS,
@@ -376,6 +379,7 @@ export {
   EXERCISE_SKIPPED_FILES,
   type ExerciseResult,
   exerciseCandidates,
+  pythonModulePaths,
 } from "./signals/exercise.js";
 export {
   coverageSourceLanguage,
@@ -417,6 +421,7 @@ export {
   testPackageDir,
   testStem,
 } from "./testFiles.js";
+export { MAX_TEST_IMPORTS } from "./testIndex/imports.js";
 export { indexTestFile, indexTestFileWithImports } from "./testIndex/indexTestFile.js";
 export { oneLineDetail, pythonRunOutcome } from "./testIndex/pythonOutcome.js";
 export { type PythonIndexPlan, planPythonIndex, pythonIndexStdin } from "./testIndex/pythonPlan.js";
