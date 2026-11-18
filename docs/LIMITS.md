@@ -25,13 +25,26 @@ see [`THREAT-MODEL.md`](./THREAT-MODEL.md).
   finding `info`, so an unrelated `foo.ts` deleted beside `foo.test.ts` exempts it. (3) A rename
   shows only the lines it edits, never the tests the file keeps, so a test renamed to a path that is
   not a test file counts on its path alone, edited or not, and a helper renamed out of `tests/`
-  counts too. (4) A test file emptied but not deleted is not TI01; TI02 reports
+  counts too. A test file whose name matched a test basename pattern and is renamed so that its
+  name matches no test basename pattern counts as renamed away even when it stays in a `test`,
+  `tests` or `__tests__` directory (`src/cart.test.ts` to `src/__tests__/cart.test.ts.bak`); a file
+  whose name matched no pattern renamed inside such a directory does not. TI01 decides this by name
+  and does not read the runner's settings, so a runner that still collects the new name keeps
+  running the tests (Jest's default `testMatch` collects every JS/TS file under `__tests__`, so
+  `src/cart.test.ts` renamed to `src/__tests__/cart.ts` still runs): a known false block, cleared
+  with the accept label. (4) A test file emptied but not deleted is not TI01; TI02 reports
   the tests it removed. (5) Text is kept for at most 5000 lines per file and 400 characters per
   line; a deleted JS/TS, Python or Go file cut at that bound with no test-defining line kept still
   counts, so a huge test file is never waved through, while a cut fixture, snapshot or data file
-  under a test directory does not. (6) A package that is the repository root never exempts a deletion.
-  (7) A snapshot file (a basename that ends in `.snap`) is never a TI01 candidate, deleted or renamed away, because it
-  holds stored output and no test; the `TEST_FILES_DELETED` message and `deletedTestFiles` still list it by its old
+  under a test directory does not. (6) Only deleted JS/TS and Python source files of the package make a deleted test
+  file `info` (a deleted `NOTES.md` or data file does not), and only when no JS/TS or Python file remains under the
+  package directory at head, read from the tracked-file list; when that list is empty (`git ls-files` failed) no file
+  is seen to remain. A package in another language deleted whole is therefore a `block` (`warn` in mode `warn`):
+  `pkg/cart/cart_test.go` deleted with `pkg/cart/price.go` blocks, and so does a test file found only by its `test`,
+  `tests` or `__tests__` directory deleted with package files of no JS/TS or Python extension. That is a known false
+  block, cleared with the accept label; a source file of the same name deleted with the test still makes it `info`,
+  see (2). A package that is the repository root never exempts a deletion. (7) A snapshot file (a basename that ends
+  in `.snap`) is never a TI01 candidate, deleted or renamed away, because it holds stored output and no test; the `TEST_FILES_DELETED` message and `deletedTestFiles` still list it by its old
   path, and TI08 owns snapshot churn. A test file that stores tests in a `.snap` file is not read. (8) A deleted JS/TS or
   Python test file is `info`, not `block`, when the change keeps the base text of the file, every test name and every
   group name it held is added, in a test with at least one assertion, in another test file of the change (a test of an
@@ -509,7 +522,43 @@ TI09 compares a fixed list of settings of the test-runner config files the chang
   is not found at all. A modified or renamed config whose settings were read at base and that is not found at head
   (an IIFE or any other opaque wrapper) gives one finding for `(config)` at the mode's level (`block` in mode `block`),
   so a one-line wrapper cannot turn a narrowed setting into a warning; nothing in the head is compared then. An added
-  config that is not found, and a config not found or not read at base, give nothing.
+  config that is not found gives nothing. A config that is not found at base, with a head that is a literal, is judged as
+  a config new at head (next bullet), so a narrowing key it sets is a `warn`; a config that cannot be read at base gives
+  nothing.
+- **A config new at head is judged on its narrowing keys, at `warn`.** A file new at head, a section or key new at head
+  (a `package.json` that gains a `jest` key, a `pyproject.toml` that gains a pytest table) and a config that is not found
+  at base all count as new at head. They have nothing to compare with, so TI09 judges a narrowing key by being set, and
+  always at `warn`, in every mode: vitest `include`, `exclude`, `dir`, `testNamePattern` and `root`; jest `testMatch`,
+  `testPathIgnorePatterns`, `roots` and `modulePathIgnorePatterns`; playwright `testMatch`; pytest `testpaths`, and the
+  `addopts` paths and `-o python_functions=` options. A list whose every entry is a build, dependency or declaration
+  entry gives nothing (`exclude: ["node_modules/**"]`). `passWithNoTests`, `allowOnly`, a raised `retry` or `retries`
+  and the deselection options of `addopts` keep the level they had. Because the key is judged by being set, `roots:
+  ["<rootDir>"]` in a new jest config warns, while the same key added to a config that existed at base gives nothing.
+  Thresholds, timeouts and the rest are not judged in a new config, and a `testRegex` is not a narrowing key there.
+  Neither are the pytest ini keys `python_functions`, `python_files`, `python_classes` and `norecursedirs`, the
+  playwright `testIgnore` or the mocha `spec` and `ignore`: `python_functions = test_cart*` in a new `pytest.ini` gives
+  nothing, while the same filter as `-o python_functions=test_cart*` in its `addopts` is a `warn`. A list that holds
+  an opaque entry (a spread such as `[...configDefaults.exclude]`) is judged on its other entries only, so the spread
+  alone, or with build entries beside it, gives nothing, and a spread that names a shared list of the project's own
+  exclusions is not seen.
+- **Moving a config.** A pull request that deletes a config of one runner and adds another config of the same runner, or
+  moves settings into a `test` section that is new in `vite.config.ts`, is judged as a config new at head: a narrowing
+  key it sets is a `warn`, not the mode's level. TI09 does not match the deleted file with the new one.
+- **The narrowing keys of the table.** Beside the lists above, vitest `test.dir`, `test.testNamePattern` and `test.root`
+  are judged like the playwright `grep` (set where unset, or changed), jest `roots` is narrowed like `testpaths` (an
+  unset `roots` reads as `["<rootDir>"]`, so setting `["<rootDir>"]` gives nothing and `["<rootDir>/src/cart"]` is
+  narrowed) and jest `modulePathIgnorePatterns` is widened like `testPathIgnorePatterns`. Not judged: a top-level `root`
+  outside `test` in a vite or vitest config, jest `rootDir` (it moves every root and default match) and the playwright
+  `testDir`.
+- **`addopts` paths and `-o python_functions`.** The positional paths of `addopts` (`addopts = -ra tests/unit`) are
+  compared as a directory list, like `testpaths`: a base path that no head path holds is narrowed, a path added beside
+  the others is not, and a side with no path stands for the whole root. So a path added where none was gives a finding
+  even when it names the `testpaths` directory. `-o python_functions=…`, written `-o x`, `-ox`, in a short cluster,
+  `--override-ini x` or `--override-ini=x`, is a gained option like `-k`. The other `-o` keys (`testpaths`,
+  `python_files`, `python_classes`, `norecursedirs`) and every token after `--` are not read. A long option that takes a
+  value is read from a list of the pytest core and the common plugins (`--tb`, `--cov-report`, `--html`, `--alluredir`,
+  `--asyncio-mode`, `--ds` and the like); an option that is not on the list, written with a spaced value, reads its
+  value as a path, which is a false `block` in a config that existed at base.
 - **Shared config packages and imports.** An imported base config, a spread (`...shared`) and a
   `mergeConfig(base, …)` argument that is not an object literal are never resolved, so a setting that lives there is not
   seen. A key that an open object (a spread, a shorthand property, a `mergeConfig` result) may set is `warn` when it
@@ -539,7 +588,8 @@ TI09 compares a fixed list of settings of the test-runner config files the chang
   same time is read as removed.
 - **Tool defaults.** A key that is removed, or that is set where it was unset, is not judged against the tool's default
   (an unset list is read as empty only to decide that a gained exclude entry is new). A threshold that is removed is
-  reported as removed; a list that is narrowed from an unset base is not.
+  reported as removed; a list that is narrowed from an unset base is not. The one exception is jest `roots`: an unset
+  `roots` is read as its default, `["<rootDir>"]`.
 - **`.mocharc.jsonc` and `conftest.py`.** They are test-config names for the sources but TI09 reads neither, nor a bare
   `.mocharc`. A pytest option set in `conftest.py`, an environment variable such as `PYTEST_ADDOPTS` or `JEST_*`, and a
   config named by a flag (`--config`, `-c`) are not seen.
@@ -565,13 +615,49 @@ TI09 compares a fixed list of settings of the test-runner config files the chang
 
 ### What TI10 misses
 
-TI10 reads the added and removed lines of a modified or renamed `package.json`, with no context lines and no JSON
-parser.
+TI10 compares the `scripts` objects of a modified or renamed `package.json` when both its text at the merge base and
+its text at `HEAD` are in the test sources and parse as JSON. Otherwise (no test sources, a side unavailable, a text
+dropped as too large, or text that is not JSON) it reads the added and removed lines of the diff, with no context lines
+and no JSON parser.
 
-- **No context lines.** The diff is read with `--unified=0`, so any line of the form `"test…": "…"` is read as a script,
-  even a `test` key outside `scripts` (a config block, a nested object) or one the line shows nothing about.
-- **A script split over lines.** A script line is one `"key": "value"` pair. A value continued on the next line, a
-  multi-line value, a one-line object and a key written over several lines are not read.
+- **No context lines (the diff-line fallback).** The diff is read with `--unified=0`, so on the fallback any line of the
+  form `"test…": "…"` is read as a script, even a `test` key outside `scripts` (a config block, a nested object) or one
+  the line shows nothing about. With both texts in the sources a `test` key outside `scripts` is not read.
+- **A script split over lines.** On the fallback a script line is one `"key": "value"` pair. A value continued on the
+  next line, a multi-line value, a key written over several lines and a script that is not alone on its line (written
+  on one line with other keys) are not read. A `package.json` written on one line is read when both texts are in the
+  sources; on the fallback it is still not read. A diff without kept text still yields TI10 when both texts are in the
+  sources.
+- **Escapes are decoded only on the scripts object.** A JSON escape in a script value (`\n`, `|` for a pipe, `&`
+  for `&`) is decoded when the `scripts` objects are compared, and read as written on the fallback, so on the fallback a
+  command after an escaped line feed, or a `||` written as escapes, is missed. On the scripts object a line feed in a
+  value separates commands like `;`, and a line feed after `&&`, `|` or `;` is a line break; TI10 does not model quotes,
+  so a line feed inside a quoted word is read the same way.
+- **No quote model.** TI10 reads a script value as words and operators and never as shell quoting: a `|`, `&`, `;` or
+  line feed inside single or double quotes is read as an operator, and a quoted word is read with its quotes
+  (`'--exclude'` is not the flag `--exclude`). So a quoted pipe can block an honest script
+  (`vitest run && echo 'ok | done'`), and a flag written in quotes is missed.
+- **Forms that lose the exit status or skip files.** A single `|` anywhere in a test script counts, whether it is quoted,
+  a pipe into `xargs` (`cat list | xargs vitest run`) or a `>|` redirection. A single `&` counts when the command before
+  it runs tests (`vitest run & wait`, `vitest run &>log`: `sh`, which is `dash` on Ubuntu runners, reads the `&` before
+  `>` as a background run) or when it ends the script (`vitest run &`). A command runs tests when a word of it is
+  `vitest`, `jest`, `mocha`, `ava`, `tap`, `uvu`, `jasmine`, `karma`, `playwright`, `cypress` or `pytest` (by its last
+  path segment), when it is `node --test`, or when it is `npm`, `pnpm`, `yarn` or `bun` running a script named `test` or
+  `test:<name>`. A helper started in the background before the run (`start-server & vitest run`) keeps the run's status
+  and does not count. So a backgrounded command that names a runner without running the tests
+  (`npx playwright install & vitest run`) is a false block, and a backgrounded runner TI10 does not know
+  (`node run-tests.js & wait`) is missed unless the `&` ends the script. An
+  `&` directly after `>` or `<` (`2>&1`, `>&2`) is a redirection and does not count. A subshell after `||` or `;`
+  (`|| (true)`, `; (exit 0)`) reads like the command inside it. `--exclude` and `--testPathIgnorePatterns`, alone or
+  with `=`, added to a test script count as skipping test files. All of these are found only when added: an existing
+  pipe or flag is excused by key.
+- **Two false blocks.** Outside the `&` rule, TI10 does not know which command is the test runner, so two honest scripts
+  block when the form is added: a coverage upload after the runner (`vitest run --coverage && cat coverage/lcov.info | coveralls`), and a
+  coverage wrapper's own flag (`c8 --exclude dist vitest run`, `nyc --exclude …`). Two fixtures pin both
+  (`block-pipe-after-and-upload`, `block-coverage-wrapper-exclude`). The accept label is the way through.
+- **Still missed after the subshell reading.** A brace group after `||` (`|| { true; }`) and an absolute-path `true`
+  (`|| /bin/true`) are not read. The kebab-case flags `--test-path-ignore-patterns`, `--test-path-pattern` and
+  `--test-name-pattern` (`node --test`) are not read either.
 - **An added or deleted `package.json` gives nothing.** A new file has no earlier script to compare with, and a deleted
   one has no added line; only a modified or renamed `package.json` is read.
 - **Other weakening forms are not named.** `|| true`, `|| :`, `; true`, `; :`, `echo` or `exit 0` as a command,
@@ -580,15 +666,17 @@ parser.
   command in `pyproject.toml`, a Makefile or tox are not; neither are `node -e "process.exit(0)"` or any other program
   that exits 0 without running the tests, a positional path filter (`vitest run src/one.test.ts`), `--dir` or
   `--project`. A lone `true` or `:` as the whole script, or before `||`, is read as `exit 0`. `exit 0` counts only as a
-  command at the start, after `||` or after `;`. `echo` counts there too, and only when no `&&`, `|`, `&` or `;` follows it, so a banner such as
-  `echo start && vitest run` is not a finding. `-t` is not a name filter in a script that runs `mocha`, where it is
-  `--timeout`.
-- **A weakening that was already there is excused by key.** A removed line of the same key with the same form accounts
-  for the added one, so moving `|| true` to another command of the same script is missed.
+  command at the start, after `||`, after `;` or after a line feed. `echo` counts there too, and only when no `&&`, `|`,
+  `&` or `;` follows it, so a banner such as `echo start && vitest run` is not a finding. `-t` is not a name filter in a script that runs `mocha`, where it is
+  `--timeout`. `&&` keeps the runner's status, so a step before or after the run (`tsc && vitest run`,
+  `vitest run && eslint .`) is not a finding.
+- **A weakening that was already there is excused by key.** The same key with the same form at base (a removed line
+  on the fallback) accounts for the one at head, so moving `|| true` to another command of the same script is missed.
 - **`--passWithNoTests` is excused only when no tracked file is a test file.** An empty list of tracked files (git
   failed) does not excuse it, and a diff that deletes a test file does not either.
 - **Kept text is capped** at 5000 lines per file and 400 characters per line (section 8); at most 20 signals are
-  given per file. A diff that reaches `check()` already parsed without kept text yields no TI10.
+  given per file. A diff that reaches `check()` already parsed without kept text yields no TI10 on the fallback; it
+  still does when both texts are in the sources.
 
 ### What TI13 misses
 
@@ -630,8 +718,9 @@ TI08 reads the status and the added lines of snapshot files, the added and remov
   other extensions are not.
 - **Other inline forms.** `toThrowErrorMatchingInlineSnapshot(` and Python inline snapshots are not read.
 - **Update flags set elsewhere.** A flag passed on the command line, through an environment variable or a wrapper
-  script is not seen, and TI10's limits on script lines apply (one `"key": "value"` pair per line; only keys that start
-  with `test`; a `-u` in a mocha script is not a snapshot flag).
+  script is not seen. TI08 reads the `package.json` script lines one `"key": "value"` pair per line, and only keys that
+  start with `test`; it does not use TI10's comparison of the `scripts` objects. A `-u` in a mocha script is not a
+  snapshot flag.
 - **A pytest config word glued to other text.** The word must stand alone between white space, so a flag inside a quoted
   list or glued to other characters is missed, and a removed line that holds the word anywhere in the file excuses every
   added one.
@@ -717,6 +806,7 @@ findings. It is the Action's alone; the CLI never honours it.
   stays a block even for a pull request that carries the label.
 - **Only the newest event decides.** An earlier sign-off by another reviewer does not count once the author or a bot has
   applied the label again.
+- **Not the did-not-run error.** The label also lowers a per-file `TEST_INTEGRITY_INDEX_UNAVAILABLE` error and a `TEST_INTEGRITY_TEXT_TRUNCATED` error to warnings, but never the error that says TI02 and TI05, or TI09, did not run.
 
 ### What the tests-exercise check misses
 
@@ -915,10 +1005,21 @@ must-not-trigger case exist; it does not mean every spelling is seen (see the Py
   `base-ref` you set that is found neither in the checkout nor through the GitHub API is not
   `DIFF_UNAVAILABLE`: it fails the step, like a bad `--base` in the CLI.
 - **Test integrity in `block` fails closed on an unreadable change, with these limits.**
-  `TEST_INTEGRITY_INDEX_UNAVAILABLE` is an error in mode `block` only when TI02 and TI05, or TI09, did
-  not run at all (the test text could not be read and a test file or a test-runner config is
-  modified). The per-file form, where some touched files could not be compared or some added test
-  files could not be read, stays a warning in block. A7 and P02–P07 need a local diff (`fetch-depth: 0`). Their "did not run" message is
+  `TEST_INTEGRITY_INDEX_UNAVAILABLE` is an error in mode `block` when TI02 and TI05, or TI09, did not run at all
+  (the test text could not be read and a test file or a test-runner config is modified, or no `python3` was found and a `.py`
+  test file is modified), and when a test file the change modifies cannot be indexed at HEAD for the reason
+  `too-deep`, `too-large` or `over-file-cap` while it was indexed at the merge base or dropped there as `over-file-cap`.
+  `TEST_INTEGRITY_TEXT_TRUNCATED` is an error in mode `block` when a JavaScript, TypeScript, Python or Go test file the
+  change modifies has more than 5000 changed lines. A reviewer who is not the PR author can lower these per-file errors
+  to warnings with the accept label; the did-not-run error stays. These still only warn in block: an added test file
+  that cannot be read, a modified test file that could not be read at the merge base either (for a reason other than
+  `over-file-cap`), the other reasons at HEAD (`syntax-error`, `syntax-error-heavy`, `parser-threw`, `missing`,
+  `unsafe-path`, `binary`, `over-total-cap`), the Python index reasons other than `python-not-found`, and a cut file
+  that is not a modified test file. The change can cause one of these itself: the test files it modifies are read
+  first, so only they fill the 16 MiB cap ahead of one another, and a change that pads the other test files it modifies
+  (each under 512 KiB, sorting before the target) past 16 MiB has the target dropped at HEAD as `over-total-cap`. That
+  file then only warns and TI02 and TI05 do not compare it. This check does not close that; the padded files are in
+  the diff for a reviewer to see. A7 and P02–P07 need a local diff (`fetch-depth: 0`). Their "did not run" message is
   a warning, except that `POLICY_SETTINGS_INVALID` for unread settings is an error under a required
   app policy or a policy that sets one of the lists `forbidden_permissions`, `required_permissions_deny`,
   `allowed_mcp_servers`, `forbidden_mcp_servers` or `required_hooks` with its rule (P02 to P06) at
@@ -1666,7 +1767,7 @@ limited by git, Node or GitHub alone.
   (`pytest.ini`, `pyproject.toml`, `setup.cfg` and `tox.ini`) keep their text too, for TI08. A finding past the cut is not
   seen. When a signal reads the cut file (a test file in JS/TS, Python or Go, a workflow, a modified `package.json`, a
   pytest config file, a source file or the pharn-ci config) and the file is not deleted, the report adds `TEST_INTEGRITY_TEXT_TRUNCATED`
-  (`warn`) naming it, so a change cannot pass in silence by padding a file past the cut. A deleted file is not named:
+  naming it (`warn`, or `error` in mode `block` for a JS/TS, Python or Go test file the change modifies), so a change cannot pass in silence by padding a file past the cut. A deleted file is not named:
   TI01 already counts a cut test file. For the prompt-injection scan it also keeps the full text of the added lines
   of every file outside the scan's default exemptions, apart from that: at most 50,000 lines per file and 8,000,000
   characters across the diff (`addedTextCut` marks a file cut there, and `INJECTION_TEXT_TRUNCATED` names it). The 120 s git
@@ -1693,8 +1794,10 @@ limited by git, Node or GitHub alone.
   `setup.cfg`, `tox.ini`, `conftest.py` and `package.json`, by basename at any depth) that the change touches: the
   base side at the merge base, the head side at `HEAD`. Three caps apply to each side, with fixed values that no input,
   flag or config key changes: at most 200 files, at most 524288 bytes (512 KiB) per file, and at most 16777216 bytes
-  (16 MiB) in all. Paths are taken in code-unit order, so which files are read does not depend on the order of the
-  diff. A selected file that is not kept is dropped with one reason, tried in this order: `unsafe-path` (a control
+  (16 MiB) in all. The test files the change modifies (a modified entry, or a rename with a
+  test-file path on both sides) are read first on both sides, then the added and deleted test files and the test-config
+  files, each group in code-unit order, so other files cannot use up the 200-file cap ahead of a modified test file and
+  which files are read does not depend on the order of the diff. A selected file that is not kept is dropped with one reason, tried in this order: `unsafe-path` (a control
   character, a leading `/`, or an empty, `.` or `..` segment in the name), `missing` (absent at that revision, or not
   a blob, such as a submodule), `too-large` (more than 524288 bytes), `over-file-cap` (the 201st file and later),
   `over-total-cap` (the file that would take the side past 16777216 bytes, and every later path of that side that has
@@ -1716,7 +1819,12 @@ limited by git, Node or GitHub alone.
   more than 524288 UTF-16 code units of text (`too-large`), more than ten syntax errors (`syntax-error-heavy`) and a
   syntax tree deeper than 1000 nodes (`too-deep`); the Python index adds the 30 s interpreter timeout, 64 MiB of
   output and its own caps of 200 files, 512 KiB per file and 16 MiB in all, shared by the base and head files of one
-  run, so a large change can have its later Python files refused as `too-large`. A body is compared by its first 4000
+  run, so a large change can have its later Python files refused as `too-large`. The Python index takes the base side's
+  `.py` test files first and then the head side's, each in path order, and the modified-first order above does not apply
+  to its caps: added, modified and deleted `.py` test files all count, a modified one once on each side and an added or
+  deleted one once, so a change that modifies about 100 `.py` test files (fewer when it also adds or deletes some), or
+  whose `.py` test files hold 16 MiB across both sides, can have a modified `.py` test file refused at HEAD while its
+  base was indexed, even when that file is small. That fails `block` (the accept label lowers it). A body is compared by its first 4000
   characters. Matching a test with a similar one probes at most 256 candidates per test, so a file of thousands of
   near-identical bodies can report a renamed test as removed. At most 20 TI02 and 20 TI05 findings are listed per file;
   the messages say how many were left out, and the block findings come first. The action and CLI dists carry the

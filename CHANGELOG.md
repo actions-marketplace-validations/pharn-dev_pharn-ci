@@ -11,6 +11,11 @@ Releases are cut by a maintainer; see [`docs/RELEASING.md`](./docs/RELEASING.md)
 
 ### Changed
 
+- CORE-69: in `test-integrity: block` the check now fails when a test file the change modifies cannot be read at HEAD
+  (`too-deep`, `too-large`, `over-file-cap`), has more than 5000 changed lines (JS/TS, Python or Go test files), or is
+  a `.py` file on a runner with no `python3` or `python` (an older Python still only warns); modified test files are
+  read first on both sides, and the accept label lowers the per-file errors but not the missing-Python one. Added test
+  files and files already unreadable at the merge base still warn.
 - The comment hints for TI06, TI12 and TI17 no longer tell a reviewer to apply the accept label: these signals are
   `warn`, and the label is read only when a finding blocks, so applying it changed nothing. A finding an org policy
   raises to `block` still names the label in its hint. The hints of TI02, TI03, TI05, TI09, TI10 and TI13 are unchanged.
@@ -28,6 +33,24 @@ Releases are cut by a maintainer; see [`docs/RELEASING.md`](./docs/RELEASING.md)
   `warn` for a coverage hint that marks one line or branch (`# pragma: no cover`, an Istanbul, V8 or C8 `ignore next`,
   `ignore if` or `ignore else`) in a file the change adds; a whole-file or range hint in a new file, and any hint added
   to an existing file, still blocks (`docs/LIMITS.md`, "What TI11 misses" and "What TI13 misses").
+- Fixed: TI01 and the `TEST_FILES_DELETED` message count a test file renamed so that its name matches no test file
+  pattern, even when it lands in a `test`, `tests` or `__tests__` directory (`src/cart.test.ts` to
+  `src/__tests__/cart.test.ts.bak`, `tests/test_cart.py` to `tests/test_cart.txt`). The package exemption is narrower:
+  only deleted JS/TS and Python source files of the package make a deleted test file `info`, and only when no JS/TS or
+  Python file of the package is left in the tracked-file list, so a deleted `NOTES.md`, or a package that still holds
+  code, no longer softens the deletion; it is a `block` (`warn` in mode `warn`). A test file deleted with a source file
+  of the same name is still `info`. This can add findings: a deleted Go test file whose package is deleted with it now
+  blocks, and so does a Jest test renamed to a plain name under `__tests__`, which Jest still runs (`docs/LIMITS.md`,
+  "What TI01 misses").
+- Fixed: TI09 and TI10 miss fewer narrowings. TI09 now judges a config new at head (a new file, a section or key new at head,
+  or a config not found at base) on its narrowing keys at `warn`, and a config that existed at base on vitest `dir`,
+  `testNamePattern` and `root`, jest `roots` and `modulePathIgnorePatterns`, and a pytest `addopts` path or
+  `-o python_functions=`. TI10 now reads a single `|`, a single `&` that backgrounds the test run or ends the script
+  (a server started in the background before the run gives nothing), a subshell after `||` or `;`, a line feed in a
+  script, and an added `--exclude` or `--testPathIgnorePatterns`, and compares the `scripts` objects of a `package.json`
+  when both texts are in the test sources, so a `package.json` written on one line is read. A pull request that adds
+  an unfiltered pipe or one of these keys can now go from `pass` to `warn` or `fail`; the rules are in
+  `docs/LIMITS.md`, "What TI09 misses" and "What TI10 misses".
 
 ### Security
 
