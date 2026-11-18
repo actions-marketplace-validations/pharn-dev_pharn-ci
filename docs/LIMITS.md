@@ -67,7 +67,16 @@ see [`THREAT-MODEL.md`](./THREAT-MODEL.md).
   label. (10) TI01 does not read the test runner's include or exclude settings, so deleting a test file the runner
   never ran (a sample app's own test inside a `fixtures/` directory the vitest config excludes, say) still blocks: a
   known false block seen on the precision corpus ([PRECISION.md](./PRECISION.md#official-results-v030-2026-10-26)),
-  cleared with the accept label.
+  cleared with the accept label. (11) A deleted or renamed-away JS/TS, Python or Go test file that git shows as binary
+  (a `-diff` or `binary` attribute in `.gitattributes`, or non-text content) counts at the mode's level on its path
+  alone, with no `info` softening: the diff shows no removed line, so its text was not read, and a change that hides a
+  test file's text is the evasion this closes. The reason is fail closed, not "no text": a same-name source or the rest
+  of the package deleted alongside, or a moved test, are evidence the same change controls, so they do not lower it. The
+  known false blocks, each cleared with the accept label: a binary helper file under a test directory (`conftest.py`, a
+  `.d.ts` or a helper module, which a text diff would not count), a binary test file deleted with its same-name source
+  or with its whole package, and a test file deleted or renamed away under a `-diff` or `binary` attribute the
+  repository already carried. A binary test file in another language, an image, a `.bin`, a `.json` or a `.snap` file
+  is not counted.
 - **Only lines the coverage report knows count.** An added line with no `DA` entry in the lcov file
   or no class-level `<line>` record in a Cobertura file (a comment, a type, a blank line, a
   declaration the tool does not instrument) is left out of the denominator. What is "coverable" is
@@ -130,6 +139,10 @@ TI14 reads the added and removed lines of the pharn-ci config in use, one line a
   only raise, and which is out of the diff's reach) are not seen. A config renamed with no edits shows no lines. A removed threshold
   whose replacement the line cannot be read as a plain number (an empty value, a value padded past the 400-character
   kept-line cap) is a finding too: TI14 fails closed rather than guess what the config read.
+- **A binary config.** A config that git shows as binary (a `-diff` or `binary` attribute in `.gitattributes`, or
+  non-text content) and that the change modifies, renames or deletes is one finding with a fixed sentence and no line
+  number, because the diff shows no line to read. An added binary config gives nothing: a text diff of an added config
+  can never give a TI14 finding either.
 - **One comment rule.** TI14 and the config reader end a value at the same `#`: one that starts the line or follows a
   space or a tab, as YAML says. A `#` after any other Unicode space (U+00A0, U+3000, U+FEFF, ...) is not a comment
   to YAML, and the config refuses it with an error naming the character, so `threshold: 50<U+00A0># lowered` can no
@@ -147,6 +160,10 @@ TI11 reads the added and removed lines of workflow files (`.github/workflows/*.y
   step or to the job it sits in, which is why those rules are `warn` in every mode but `off`. An `if:` other than a
   literal false or an event-name test, a job-level condition written another way and a timeout of 2 minutes are not
   seen.
+- **A binary workflow.** A workflow file that git shows as binary (a `-diff` or `binary` attribute in
+  `.gitattributes`, or non-text content) has no diff line to read, and TI11 reads only diff lines. Whether the PR adds,
+  changes, renames or deletes it, it is one finding with a fixed sentence and no line number, at the mode's level. A
+  long-standing attribute on a workflow therefore blocks every PR that touches that file; the accept label clears it.
 - **Test commands by name.** A removed command counts only if it is a package-manager test script (`npm test`,
   `npm t`, `pnpm -r test`, `pnpm --filter core test`, `yarn test:unit`, ...), `vitest`, `jest`, `mocha` or
   `playwright test` (directly or through `npx`, `pnpm`, `pnpm exec`, `yarn`, `bunx` or `bun x`), `node --test`,
@@ -245,6 +262,11 @@ whether a test is still good.
   share less than the rename-in-place or cross-file thresholds above, blocks even when nothing was lost (the corpus dry
   run had one such PR). A person who confirms the rewrite clears it with the accept label. Every probe looks at no more
   than 256 candidates.
+- **Two tests merged into one: a known false block.** A change that folds two tests of a file into one test, keeping
+  both bodies' assertions, leaves one of the two base tests without a counterpart: the merged test answers at most one
+  of them (by name or by body; only an `.each` test answers several), no other new test of the file holds the other
+  one's body, and the rename in place needs as many new tests as removed ones. That test is reported as removed (`block`, `warn`
+  in mode `warn`) although its assertions still run, in the merged test. The accept label clears it.
 - **Names read from the text.** A test whose name is computed (a template literal with a substitution, `.each`, `.for`
   or any other expression) is matched by body only and reported as `warn`; two tests with the same full name are
   compared as a multiset, in line order.
@@ -293,13 +315,34 @@ Both readings give one finding per line, the stronger one kept.
   only as `skipIf(true)`, `skipIf(false)`, `runIf(true)` and `runIf(false)` on the block's opening line; a Python
   `skipif(True)` stays conditional. A `describe` is matched to its tests by line range, so two sibling `describe`
   blocks opened on one line read as holding each other's tests.
+- **How a JS/TS test is switched off, as the test index reads it.** Besides the words of the call itself (`it.skip`,
+  `test.todo`, `xit`, …), the pair reading reads an options object written as an object literal in the second or
+  third argument of a test or `describe` call: `skip`, `todo` or `fails` set to a literal `true` is an unconditional
+  skip, read like `it.skip`; set to any other expression (a variable, a call, a reason string such as node:test's
+  `skip: "flaky"`) it is a conditional skip; `false`, other keys (`timeout`, `retry`) and spread properties are
+  nothing. An `.each([])` or `.for([])` whose table is an empty array literal is an unconditional skip. A test is
+  guarded, a conditional skip, when an `if` statement, or a function that is not a test callback and that nothing in
+  the file calls by name, sits between it and the `describe` or test that holds it (or the file); a `for` or
+  `for…of` loop, a `describe` callback, a function passed as an argument or called where it stands, and a helper the
+  file calls are not guards. A `describe` that is guarded, or has an empty table, passes that on to its tests. Only a
+  test that gains one of these between the merge base and HEAD is reported; one it already had at base gives nothing
+  new. Still missed: "a function nobody calls" is judged within the file only, and by name: a function counts as
+  called when its name appears anywhere else in the file (a call, a value passed on, a property or a variable of the
+  same name in another scope), so a helper exported and called only from another file reads as uncalled (a
+  conditional `warn`), and a function returned, stored in an array or exported without a name is never read as a
+  guard. A ternary or `&&` around a test, a `while (false)` loop, a `switch` case, an early `return` before the test,
+  an options object or an empty table held in a variable (`it("t", opts, fn)`, `it.each(none)`), an empty
+  tagged-template table, and `runIf` or `only` keys in an options object are not read.
 - **Forms at the start of a line.** A form is recognised only at the start of a line after white space, so a one-line
   `if (slow) this.skip()`, a skip written after another statement on the same line and a skip built through a helper
   are missed. A call wrapped over lines is read from its first line only: `it` alone with `.skip(...)` on the next line
   is missed, and `it.skip(` with the name on the next line reads as a skip inside a body (`warn`). Comments and strings are never read as skips.
-- **Runner words that are not named.** `test.fixme`, `test.fail` and any other runner word that stops a test but is not
-  one of the forms above are not seen. `skipIf` and `runIf` are judged by their literal argument only: a
-  condition that is always true under another spelling reads as conditional.
+- **Runner words read only by the pair reading.** Playwright's `test.fixme` and `test.fail` are read by the test index
+  as `skip` and `fails`, so the pair reading reports one put on a test that exists at base as an unconditional skip of
+  an existing test (the mode's level), like `it.skip` and `test.fails`. The line reading does not know these two words,
+  so without the test index, and on a test the change adds, they are not seen. Any other runner word that stops a test
+  but is not one of the forms above is not seen either. `skipIf` and `runIf` are judged by their literal argument
+  only: a condition that is always true under another spelling reads as conditional.
 - **Go receivers other than `t`.** Only `t.Skip(`, `t.Skipf(` and `t.SkipNow(` are read; a receiver named `tb`, `b` or
   anything else is missed.
 - **Python aliases from top-level imports only.** A Python skip is also read through the names the test file binds with
@@ -318,6 +361,25 @@ Both readings give one finding per line, the stronger one kept.
   (see "No context lines" above). A skip written through
   `request.node.add_marker(pytest.mark.skip)`, `pytest.mark.skip` assigned to a name and used as `@name`, or a marker
   set in `conftest.py` is not read.
+- **Python switch-off forms.** When the Python index ran, the pair reading also reports a test that has one of these
+  at HEAD and did not have it at the merge base (what pytest does with each is written in
+  `fixtures/test-integrity/python-switch-off/PYTEST-OUTCOMES.md`): a test `def` or test class put under an `if` of its
+  module or test class, in either branch, is a conditional skip (`warn`); a `@pytest.mark.parametrize` whose argument
+  values are an empty list or tuple literal, a later `def` or `class` of the same name in the same block of statements,
+  a `del test_x` or a `test_x.__test__ = False` (any false constant) after it in that block, `__test__ = False` in a
+  test class body, and an unguarded `raise unittest.SkipTest(…)` in a test body are an unconditional skip (the mode's
+  level; a guarded raise is conditional). A module-level `pytest.importorskip(…)` or `pytest.skip(…,
+  allow_module_level=True)` is one `warn` finding at its line in every mode, because honest uses are common. A skip
+  the test already had at the merge base gives nothing. The finding is placed at the added line that brings the form
+  in: the `del`, `__test__` or later `def` line, the raise line, the module skip's line, else the test's `def` line.
+  Still missed: a `def` under `while`, `try`, `with` or `match` (only `if` is read); a `del` or `__test__` assignment
+  inside an `if`, a function or any block of statements other than the one holding the `def`; a test rebound by an
+  assignment (`test_x = None`) or an import; a parametrize table that is a name, a call or a comprehension that turns
+  out empty (only the `[]` and `()` literals are read); `pytest.importorskip` inside a test body or inside a function;
+  a subclass of `unittest.SkipTest`; a module skip in `conftest.py`. A `def` added above an existing test of the same
+  name is the one pytest never collects, but tests of one name are paired in line order, so it is reported as a skip of
+  the existing test, at the added `def`. Without the Python index, the line reading reads `pytest.importorskip(` and
+  `raise unittest.SkipTest(` at the start of a line as a skip inside a body (`warn`), and none of the other forms.
 - **A skip moved to another file** reads as added without the test index, because the removed line is looked for in
   the same file only. A rename that edits the skip is judged against the old file's lines. With the index, a test the
   match finds again in another file is judged by its pair.
@@ -362,9 +424,12 @@ merge base and at `HEAD`, in JavaScript, TypeScript and Python test files the ch
 - **Assertions dropped together with a rewrite.** TI05 reports fewer assertions only when the rest of the body is
   the base's with assertion statements taken out; a change that drops an assertion and edits anything else passes.
 - **Skipped and todo tests** (`skip`, `todo` at head, including `x`-prefixed heads and Python's `@pytest.mark.skip`,
-  `@unittest.skip` and an unconditional `pytest.skip()` or `self.skipTest()`) are not checked; TI03 reports skips added.
+  `@unittest.skip` and an unconditional `pytest.skip()` or `self.skipTest()`, and the forms the test index reads as
+  `skip` or `todo`: Playwright's `test.fixme`, a `skip` or `todo` option set to a literal `true`, and a Python test that
+  a later statement takes out of collection) are not checked; TI03 reports skips added.
   Only these excuse a test: one under `skipIf` or `runIf` (`@pytest.mark.skipif`, `@unittest.skipIf`,
-  `@unittest.skipUnless`, a conditional `pytest.skip()`) can run, so it is checked like any other.
+  `@unittest.skipUnless`, a conditional `pytest.skip()`, or a `skip`, `todo` or `fails` option set to anything but a
+  literal `true` or `false`) can run, so it is checked like any other.
 - **Go test files** and every other language are not read; the Python count is the interpreter's own reading of
   `assert` statements and the unittest assert methods.
 - **Caps.** At most 20 findings per file.
@@ -623,6 +688,11 @@ and no JSON parser.
 - **No context lines (the diff-line fallback).** The diff is read with `--unified=0`, so on the fallback any line of the
   form `"test…": "…"` is read as a script, even a `test` key outside `scripts` (a config block, a nested object) or one
   the line shows nothing about. With both texts in the sources a `test` key outside `scripts` is not read.
+- **A binary `package.json`.** A `package.json` that git shows as binary (a `-diff` or `binary` attribute in
+  `.gitattributes`, or non-text content) has no diff line to read. When both texts are in the sources and read as JSON
+  it is judged exactly like a text one; otherwise it is one finding with a fixed sentence and no line number. A
+  long-standing attribute on `package.json` therefore blocks every PR that modifies it unless both texts are in the
+  sources and read as JSON; the accept label clears it.
 - **A script split over lines.** On the fallback a script line is one `"key": "value"` pair. A value continued on the
   next line, a multi-line value, a key written over several lines and a script that is not alone on its line (written
   on one line with other keys) are not read. A `package.json` written on one line is read when both texts are in the
@@ -944,7 +1014,7 @@ must-not-trigger case exist; it does not mean every spelling is seen (see the Py
 | --- | --- | --- |
 | TI01 deleted test file | caught — `block-code-stays` | caught — `block-root-tests` and `pass-init-py` |
 | TI02 removed test | caught — `block-removed-it` | caught — `block-pytest-removed`, `block-unittest-method-removed`, and through aliases `block-pytest-alias-marked-removed` |
-| TI03 added skip | caught — `block-it-skip-existing` | caught — `block-pytest-decorator`, the `*-alias-*` cases, `@unittest.expectedFailure` and `pytest.xfail(` |
+| TI03 added skip | caught — `block-it-skip-existing` | caught — `block-pytest-decorator`, the `*-alias-*` cases, `@unittest.expectedFailure`, `pytest.xfail(` and the `python-switch-off/` cases |
 | TI04 focused run | caught — `block-it-only` | not applicable — pytest has no `.only` |
 | TI05 emptied test | caught — `block-emptied` | caught — `block-pytest-emptied`, `block-pytest-alias-raises-removed`, `pass-pytest-alias-emptied-skipped` |
 | TI06 weakened assertion | caught — `warn-assert-ok` | caught — `warn-py-assert-truthy`, `warn-pytest-alias-approx-truthy` |
@@ -969,7 +1039,10 @@ must-not-trigger case exist; it does not mean every spelling is seen (see the Py
 - `conftest.py` is a test-config name for the sources but nothing in it is read: a marker, a fixture or an option set
   there is not seen, and neither is `PYTEST_ADDOPTS` or a `-c` config flag.
 - `request.node.add_marker(pytest.mark.skip)` and a marker kept in a variable (`sm = pytest.mark.skip`, `@sm`) are not
-  read as skips.
+  read as skips. The switch-off forms the Python index does read, and the ones it still misses, are listed under
+  "What TI03 misses" (Python switch-off forms).
+- A `def` or class name longer than 500 characters is cut to 500 in the index, as the JS/TS index cuts names, so two
+  tests whose names differ only after that are one name.
 - An alias is read only when it is bound by a top-level `import` or `from … import` statement at column 0. One bound
   inside an `if`, a `try` or a function, in a docstring, by a backslash continuation, or by `from pytest import *`
   (`import *` binds nothing) is not. A reassignment after the import (`pt = pytest`) is not followed, and a later
@@ -1008,13 +1081,19 @@ must-not-trigger case exist; it does not mean every spelling is seen (see the Py
   `TEST_INTEGRITY_INDEX_UNAVAILABLE` is an error in mode `block` when TI02 and TI05, or TI09, did not run at all
   (the test text could not be read and a test file or a test-runner config is modified, or no `python3` was found and a `.py`
   test file is modified), and when a test file the change modifies cannot be indexed at HEAD for the reason
-  `too-deep`, `too-large` or `over-file-cap` while it was indexed at the merge base or dropped there as `over-file-cap`.
+  `too-deep`, `too-large`, `over-file-cap` or `binary` while it was indexed at the merge base or dropped there as
+  `over-file-cap` (`binary` is a head text with a NUL byte or bytes that are not UTF-8, and holds even when git shows a
+  text diff for the file). A test file the change modifies or renames whose diff entry git shows as binary (a `-diff` or
+  `binary` attribute in `.gitattributes`, or non-text content) is also an error whatever the merge base held, because
+  the signals that read diff text cannot read its change; a modified test file that a long-standing attribute already
+  marks therefore fails `block` on every PR that modifies it, until the attribute is removed or the accept label is
+  applied.
   `TEST_INTEGRITY_TEXT_TRUNCATED` is an error in mode `block` when a JavaScript, TypeScript, Python or Go test file the
   change modifies has more than 5000 changed lines. A reviewer who is not the PR author can lower these per-file errors
   to warnings with the accept label; the did-not-run error stays. These still only warn in block: an added test file
   that cannot be read, a modified test file that could not be read at the merge base either (for a reason other than
   `over-file-cap`), the other reasons at HEAD (`syntax-error`, `syntax-error-heavy`, `parser-threw`, `missing`,
-  `unsafe-path`, `binary`, `over-total-cap`), the Python index reasons other than `python-not-found`, and a cut file
+  `unsafe-path`, `over-total-cap`), the Python index reasons other than `python-not-found`, and a cut file
   that is not a modified test file. The change can cause one of these itself: the test files it modifies are read
   first, so only they fill the 16 MiB cap ahead of one another, and a change that pads the other test files it modifies
   (each under 512 KiB, sorting before the target) past 16 MiB has the target dropped at HEAD as `over-total-cap`. That
@@ -1678,8 +1757,23 @@ run. What it does not do:
   pharn-ci flags these with three warnings, `CONFIG_CHANGED_IN_DIFF` (the diff touches the config in
   use or a file under `.github/workflows/`), `COVERAGE_FILE_TRACKED` (the coverage file is a tracked
   file) and `DIFF_BINARY_COVERED_FILE` (the diff shows a file the coverage report knows as binary).
-  They are warnings only, never a `fail`. pharn-ci does not read the base branch's copies of these
-  files and does not detect changes to `.gitattributes` itself.
+  Those three input warnings are warnings only, never a `fail`. The same attribute also hides the text of a
+  test file, `package.json`, workflow file, test-runner config or pharn-ci config, so these are reported too, at the
+  mode's level (error in mode `block`, warn in mode `warn`): a deleted or renamed-away JS/TS, Python or Go test file
+  that git shows as binary is TI01; a modified or renamed JS/TS or Python test file that git shows as binary makes
+  `TEST_INTEGRITY_INDEX_UNAVAILABLE` an error in `block` (an added one is named there as a warning); a binary
+  `package.json` is judged by TI10 from its base and head text when both are in the test sources and read as JSON,
+  otherwise it is one TI10 finding; a binary workflow file is one TI11 finding; a binary pharn-ci config that the
+  change modifies, renames or deletes is one TI14 finding; a binary test-runner config is judged by TI09 from its
+  base and head text, as a text one is. A finding on a binary file has a fixed sentence and no line number, because
+  no file text reaches it. The accept label lowers each of them. Still missed: TI13 and TI15 in a binary source file,
+  TI08 in a binary `package.json` or pytest config, a modified or added binary test file in a language the index does
+  not read (only JS/TS and Python are indexed), snapshot files, and a deleted or renamed binary file that is not a test
+  file. pharn-ci does not read the base branch's copies of these files and does not detect changes to
+  `.gitattributes` itself. A `-diff` or `binary` attribute that the repository already carries (not added by the PR)
+  on a test file, `package.json` or workflow file now gives a block on every PR that touches that file, until the
+  attribute is removed or the accept label is applied; git also shows a file with no attribute as binary when it holds
+  a NUL byte, so a UTF-16 test file reads the same way.
 - **Coverage and config paths are not confined to the repository.** They are resolved against the
   workspace (Action) or the current directory and repo root (CLI), and may point anywhere the job
   can read, such as `$RUNNER_TEMP`. A literal coverage path is opened as given, so a symbolic link

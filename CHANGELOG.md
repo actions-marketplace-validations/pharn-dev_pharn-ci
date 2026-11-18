@@ -11,6 +11,46 @@ Releases are cut by a maintainer; see [`docs/RELEASING.md`](./docs/RELEASING.md)
 
 ### Changed
 
+- Docs: the five workflows in `examples/workflows/` no longer say the step never fails without a threshold (CORE-127).
+  Their headers name what fails it by default: a secret in an agent config file (S01-S09), invisible Unicode (PI01),
+  a dependency from outside the registry (D05), a dependency change the lockfile does not record (D04) and a run
+  error, and say that `threshold` adds the diff-coverage gate. They now grant `id-token: write`, as the README quick
+  start does, with the same one-line comment: it lets pharn-ci fetch the org policy and upload the redacted report to
+  pharn.dev, and without it pharn-ci makes no call to pharn.dev. They pin `pharn-dev/pharn-ci` to the full commit SHA
+  of `v0.11.0`, like every other action in them.
+- Docs: the README's Safety model, `SECURITY.md`'s Security surface and `docs/MARKETPLACE.md` (the Marketplace
+  listing text) now name the registry lookups among the Action's network calls (CORE-126): with the `dependencies`
+  mode `lookup` (the input, `dependencies.lookup: true` in `.pharn/ci.yml`, or an org policy), one `GET` per added
+  unscoped package to `registry.npmjs.org`, `api.npmjs.org` or `pypi.org`, sending only the package name. They said
+  pharn-ci calls only GitHub and pharn.dev. No behaviour change.
+- Docs: `docs/PRECISION.md` gains a Python precision corpus (CORE-72): 600 merged PRs of `langchain-ai/langchain`,
+  `pydantic/pydantic` and `python-poetry/poetry`, frozen in `docs/precision/corpus-python/`, with every block finding
+  reviewed by hand. TI02 falsely blocks 6 of 600 Python PRs (1.0 %, tests renamed in place and rewritten); TI01 0.7 %;
+  TI03, TI11 and TI13 0.2 % each. The TypeScript corpus, re-run at the current main, gives the same 14 block findings
+  as the v0.3.0 run and no TI03 block. No signal changes.
+- Fixed: TI03 now sees an existing JS/TS test switched off without a `.skip` in its name (CORE-52). The test index
+  reads `skip`, `todo` and `fails` in an options object (`it("t", { skip: true }, fn)`, or as the third argument): a
+  literal `true` blocks like `it.skip`, any other value but `false` is a conditional skip (`warn`). An empty
+  `.each([])` or `.for([])` table blocks like `it.skip`, and a test newly wrapped in an `if`, or moved into a function
+  nothing in the file calls, is a conditional skip (`warn`). A loop, a `describe` callback and a helper the file calls
+  are not guards, and a test that was already guarded or skipped at the merge base gives nothing new. The test index
+  gains two optional fields, `guarded` and `emptyTable`; the report is unchanged.
+- Fixed: the Python test index reads more ways a test is switched off (CORE-53). TI03 now reports a test that gained
+  one at HEAD: a test `def` or class put under an `if` (a conditional skip, `warn`); an empty `parametrize` list or
+  tuple, a later `def` of the same name, `del test_x`, `test_x.__test__ = False` and `raise unittest.SkipTest(…)` in
+  the body (an unconditional skip, the mode's level); a module-level `pytest.importorskip(…)` or `pytest.skip(…,
+  allow_module_level=True)` (one `warn` finding in every mode). Names in the index are cut to 500 characters, so one
+  very long class name no longer pushes the index output past its 64 MiB cap and makes the index unavailable. This can
+  add block findings on Python PRs that switch an existing test off these ways (`docs/LIMITS.md`).
+- Fixed: a test file, `package.json`, workflow file or pharn-ci config that git shows as binary (a `-diff` or `binary`
+  attribute in `.gitattributes`, or non-text content) is no longer skipped silently (CORE-50). A deleted or renamed-away
+  JS/TS, Python or Go test file is TI01 at the mode's level, a modified or renamed JS/TS or Python one makes
+  `TEST_INTEGRITY_INDEX_UNAVAILABLE` an error in `block` (an added one is named there as a warning), and a binary
+  `package.json`, workflow or config the change modifies is one TI10, TI11 or TI14 finding; a binary test-runner config
+  is judged by TI09 from its text like a text one, and a `binary` text at HEAD is now an error reason. The hints name
+  `.gitattributes`. This can add block findings: on a deleted binary helper file under a test directory (a
+  `conftest.py`, a `.d.ts`), on a binary test file deleted with its source or its package, and on every PR that
+  touches a file a long-standing `-diff` or `binary` attribute already marks. The accept label clears each of them.
 - CORE-69: in `test-integrity: block` the check now fails when a test file the change modifies cannot be read at HEAD
   (`too-deep`, `too-large`, `over-file-cap`), has more than 5000 changed lines (JS/TS, Python or Go test files), or is
   a `.py` file on a runner with no `python3` or `python` (an older Python still only warns); modified test files are
@@ -51,6 +91,12 @@ Releases are cut by a maintainer; see [`docs/RELEASING.md`](./docs/RELEASING.md)
   when both texts are in the test sources, so a `package.json` written on one line is read. A pull request that adds
   an unfiltered pipe or one of these keys can now go from `pass` to `warn` or `fail`; the rules are in
   `docs/LIMITS.md`, "What TI09 misses" and "What TI10 misses".
+- Docs: SECURITY.md "Data handling" now names four requests it left out (CORE-130): the OIDC token request to the
+  runner's GitHub-run token service (audience `pharn.dev`) before the org policy request and the run upload;
+  `GET /pulls/{n}/commits` on `pull_request_target` and PR-number runs too, not only `pull_request`; the comment's logo,
+  which a reader's browser loads from `raw.githubusercontent.com` through GitHub's image proxy; and the objects git
+  itself fetches from the remote on a partial clone (`filter: blob:none`), in the Action and the CLI, with how to avoid
+  it (a full checkout with `fetch-depth: 0` and no `filter:`). No behaviour changes.
 
 ### Security
 

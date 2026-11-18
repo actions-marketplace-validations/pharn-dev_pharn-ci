@@ -25750,7 +25750,7 @@ var MESSAGE_FIXES = {
   TEST_INTEGRITY_TI17: S.TI17,
   TEST_INTEGRITY_INDEX_UNAVAILABLE: {
     kind: "none",
-    hint: "Check that the touched test files can be read, so removed tests and assertions are compared."
+    hint: "Check that the touched test files can be read, so removed tests and assertions are compared; a -diff or binary attribute in .gitattributes, or a NUL byte in the file, can cause this."
   },
   TEST_INTEGRITY_TEXT_TRUNCATED: {
     kind: "none",
@@ -26414,7 +26414,14 @@ function summarizeAgentSetup(files) {
 }
 
 // ../core/src/testIntegrityUnreadable.ts
-var HEAD_UNREADABLE_ERROR_REASONS = ["too-deep", "too-large", "over-file-cap"];
+var HEAD_UNREADABLE_ERROR_REASONS = ["too-deep", "too-large", "over-file-cap", "binary"];
+var BINARY_DIFF_REASON = "binary";
+function hasBinaryReason(entry) {
+  return entry.reason === BINARY_DIFF_REASON;
+}
+function isBinaryUnreadable(entry) {
+  return hasBinaryReason(entry) && entry.changeMadeUnreadable === true;
+}
 function changeMadeUnreadable(base, headReason) {
   if (!HEAD_UNREADABLE_ERROR_REASONS.includes(headReason)) return false;
   return base.ok || base.reason === "over-file-cap";
@@ -26812,14 +26819,21 @@ function indexUnavailableText(unavailable2, configUnavailable) {
         `${ti0205NotRunStart(codeSpan(oneLine(unavailable2.notRun)))}, so removed tests and emptied assertions are not checked.`
       );
     } else {
-      if (unavailable2.files.length > 0) {
+      const uncompared = unavailable2.files.filter((f) => !isBinaryUnreadable(f));
+      const binaryFiles = unavailable2.files.filter(isBinaryUnreadable);
+      if (uncompared.length > 0) {
         parts.push(
-          `TI02 and TI05 could not compare these touched test files, so they are not checked for removed tests or emptied assertions: ${namedFiles(unavailable2.files)}.`
+          `TI02 and TI05 could not compare these touched test files, so they are not checked for removed tests or emptied assertions: ${namedFiles(uncompared)}.`
+        );
+      }
+      if (binaryFiles.length > 0) {
+        parts.push(
+          `These touched test files are binary in the diff or in their text at HEAD, so not every signal could read their changes: ${namedFiles(binaryFiles)}.`
         );
       }
       if (unavailable2.added !== void 0 && unavailable2.added.length > 0) {
         parts.push(
-          `The tests in these added test files could not be read, so they are not checked: ${namedFiles(unavailable2.added)}.`
+          unavailable2.added.some(hasBinaryReason) ? `Not every signal could read the tests in these added test files, so they are not fully checked: ${namedFiles(unavailable2.added)}.` : `The tests in these added test files could not be read, so they are not checked: ${namedFiles(unavailable2.added)}.`
         );
       }
     }
@@ -33152,7 +33166,9 @@ var PYTHON_DECORATORS = /* @__PURE__ */ new Map([
   ["unittest.skipUnless", "always"],
   ["unittest.expectedFailure", "never"]
 ]);
-var PYTHON_CALLS = /* @__PURE__ */ new Set(["pytest.skip", "pytest.xfail"]);
+var PYTHON_CALLS = /* @__PURE__ */ new Set(["pytest.skip", "pytest.xfail", "pytest.importorskip"]);
+var PYTHON_RAISES = /* @__PURE__ */ new Set(["unittest.SkipTest", "unittest.case.SkipTest"]);
+var RAISE = "raise ";
 var PYTEST_MARKS = /* @__PURE__ */ new Set(["pytest.mark.skip", "pytest.mark.skipif", "pytest.mark.xfail"]);
 var PYTESTMARK = "pytestmark";
 function canonicalPython(written, table, aliases) {
@@ -33211,8 +33227,11 @@ function parsePythonSkip(text, aliases) {
     return { kind: "decorator", token, name: argName(arg, true), conditional: isConditional(rule2, arg) };
   }
   if (line.startsWith(PYTESTMARK)) return parsePytestmark(line, aliases);
-  const callEnd = dottedEnd(line, 0);
-  const call = canonicalPython(line.slice(0, callEnd), PYTHON_CALLS, aliases);
+  const raised = line.startsWith(RAISE);
+  let start = raised ? RAISE.length : 0;
+  while (raised && isSpace4(line.charAt(start))) start++;
+  const callEnd = dottedEnd(line, start);
+  const call = canonicalPython(line.slice(start, callEnd), raised ? PYTHON_RAISES : PYTHON_CALLS, aliases);
   if (call === null) return null;
   let i = callEnd;
   while (isSpace4(line.charAt(i))) i++;
@@ -36343,6 +36362,55 @@ function guardCall(call) {
   return { kind: "assertions", count: Number.isFinite(count2) ? count2 : null };
 }
 
+// ../core/src/testIndex/switchOff.ts
+var OPTION_MODIFIERS = /* @__PURE__ */ new Map([
+  ["skip", "skip"],
+  ["todo", "todo"],
+  ["fails", "fails"]
+]);
+function staticName(name) {
+  if (ts.isIdentifier(name) || ts.isStringLiteral(name) || ts.isNoSubstitutionTemplateLiteral(name)) return name.text;
+  return null;
+}
+function optionModifiers(args) {
+  const found = [];
+  for (const arg of args.slice(1, 3)) {
+    if (!ts.isObjectLiteralExpression(arg)) continue;
+    for (const property of arg.properties) {
+      if (!ts.isPropertyAssignment(property) && !ts.isShorthandPropertyAssignment(property)) continue;
+      const key = staticName(property.name);
+      const modifier = key === null ? void 0 : OPTION_MODIFIERS.get(key);
+      if (modifier === void 0) continue;
+      const value = ts.isPropertyAssignment(property) ? property.initializer.kind : null;
+      if (value === ts.SyntaxKind.TrueKeyword) found.push(modifier);
+      else if (value !== ts.SyntaxKind.FalseKeyword) found.push("skipIf");
+    }
+  }
+  return found;
+}
+function isEmptyTable(call) {
+  const first = call.arguments[0];
+  return first !== void 0 && ts.isArrayLiteralExpression(first) && first.elements.length === 0;
+}
+function guardName(node) {
+  if (ts.isFunctionDeclaration(node) || ts.isMethodDeclaration(node)) {
+    return node.name !== void 0 && ts.isIdentifier(node.name) ? node.name.text : null;
+  }
+  if (!ts.isFunctionExpression(node) && !ts.isArrowFunction(node)) return null;
+  let current = node;
+  while (current.parent !== void 0 && ts.isParenthesizedExpression(current.parent)) current = current.parent;
+  const parent = current.parent;
+  if (parent === void 0) return null;
+  let name;
+  if (ts.isVariableDeclaration(parent) && parent.initializer === current) name = parent.name;
+  else if (ts.isPropertyAssignment(parent) && parent.initializer === current) name = parent.name;
+  else if (ts.isPropertyDeclaration(parent) && parent.initializer === current) name = parent.name;
+  else if (ts.isBinaryExpression(parent) && parent.operatorToken.kind === ts.SyntaxKind.EqualsToken && parent.right === current) {
+    name = ts.isPropertyAccessExpression(parent.left) ? parent.left.name : parent.left;
+  }
+  return name !== void 0 && ts.isIdentifier(name) ? name.text : null;
+}
+
 // ../core/src/testIndex/blocks.ts
 var TEST_WORDS = /* @__PURE__ */ new Map([
   ["it", null],
@@ -36392,7 +36460,7 @@ function decompose(callee) {
       links.push({ type: "prop", name: current.name.text });
       current = current.expression;
     } else if (ts.isCallExpression(current)) {
-      links.push({ type: "call" });
+      links.push({ type: "call", emptyTable: isEmptyTable(current) });
       current = current.expression;
     } else if (ts.isTaggedTemplateExpression(current)) {
       links.push({ type: "template" });
@@ -36423,14 +36491,18 @@ function hasBlockArguments(args) {
   const first = args[0];
   return first !== void 0 && (ts.isStringLiteral(first) || ts.isNoSubstitutionTemplateLiteral(first) || ts.isTemplateExpression(first));
 }
-function finish(kind, hookWord, modifiers, args, sourceFile) {
+function finish(kind, hookWord, modifiers, args, sourceFile, emptyTable = false) {
   if (!hasBlockArguments(args)) return null;
   const callback = args.find(isFunctionLiteral) ?? null;
+  if (hookWord !== null) {
+    const ordered2 = TEST_MODIFIER_ORDER.filter((m) => modifiers.has(m));
+    return { kind, name: hookWord, nameDynamic: false, modifiers: ordered2, callback, emptyTable };
+  }
+  for (const modifier of optionModifiers(args)) modifiers.add(modifier);
   const ordered = TEST_MODIFIER_ORDER.filter((m) => modifiers.has(m));
-  if (hookWord !== null) return { kind, name: hookWord, nameDynamic: false, modifiers: ordered, callback };
   const first = args[0];
   const { name, nameDynamic } = nameFromArgument(first, modifiers.has("each"), sourceFile);
-  return { kind, name, nameDynamic, modifiers: ordered, callback };
+  return { kind, name, nameDynamic, modifiers: ordered, callback, emptyTable };
 }
 function blockCall(call, sourceFile, subtestParam) {
   const callee = call.expression;
@@ -36474,6 +36546,7 @@ function blockCall(call, sourceFile, subtestParam) {
     return finish(kind, hookWord, modifiers, call.arguments, sourceFile);
   }
   let previous = null;
+  let emptyTable = false;
   for (let i = from; i < links.length; i++) {
     const link = links[i];
     if (link.type === "prop") {
@@ -36483,13 +36556,14 @@ function blockCall(call, sourceFile, subtestParam) {
       previous = link.name;
     } else if (link.type === "call") {
       if (previous === null || !CALLABLE_MEMBERS.has(previous)) return null;
+      if (link.emptyTable && TAGGABLE_MEMBERS.has(previous)) emptyTable = true;
       previous = null;
     } else {
       if (previous === null || !TAGGABLE_MEMBERS.has(previous)) return null;
       previous = null;
     }
   }
-  return finish(kind, null, modifiers, call.arguments, sourceFile);
+  return finish(kind, null, modifiers, call.arguments, sourceFile, emptyTable);
 }
 
 // ../core/src/testIndex/mocks.ts
@@ -36560,6 +36634,25 @@ function importSpecifier(node) {
 }
 
 // ../core/src/testIndex/walk.ts
+function extend(trail, inIf, name) {
+  const up = trail?.functions ?? null;
+  return { inIf: inIf || trail?.inIf === true, functions: name === null ? up : { name, up } };
+}
+function anyUncalled(link, counts2) {
+  const pending = [];
+  let at = link;
+  while (at !== null && at.uncalled === void 0) {
+    pending.push(at);
+    at = at.up;
+  }
+  let outer = at?.uncalled ?? false;
+  for (let i = pending.length - 1; i >= 0; i--) {
+    const current = pending[i];
+    outer = outer || (counts2.get(current.name) ?? 0) <= 1;
+    current.uncalled = outer;
+  }
+  return link.uncalled;
+}
 function isChainTop(node) {
   const parent = node.parent;
   if (parent === void 0) return true;
@@ -36573,8 +36666,12 @@ function walkTestFile(sourceFile) {
   const ranges = [];
   const imports = /* @__PURE__ */ new Set();
   const lineOf3 = (position) => sourceFile.getLineAndCharacterOfPosition(position).line + 1;
-  const stack = [{ node: sourceFile, depth: 0, owner: null, fn: null, inTry: false }];
+  const stack = [
+    { node: sourceFile, depth: 0, owner: null, fn: null, inTry: false, isCallback: false, trail: null }
+  ];
   const children = [];
+  const identifierCounts = /* @__PURE__ */ new Map();
+  const trails = /* @__PURE__ */ new Map();
   for (let entry = stack.pop(); entry !== void 0; entry = stack.pop()) {
     const { node, depth, owner } = entry;
     if (depth > MAX_TEST_INDEX_DEPTH) return "too-deep";
@@ -36606,6 +36703,13 @@ function walkTestFile(sourceFile) {
         break;
     }
     if (ts.isFunctionLike(node)) fn = { firstReturnEnd: Number.POSITIVE_INFINITY };
+    if (ts.isIdentifier(node)) identifierCounts.set(node.text, (identifierCounts.get(node.text) ?? 0) + 1);
+    let trail = entry.trail;
+    if (!entry.isCallback && ts.isFunctionLike(node)) {
+      const name = guardName(node);
+      if (name !== null) trail = extend(trail, false, name);
+    }
+    const ifStatement = ts.isIfStatement(node) ? node : null;
     if (imports.size < MAX_TEST_IMPORTS) {
       const specifier = importSpecifier(node);
       if (specifier !== null) imports.add(specifier);
@@ -36641,9 +36745,12 @@ function walkTestFile(sourceFile) {
           bodyStart,
           bodyEnd,
           assertions: [],
-          guards: []
+          guards: [],
+          guarded: null,
+          emptyTable: found.emptyTable
         };
         drafts.push(created);
+        if (trail !== null) trails.set(created, trail);
         callback = callbackFunction;
       } else {
         const guard = owner === null ? null : guardCall(node);
@@ -36679,8 +36786,16 @@ function walkTestFile(sourceFile) {
         depth: depth + 1,
         owner: isCallback ? created : owner,
         fn,
-        inTry: isCallback ? false : child === tryBlock ? true : entry.inTry
+        inTry: isCallback ? false : child === tryBlock ? true : entry.inTry,
+        isCallback,
+        trail: isCallback ? null : ifStatement !== null && child !== ifStatement.expression ? extend(trail, true, null) : trail
       });
+    }
+  }
+  for (const [draft, trail] of trails) {
+    if (trail.inIf) draft.guarded = "if";
+    else if (trail.functions !== null && anyUncalled(trail.functions, identifierCounts)) {
+      draft.guarded = "uncalled-function";
     }
   }
   return { drafts, mocks, ranges, imports: [...imports] };
@@ -36710,7 +36825,9 @@ function buildBlocks(text, walked) {
       bodyHash: fnv1a32Hex(body),
       assertionCount: d.assertions.length,
       assertions: d.assertions,
-      guards: d.guards
+      guards: d.guards,
+      ...d.guarded === null ? {} : { guarded: d.guarded },
+      ...d.emptyTable ? { emptyTable: true } : {}
     };
   });
 }
@@ -36780,6 +36897,42 @@ function touchedTestEntries(diff) {
     }
   }
   return { compared: compared2, added };
+}
+function binaryTouchedTestFiles(diff) {
+  const { compared: compared2, added: addedPaths } = touchedTestEntries(diff);
+  const modified = [];
+  const added = [];
+  for (const file of diff) {
+    if (file.binary !== true) continue;
+    if (compared2.has(`${file.oldPath}\0${file.path}`)) {
+      modified.push({ path: file.path, reason: BINARY_DIFF_REASON, changeMadeUnreadable: true });
+    } else if (file.status === "added" && addedPaths.has(file.path)) {
+      added.push({ path: file.path, reason: BINARY_DIFF_REASON });
+    }
+  }
+  const byPath = (a, b) => byCodeUnit(a.path, b.path);
+  return { modified: modified.sort(byPath), added: added.sort(byPath) };
+}
+function mergeEntries(existing, extra) {
+  const merged = /* @__PURE__ */ new Map();
+  for (const entry of [...existing, ...extra]) {
+    const key = `${entry.path}\0${entry.reason}`;
+    const before = merged.get(key);
+    const flagged = before?.changeMadeUnreadable === true || entry.changeMadeUnreadable === true;
+    merged.set(key, {
+      path: entry.path,
+      reason: entry.reason,
+      ...flagged ? { changeMadeUnreadable: true } : {}
+    });
+  }
+  return [...merged.values()].sort((a, b) => byCodeUnit(a.path, b.path) || byCodeUnit(a.reason, b.reason));
+}
+function withBinaryTestFiles(unavailable2, binary) {
+  if (unavailable2 !== void 0 && "notRun" in unavailable2) return unavailable2;
+  if (binary.modified.length === 0 && binary.added.length === 0) return unavailable2;
+  const files = mergeEntries(unavailable2?.files ?? [], binary.modified);
+  const added = mergeEntries(unavailable2?.added ?? [], binary.added);
+  return { files, ...added.length > 0 ? { added } : {} };
 }
 function modifiedTestSourcePaths(diff) {
   const base = /* @__PURE__ */ new Set();
@@ -37694,6 +37847,15 @@ function matchTests(touched) {
   return { unmatched, pairs, moved, replaced };
 }
 
+// ../core/src/binaryDetails.ts
+var BINARY_DELETED_DETAIL = "Test file deleted; git shows it as binary, so its text was not read.";
+var BINARY_RENAMED_AWAY_DETAIL = "Test file renamed away; git shows it as binary, so its text was not read.";
+var BINARY_CHANGES_DETAIL = "git shows this file as binary, so its changes could not be read.";
+var BINARY_DETAILS = [BINARY_DELETED_DETAIL, BINARY_RENAMED_AWAY_DETAIL, BINARY_CHANGES_DETAIL];
+function isBinaryDetail(detail) {
+  return BINARY_DETAILS.includes(detail);
+}
+
 // ../core/src/signals/ti01Moved.ts
 var leafOf = (block) => block.path[block.path.length - 1] ?? "";
 function sameStemDeletions(diff) {
@@ -37841,9 +38003,20 @@ function detectTI01(diff, mode, moved = /* @__PURE__ */ new Set(), compared2 = /
   for (const file of diff) {
     const renamedAway = isRenamedAwayTest(file);
     const deleted = file.status === "deleted" && isTestFile(file.path);
-    if (!(renamedAway || deleted) || file.binary === true) continue;
+    if (!(renamedAway || deleted)) continue;
     const path = renamedAway ? file.oldPath : file.path;
     if (isSnapFile(path) || found.has(path)) continue;
+    if (file.binary === true) {
+      if (testLanguage(path) === null) continue;
+      found.set(path, {
+        id: "TI01",
+        severity: mode,
+        path,
+        line: null,
+        detail: renamedAway ? BINARY_RENAMED_AWAY_DETAIL : BINARY_DELETED_DETAIL
+      });
+      continue;
+    }
     const defined = removedTests(file);
     const cutCode = file.textTruncated === true && (testLanguage(path) !== null || coverageSourceLanguage(path) !== null);
     const counts2 = defined === "yes" || defined === "unknown" || cutCode || renamedAway;
@@ -37894,10 +38067,17 @@ var MAX_PER_FILE = 20;
 var DETAILS = {
   existing: "An unconditional skip was added to a test that the diff shows existed before this change, so that test no longer runs.",
   conditional: "A conditional skip was added; the test is skipped only where its condition holds.",
+  module: "A module-level skip was added (pytest.importorskip, or pytest.skip with allow_module_level=True); every test of the file is skipped wherever it takes effect.",
   "cannot-place": "A skip was added inside a test body or hook, where the diff cannot tell which test it stops or whether a condition guards it.",
   adds: "A skip was added to a test that no removed line of this file opens, so the diff shows it as new."
 };
-var STRENGTH = { existing: 3, conditional: 2, "cannot-place": 1, adds: 0 };
+var STRENGTH = {
+  existing: 4,
+  conditional: 3,
+  module: 2,
+  "cannot-place": 1,
+  adds: 0
+};
 var keyOf = (token, name) => `${token}\0${name}`;
 function jsSkip(parsed) {
   const { token, name, condition } = parsed;
@@ -38079,6 +38259,13 @@ function jsConstant(text) {
   return null;
 }
 function ownState(block, view) {
+  return stronger(modifierState(block, view), switchOffState(block));
+}
+function switchOffState(block) {
+  if (block.emptyTable === true) return UNCONDITIONAL;
+  return block.guarded === void 0 ? NONE : CONDITIONAL;
+}
+function modifierState(block, view) {
   const modifiers = block.modifiers;
   if (modifiers.includes("skip") || modifiers.includes("todo")) return UNCONDITIONAL;
   if (modifiers.includes("fails") && !(view.python && modifiers.includes("skipIf"))) return UNCONDITIONAL;
@@ -38181,6 +38368,9 @@ function detectTI03Pairs(input) {
     const take = (line) => {
       if (best === null || line < best) best = line;
     };
+    if (carrier.removedAt !== void 0 && target === UNCONDITIONAL && isAdded(carrier.removedAt)) {
+      take(carrier.removedAt);
+    }
     const indent = indentOf2(text[carrier.line - 1] ?? "");
     for (let k = carrier.line - 1; k >= 1; k--) {
       const line = text[k - 1] ?? "";
@@ -38240,6 +38430,9 @@ function detectTI03Pairs(input) {
   };
   const findings = [];
   for (const pair of [...input.match.pairs, ...input.match.moved, ...input.match.replaced]) {
+    if (pair.head.moduleSkip !== void 0 && pair.base.moduleSkip === void 0) {
+      findings.push({ path: pair.headPath, line: pair.head.moduleSkip, category: "module" });
+    }
     const headView = view("head", pair.headPath);
     const now = effective(headView, pair.head);
     if (now === NONE) continue;
@@ -39768,12 +39961,15 @@ function detectTI10(diff, options) {
   const noTestFiles = options.repoFiles.length > 0 && !options.repoFiles.some((path) => isTestFile(path)) && deletedTestFiles(diff).length === 0;
   const signals = [];
   for (const file of diff) {
-    if (file.binary === true || !isPackageJsonFile(file.path)) continue;
+    if (!isPackageJsonFile(file.path)) continue;
     if (file.status !== "modified" && file.status !== "renamed") continue;
     const found = [];
     const scripts = options.sources === void 0 ? null : scriptsOf(options.sources, file);
     if (scripts !== null) {
       found.push(...scriptsObjectFindings(scripts.base, scripts.head, noTestFiles));
+    } else if (file.binary === true) {
+      signals.push({ id: "TI10", severity: options.mode, path: file.path, line: null, detail: BINARY_CHANGES_DETAIL });
+      continue;
     } else if (file.hunks !== void 0) {
       found.push(...diffLineFindings(file.hunks, noTestFiles));
     } else {
@@ -41472,7 +41668,6 @@ function lookupOf2(side) {
 function candidatesOf2(diff) {
   const found = [];
   for (const file of diff) {
-    if (file.binary === true) continue;
     const kind = testConfigKind(file.path);
     if (kind === null) continue;
     if (file.status === "modified" || file.status === "added") {
@@ -41762,6 +41957,12 @@ function flowOf(line) {
   return items === null ? null : { key: kv.key, items: new Set(items) };
 }
 function detectTI11(diff, mode) {
+  const signals = [];
+  for (const file of diff) {
+    if (file.binary === true && (isWorkflowFile(file.path) || isWorkflowFile(file.oldPath))) {
+      signals.push({ id: "TI11", severity: mode, path: file.path, line: null, detail: BINARY_CHANGES_DETAIL });
+    }
+  }
   const files = diff.filter(
     (file) => (isWorkflowFile(file.path) || isWorkflowFile(file.oldPath)) && file.hunks !== void 0 && file.binary !== true
   );
@@ -41780,7 +41981,6 @@ function detectTI11(diff, mode) {
     if (list === void 0) addedByBase.set(base, [flags]);
     else list.push(flags);
   }
-  const signals = [];
   for (const file of files) {
     const path = file.path;
     const added = (file.hunks ?? []).flatMap((hunk) => hunk.added);
@@ -42023,8 +42223,14 @@ function detectTI14(diff, options) {
   const signals = [];
   for (const file of diff) {
     if (file.path !== config && file.oldPath !== config) continue;
-    if (file.hunks === void 0 || file.binary === true) continue;
     const path = file.path === config ? file.path : file.oldPath;
+    if (file.binary === true) {
+      if (file.status !== "added") {
+        signals.push({ id: "TI14", severity: options.mode, path, line: null, detail: BINARY_CHANGES_DETAIL });
+      }
+      continue;
+    }
+    if (file.hunks === void 0) continue;
     const removedNumbers = [];
     const addedNumbers = [];
     let lastAdded;
@@ -43234,6 +43440,7 @@ function check(input) {
     settings: dependencySettings,
     ...input.dependencyLookups === void 0 ? {} : { lookups: input.dependencyLookups }
   });
+  const testIndexUnavailable = parsedDiff === null || testIntegrity2.mode === "off" ? comparison?.unavailable : withBinaryTestFiles(comparison?.unavailable, binaryTouchedTestFiles(parsedDiff));
   const base = {
     version: input.version,
     threshold: input.threshold,
@@ -43256,7 +43463,7 @@ function check(input) {
     ...textTruncatedTestFiles.length > 0 ? { textTruncatedTestFiles } : {},
     ...comparison === null || comparison.languages.length === 0 ? {} : { testIntegrityLanguages: comparison.languages },
     ...omittedSignals.length === 0 ? {} : { omittedSignals },
-    ...comparison?.unavailable === void 0 ? {} : { testIndexUnavailable: comparison.unavailable },
+    ...testIndexUnavailable === void 0 ? {} : { testIndexUnavailable },
     ...testChanges === void 0 ? {} : { testChanges },
     ...testExercise === void 0 ? {} : { testExercise },
     ...comparison?.configUnavailable === void 0 ? {} : { testConfigUnavailable: comparison.configUnavailable },
@@ -44807,7 +45014,7 @@ var MESSAGE_HINTS = {
   TEST_INTEGRITY_TI15: "Check that the code handles the general case and not only the test's value, and add a test with another input.",
   TEST_INTEGRITY_TI16: "Fix the lint or type error the comment hides, or say in the PR why the test needs it.",
   TEST_INTEGRITY_TI17: "Restore the assertion that can fail, or say in the PR why the test checks less now.",
-  TEST_INTEGRITY_INDEX_UNAVAILABLE: "A file over 512 KiB or nested too deeply, one with many syntax errors, more than 200 touched test files, a missing Python 3.8 or newer for `.py` files, or git objects that could not be read stop the comparison. Review the named test files by hand for removed tests and weakened assertions.",
+  TEST_INTEGRITY_INDEX_UNAVAILABLE: "A file over 512 KiB or nested too deeply, one with many syntax errors, more than 200 touched test files, a missing Python 3.8 or newer for `.py` files, or git objects that could not be read stop the comparison. A test file git shows as binary (a `-diff` or `binary` attribute in `.gitattributes`) hides its changed lines from the signals that read the diff, and non-text content such as a NUL byte also stops the comparison. Review the named test files by hand for removed tests and weakened assertions.",
   TEST_INTEGRITY_TEXT_TRUNCATED: "Review the named files by hand for skipped, focused or weakened tests, or split the change so each file stays under the limit.",
   TEST_INTEGRITY_ACCEPTED: "A reviewer other than the PR author signed off, so the block findings are warnings. The sign-off belongs to the pull request, not to a commit: remove the label if a later push should be judged again.",
   TEST_INTEGRITY_ACCEPT_IGNORED: "The block findings stand. Fix them, or ask a reviewer who is not the PR author to apply the label; it counts only when a user account other than the author applied it last.",
@@ -44907,8 +45114,13 @@ var SIGNAL_HINT_IDS = /* @__PURE__ */ new Set([
   "TI16",
   "TI17"
 ]);
-function signalHint(id, label, blocks) {
-  return SIGNAL_HINT_IDS.has(id) ? hintFor(`TEST_INTEGRITY_${id}`, label, blocks) : void 0;
+var BINARY_HINT_SENTENCE = "Git shows this file as binary: if a `-diff` or `binary` attribute in `.gitattributes` matches it, remove that attribute; if none does, the file holds non-text content such as a NUL byte, so store it as UTF-8 text.";
+var BINARY_FINDING_IDS = /* @__PURE__ */ new Set(["TI01", "TI10", "TI11", "TI14"]);
+function signalHint(id, label, blocks, detail) {
+  if (!SIGNAL_HINT_IDS.has(id)) return void 0;
+  const hint = hintFor(`TEST_INTEGRITY_${id}`, label, blocks);
+  if (hint === void 0 || detail === void 0 || !BINARY_FINDING_IDS.has(id) || !isBinaryDetail(detail)) return hint;
+  return `${hint} ${BINARY_HINT_SENTENCE}`;
 }
 var MAX_FINDINGS = 20;
 var OPEN_FINDINGS = 10;
@@ -44941,7 +45153,7 @@ function testIntegrityLines(report) {
       const out = [
         `- ${SEVERITY_ICON[signal2.severity] ?? LEVEL_ICON.info} **${inlineText(signal2.id)}** ${location} \u2014 ${inlineText(signal2.detail)}`
       ];
-      const hint = signalHint(signal2.id, label, signal2.severity === "block");
+      const hint = signalHint(signal2.id, label, signal2.severity === "block", signal2.detail);
       if (hint !== void 0) out.push(`  - Hint: ${hint}`);
       return out;
     };
@@ -45493,7 +45705,11 @@ function policyCell(report) {
 function renderMessage(m, report) {
   const line = `- ${LEVEL_ICON[m.level]} \`${m.code}\` ${inlineText(m.text)}`;
   const lifted = m.code === "TEST_INTEGRITY_INDEX_UNAVAILABLE" || m.code === "TEST_INTEGRITY_TEXT_TRUNCATED";
-  const hint = hintFor(m.code, acceptLabelOf(report), lifted ? isLiftableUnreadableError(m) : m.level === "error");
+  const base = hintFor(m.code, acceptLabelOf(report), lifted ? isLiftableUnreadableError(m) : m.level === "error");
+  const binary = base !== void 0 && report.testIntegrity.signals.some(
+    (s) => BINARY_FINDING_IDS.has(s.id) && `TEST_INTEGRITY_${s.id}` === m.code && isBinaryDetail(s.detail)
+  );
+  const hint = binary ? `${base} ${BINARY_HINT_SENTENCE}` : base;
   return hint === void 0 ? line : `${line}
   - Hint: ${hint}`;
 }
@@ -45627,6 +45843,7 @@ var BLOCK_KEYS = [
   "bodyEnd",
   "assertions"
 ];
+var OPTIONAL_BLOCK_KEYS = ["guarded", "emptyTable", "removedAt", "moduleSkip"];
 var ASSERTION_KEYS = ["chain", "line", "awaited", "inTryCatch", "afterEarlyReturn"];
 var MOCK_KEYS = ["callee", "specifier", "line"];
 var BadOutput = class extends Error {
@@ -45665,10 +45882,25 @@ function checkBool(value, where, field) {
   if (typeof value !== "boolean") return bad(where, `${field} is not a boolean`);
   return value;
 }
-function checkKeys(value, keys, where, what) {
+function checkKeys(value, keys, where, what, optional = []) {
   if (!isObject2(value)) return bad(where, `${what} is not an object`);
-  if (!hasExactKeys(value, keys)) return bad(where, `${what} has missing or extra keys`);
+  const present = optional.filter((key) => Object.hasOwn(value, key));
+  if (!hasExactKeys(value, [...keys, ...present])) return bad(where, `${what} has missing or extra keys`);
   return value;
+}
+function switchOffFields(raw, where) {
+  const fields = {};
+  if (Object.hasOwn(raw, "guarded")) {
+    if (checkString(raw.guarded, where, "block guarded") !== "if") return bad(where, "block guarded is unknown");
+    fields.guarded = "if";
+  }
+  if (Object.hasOwn(raw, "emptyTable")) {
+    if (raw.emptyTable !== true) return bad(where, "block emptyTable is not true");
+    fields.emptyTable = true;
+  }
+  if (Object.hasOwn(raw, "removedAt")) fields.removedAt = checkInt(raw.removedAt, where, "block removedAt", 1);
+  if (Object.hasOwn(raw, "moduleSkip")) fields.moduleSkip = checkInt(raw.moduleSkip, where, "block moduleSkip", 1);
+  return fields;
 }
 function mapAssertion(value, where) {
   const raw = checkKeys(value, ASSERTION_KEYS, where, "an assertion");
@@ -45681,7 +45913,7 @@ function mapAssertion(value, where) {
   };
 }
 function mapBlock(value, normalized, where) {
-  const raw = checkKeys(value, BLOCK_KEYS, where, "a block");
+  const raw = checkKeys(value, BLOCK_KEYS, where, "a block", OPTIONAL_BLOCK_KEYS);
   const kind = checkString(raw.kind, where, "block kind");
   if (!BLOCK_KINDS.includes(kind)) return bad(where, "block kind is unknown");
   const name = checkString(raw.name, where, "block name");
@@ -45713,7 +45945,8 @@ function mapBlock(value, normalized, where) {
     bodyHash: fnv1a32Hex(body),
     assertionCount: assertions.length,
     assertions,
-    guards: []
+    guards: [],
+    ...switchOffFields(raw, where)
   };
 }
 function mapMock(value, where) {
@@ -46713,7 +46946,13 @@ DECORATOR_MODIFIERS = {
 FIXTURES = ("pytest.fixture", "fixture")
 APPROX = ("pytest.approx", "approx")
 BODY_CALLS = ("pytest.skip", "pytest.xfail")
+# A raise of one of these in a test body skips the test (pytest reports unittest.SkipTest as a skip).
+SKIP_EXCEPTIONS = ("unittest.SkipTest", "unittest.case.SkipTest")
+# Called at module level, these skip the whole module: importorskip always, skip with allow_module_level=True.
+MODULE_SKIPS = ("pytest.importorskip", "pytest.skip")
 SKIP_MODIFIERS = ("skip", "skipIf", "runIf", "fails")
+# The longest name and path entry the index writes, in characters, as core's MAX_TEST_NAME_CHARS.
+MAX_NAME = 500
 CLASS_HOOKS = (
     "setup_method", "teardown_method", "setup_class", "teardown_class",
     "setUp", "tearDown", "setUpClass", "tearDownClass", "asyncSetUp", "asyncTearDown",
@@ -46737,9 +46976,10 @@ CONDITIONALS = (ast.If, ast.IfExp, ast.While, ast.ExceptHandler, ast.BoolOp) + (
 )
 FSTRINGS = (ast.JoinedStr,) + ((ast.TemplateStr,) if getattr(ast, "TemplateStr", None) is not None else ())
 
-# A walk context is a tuple: (block, scope, chain, fn, in_try, conditional, nested, in_fstring).
-# scope: 0 module level, 1 directly in a test class, 2 anywhere else.
-BLOCK, SCOPE, CHAIN, FN, TRY, COND, NESTED, FSTR = range(8)
+# A walk context is a tuple: (block, scope, chain, fn, in_try, conditional, nested, in_fstring, in_if).
+# scope: 0 module level, 1 directly in a test class, 2 anywhere else. in_if: inside an if statement since the module
+# or the test class whose body holds the node.
+BLOCK, SCOPE, CHAIN, FN, TRY, COND, NESTED, FSTR, IF = range(9)
 
 
 def dotted(node):
@@ -46827,6 +47067,75 @@ def pytestmark_modifiers(body, aliases):
         return []
     marks = list(value.elts) if isinstance(value, (ast.List, ast.Tuple)) else [value]
     return [mod for mod in decorator_modifiers(marks, aliases) if mod in SKIP_MODIFIERS]
+
+
+def empty_table(decorators, aliases):
+    """Whether a parametrize decorator gives an empty list or tuple literal as its argument values (pytest then runs
+    no case of the test: it skips it by default)."""
+    for decorator in decorators:
+        if not isinstance(decorator, ast.Call):
+            continue
+        if canonical(dotted(decorator.func), DECORATOR_MODIFIERS, aliases) != "pytest.mark.parametrize":
+            continue
+        values = decorator.args[1] if len(decorator.args) > 1 else None
+        for keyword in decorator.keywords:
+            if keyword.arg == "argvalues":
+                values = keyword.value
+        if isinstance(values, (ast.List, ast.Tuple)) and not values.elts:
+            return True
+    return False
+
+
+def is_false(node):
+    return isinstance(node, ast.Constant) and not node.value
+
+
+def removals(statements):
+    """The defs and classes of one statement list that a later statement of the same list takes out of collection: a
+    def or class of the same name (the name now binds the later one), a del of the name, or name.__test__ = a false
+    constant. Maps id(node) to the line of the statement that takes it out."""
+    removed = {}
+    bound = {}
+    for statement in statements:
+        names = []
+        if isinstance(statement, FUNCTIONS + (ast.ClassDef,)):
+            names = [statement.name]
+        elif isinstance(statement, ast.Delete):
+            targets = list(statement.targets)
+            while targets:
+                target = targets.pop()
+                if isinstance(target, (ast.Tuple, ast.List)):
+                    targets.extend(target.elts)
+                elif isinstance(target, ast.Name):
+                    names.append(target.id)
+        elif isinstance(statement, ast.Assign) and is_false(statement.value):
+            for target in statement.targets:
+                if isinstance(target, ast.Attribute) and target.attr == "__test__" and isinstance(target.value, ast.Name):
+                    names.append(target.value.id)
+        for name in names:
+            node = bound.pop(name, None)
+            if node is not None:
+                removed[id(node)] = statement.lineno
+        if isinstance(statement, FUNCTIONS + (ast.ClassDef,)):
+            bound[statement.name] = statement
+    return removed
+
+
+def class_test_off(body):
+    """The line of the last __test__ = ... assignment directly in a class body when it assigns a false constant."""
+    line = None
+    for statement in body:
+        if isinstance(statement, ast.Assign):
+            if any(isinstance(target, ast.Name) and target.id == "__test__" for target in statement.targets):
+                line = statement.lineno if is_false(statement.value) else None
+    return line
+
+
+def allows_module_level(call):
+    return any(
+        keyword.arg == "allow_module_level" and isinstance(keyword.value, ast.Constant) and keyword.value.value
+        for keyword in call.keywords
+    )
 
 
 def has_decorator(decorators, names, aliases):
@@ -47070,7 +47379,9 @@ def build(text):
     assertions = []
     ranges = []
     awaited = set()
-    stack = [(tree, (None, 0, (), None, False, False, False, False))]
+    removed = {}
+    module_skips = []
+    stack = [(tree, (None, 0, (), None, False, False, False, False, False))]
     while stack:
         node, ctx = stack.pop()
         kind_of = type(node)
@@ -47088,12 +47399,18 @@ def build(text):
                     stack.append((value, ctx))
             if kind is not None:
                 entry = new_block(
-                    source, node, kind, ctx[CHAIN] + (node.name,), decorator_modifiers(node.decorator_list, aliases)
+                    source,
+                    node,
+                    kind,
+                    ctx[CHAIN] + (node.name[:MAX_NAME],),
+                    decorator_modifiers(node.decorator_list, aliases),
                 )
+                switch_off(entry, ctx, removed.get(id(node)))
+                entry["empty_table"] = empty_table(node.decorator_list, aliases)
                 blocks.append(entry)
-                inner = (entry, 2, ctx[CHAIN], record, False, False, False, ctx[FSTR])
+                inner = (entry, 2, ctx[CHAIN], record, False, False, False, ctx[FSTR], False)
             else:
-                inner = (block, 2, ctx[CHAIN], record, ctx[TRY], ctx[COND], block is not None, ctx[FSTR])
+                inner = (block, 2, ctx[CHAIN], record, ctx[TRY], ctx[COND], block is not None, ctx[FSTR], False)
             stack.extend((child, inner) for child in node.body)
             continue
 
@@ -47102,16 +47419,26 @@ def build(text):
             for field in ("decorator_list", "bases", "keywords", "type_params"):
                 stack.extend((child, ctx) for child in getattr(node, field, ()))
             if scope < 2 and is_test_class(node):
-                chain = ctx[CHAIN] + (node.name,)
+                chain = ctx[CHAIN] + (node.name[:MAX_NAME],)
                 mods = decorator_modifiers(node.decorator_list, aliases) + pytestmark_modifiers(node.body, aliases)
                 entry = new_block(source, node, "describe", chain, mods)
+                switch_off(entry, ctx, removed.get(id(node)) or class_test_off(node.body))
+                entry["empty_table"] = empty_table(node.decorator_list, aliases)
                 blocks.append(entry)
-                inner = (entry, 1, chain, None, False, False, False, ctx[FSTR])
+                removed.update(removals(node.body))
+                inner = (entry, 1, chain, None, False, False, False, ctx[FSTR], False)
             else:
                 block = ctx[BLOCK]
-                inner = (block, 2, ctx[CHAIN], None, ctx[TRY], ctx[COND], block is not None, ctx[FSTR])
+                inner = (block, 2, ctx[CHAIN], None, ctx[TRY], ctx[COND], block is not None, ctx[FSTR], False)
             stack.extend((child, inner) for child in node.body)
             continue
+
+        if ctx[SCOPE] < 2:
+            # Module or test-class code: a def or class of a statement list here may be taken out by a later statement.
+            for value in ast.iter_fields(node):
+                statements = value[1]
+                if isinstance(statements, list) and statements and isinstance(statements[0], ast.stmt):
+                    removed.update(removals(statements))
 
         if kind_of is ast.Lambda:
             stack.append((node.args, ctx))
@@ -47130,6 +47457,8 @@ def build(text):
         child_ctx = ctx
         if kind_of in CONDITIONALS:
             child_ctx = ctx[:COND] + (True,) + ctx[COND + 1:]
+            if kind_of is ast.If:
+                child_ctx = child_ctx[:IF] + (True,)
         elif kind_of in FSTRINGS:
             if not ctx[FSTR]:
                 ranges.append((source.start(node), source.end(node)))
@@ -47151,9 +47480,19 @@ def build(text):
             block = ctx[BLOCK]
             if block is not None:
                 assertions.append((block, node.lineno, node.col_offset, assert_chain(node.test, aliases), False, ctx))
+        elif kind_of is ast.Raise:
+            block = ctx[BLOCK]
+            if block is not None and block["kind"] != "describe" and not ctx[NESTED] and node.exc is not None:
+                raised = node.exc.func if isinstance(node.exc, ast.Call) else node.exc
+                if canonical(dotted(raised), SKIP_EXCEPTIONS, aliases) is not None:
+                    block["mods"].append("skipIf" if ctx[COND] else "skip")
         elif kind_of is ast.Call:
             callee = dotted(node.func)
             block = ctx[BLOCK]
+            if block is None and ctx[SCOPE] == 0 and not ctx[NESTED]:
+                module_call = canonical(callee, MODULE_SKIPS, aliases)
+                if module_call == "pytest.importorskip" or (module_call == "pytest.skip" and allows_module_level(node)):
+                    module_skips.append(node.lineno)
             if callee in MOCK_CALLEES:
                 mocks.append((node.lineno, node.col_offset, callee, mock_specifier(callee, node)))
             if block is not None and callee is not None:
@@ -47190,10 +47529,11 @@ def build(text):
             points.append(block["body_start"])
             points.append(block["body_end"])
         normalized, where = normalize(text, ranges, points)
+    module_skip = min(module_skips) if module_skips else None
     out_blocks = []
     for block in blocks:
         block["assertions"].sort(key=lambda a: (a[0], a[1]))
-        out_blocks.append({
+        out_blocks.append(switch_off_fields(block, module_skip, {
             "kind": block["kind"],
             "name": block["name"],
             "path": list(block["path"]),
@@ -47206,13 +47546,35 @@ def build(text):
                 {"chain": a[2], "line": a[0], "awaited": a[3], "inTryCatch": a[4], "afterEarlyReturn": a[5]}
                 for a in block["assertions"]
             ],
-        })
+        }))
     return {
         "parsed": True,
         "normalized": normalized,
         "tests": out_blocks,
         "mocks": [{"callee": m[2], "specifier": m[3], "line": m[0]} for m in mocks],
     }
+
+
+def switch_off(entry, ctx, removed_at):
+    """Records on a new block whether it sits under an if, and the line of the statement that takes it out of
+    collection (which makes it a skip)."""
+    entry["guarded"] = ctx[IF]
+    entry["removed_at"] = removed_at
+    if removed_at is not None:
+        entry["mods"].append("skip")
+
+
+def switch_off_fields(block, module_skip, out):
+    """The output block with the optional fields: written only when they hold, so a block without one is unchanged."""
+    if block["guarded"]:
+        out["guarded"] = "if"
+    if block["empty_table"]:
+        out["emptyTable"] = True
+    if block["removed_at"] is not None:
+        out["removedAt"] = block["removed_at"]
+    if module_skip is not None:
+        out["moduleSkip"] = module_skip
+    return out
 
 
 def new_block(source, node, kind, path, mods):
@@ -47225,7 +47587,7 @@ def new_block(source, node, kind, path, mods):
     body_end = source.end(last)
     return {
         "kind": kind,
-        "name": node.name,
+        "name": node.name[:MAX_NAME],
         "path": path,
         "line": node.lineno,
         "col": node.col_offset,
