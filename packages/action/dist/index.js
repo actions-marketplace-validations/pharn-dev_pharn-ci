@@ -28556,6 +28556,182 @@ function planLookups(added, offRegistry, registries) {
   return { planned: all.slice(0, MAX_LOOKUPS), overCap: Math.max(0, all.length - MAX_LOOKUPS) };
 }
 
+// ../core/src/jsTsExtensions.ts
+var JS_TS_EXTENSIONS = Object.freeze(["js", "jsx", "ts", "tsx", "mjs", "cjs", "mts", "cts"]);
+function isJsTsExtension(ext) {
+  return JS_TS_EXTENSIONS.includes(ext);
+}
+var FLAVOR = Object.freeze({
+  js: "js",
+  jsx: "js",
+  ts: "ts",
+  tsx: "ts",
+  mjs: "js",
+  cjs: "js",
+  mts: "ts",
+  cts: "ts"
+});
+function jsTsFlavor(ext) {
+  return FLAVOR[ext];
+}
+
+// ../core/src/testFiles.ts
+var TEST_DIRECTORIES = /* @__PURE__ */ new Set(["test", "tests", "__tests__"]);
+var TEST_BASENAME = [
+  new RegExp(`\\.(?:test|spec)\\.(?:${JS_TS_EXTENSIONS.join("|")})$`),
+  /\.(?:e2e|pw)\.ts$/,
+  /^test_.+\.py$/,
+  /_test\.py$/,
+  /_test\.go$/
+];
+function isTestFile(path) {
+  if (hasTestBasename(path)) return true;
+  const segments = path.split("/");
+  return segments.slice(0, -1).some((segment) => TEST_DIRECTORIES.has(segment));
+}
+function hasTestBasename(path) {
+  const basename = path.slice(path.lastIndexOf("/") + 1);
+  return TEST_BASENAME.some((pattern) => pattern.test(basename));
+}
+function isRenamedAwayTest(file) {
+  if (file.status !== "renamed") return false;
+  if (isTestFile(file.oldPath) && !isTestFile(file.path)) return true;
+  return hasTestBasename(file.oldPath) && !hasTestBasename(file.path);
+}
+function isSnapFile(path) {
+  const basename = path.slice(path.lastIndexOf("/") + 1);
+  return basename.length > ".snap".length && basename.endsWith(".snap");
+}
+function keepTestFileText(file) {
+  return isTestFile(file.path) || isTestFile(file.oldPath);
+}
+function testStem(path) {
+  const basename = path.slice(path.lastIndexOf("/") + 1);
+  const dot = basename.lastIndexOf(".");
+  let stem = dot > 0 ? basename.slice(0, dot) : basename;
+  stem = stem.replace(/\.(?:test|spec|e2e|pw)$/, "");
+  if (stem.startsWith("test_") && stem.length > "test_".length) stem = stem.slice("test_".length);
+  if (stem.endsWith("_test") && stem.length > "_test".length) stem = stem.slice(0, -"_test".length);
+  return stem;
+}
+function testPackageDir(path) {
+  const directories = path.split("/").slice(0, -1);
+  let nearest = -1;
+  for (let i = directories.length - 1; i >= 0; i--) {
+    if (TEST_DIRECTORIES.has(directories[i])) {
+      nearest = i;
+      break;
+    }
+  }
+  return (nearest === -1 ? directories : directories.slice(0, nearest)).join("/");
+}
+var DEFINES_TEST = /^(?:(?:it|test|describe|context|specify)(?:\.[A-Za-z]+)*\s*[(`]|(?:async\s+)?def\s+test_|func\s+Test)/;
+function definesTests(text) {
+  return DEFINES_TEST.test(text.slice(0, 400).trimStart());
+}
+function deletedTestFiles(diff) {
+  const found = /* @__PURE__ */ new Set();
+  for (const file of diff) {
+    if (file.status === "deleted" && isTestFile(file.path)) found.add(file.path);
+    else if (isRenamedAwayTest(file)) found.add(file.oldPath);
+  }
+  return [...found].sort(byCodeUnit);
+}
+
+// ../core/src/testSources.ts
+var MAX_TEST_SOURCE_FILES = 200;
+var MAX_TEST_SOURCE_FILE_BYTES = 524288;
+var MAX_TEST_SOURCE_TOTAL_BYTES = 16777216;
+var TEST_SOURCE_LIMITS = {
+  files: MAX_TEST_SOURCE_FILES,
+  fileBytes: MAX_TEST_SOURCE_FILE_BYTES,
+  totalBytes: MAX_TEST_SOURCE_TOTAL_BYTES
+};
+var DEPENDENCY_SOURCE_LIMITS = {
+  files: 100,
+  fileBytes: 33554432,
+  totalBytes: 33554432
+};
+var TEST_CONFIG_PREFIXES = [
+  "vitest.config.",
+  "vite.config.",
+  "vitest.workspace.",
+  "jest.config.",
+  "playwright.config."
+];
+var TEST_CONFIG_NAMES = /* @__PURE__ */ new Set([
+  "pytest.ini",
+  "pyproject.toml",
+  "setup.cfg",
+  "tox.ini",
+  "conftest.py",
+  "package.json"
+]);
+function isTestConfigFile(path) {
+  const basename = path.slice(path.lastIndexOf("/") + 1);
+  if (TEST_CONFIG_NAMES.has(basename)) return true;
+  if (basename.startsWith(".mocharc")) return true;
+  return TEST_CONFIG_PREFIXES.some((prefix) => basename.length > prefix.length && basename.startsWith(prefix));
+}
+var isTestSource = (path) => !isSnapFile(path) && (isTestFile(path) || isTestConfigFile(path));
+function selectTestSourcePaths(diff) {
+  const base = /* @__PURE__ */ new Set();
+  const head = /* @__PURE__ */ new Set();
+  for (const file of diff) {
+    if ((file.status === "modified" || file.status === "deleted" || file.status === "renamed") && isTestSource(file.oldPath)) {
+      base.add(file.oldPath);
+    }
+    if ((file.status === "added" || file.status === "modified" || file.status === "renamed") && isTestSource(file.path)) {
+      head.add(file.path);
+    }
+  }
+  return { base: [...base].sort(byCodeUnit), head: [...head].sort(byCodeUnit) };
+}
+function isUnsafeTestSourcePath(path) {
+  if (path === "" || path.startsWith("/")) return true;
+  for (let i = 0; i < path.length; i++) {
+    const code2 = path.charCodeAt(i);
+    if (code2 <= 31 || code2 >= 127 && code2 <= 159) return true;
+  }
+  return path.split("/").some((segment) => segment === "" || segment === "." || segment === "..");
+}
+function planTestSourceReads(paths, objects, limits = TEST_SOURCE_LIMITS, first) {
+  const read = [];
+  const dropped = [];
+  let total = 0;
+  let tripped = false;
+  const unique = [...new Set(paths)].sort(byCodeUnit);
+  const ordered = first === void 0 || first.size === 0 ? unique : [...unique.filter((path) => first.has(path)), ...unique.filter((path) => !first.has(path))];
+  for (const path of ordered) {
+    if (isUnsafeTestSourcePath(path)) {
+      dropped.push({ path, reason: "unsafe-path" });
+      continue;
+    }
+    const object = objects.get(path);
+    if (object === void 0 || object === null || object.type !== "blob") {
+      dropped.push({ path, reason: "missing" });
+    } else if (object.size > limits.fileBytes) {
+      dropped.push({ path, reason: "too-large" });
+    } else if (read.length >= limits.files) {
+      dropped.push({ path, reason: "over-file-cap" });
+    } else if (tripped || total + object.size > limits.totalBytes) {
+      tripped = true;
+      dropped.push({ path, reason: "over-total-cap" });
+    } else {
+      total += object.size;
+      read.push(path);
+    }
+  }
+  if (ordered !== unique) {
+    read.sort(byCodeUnit);
+    dropped.sort((a, b) => byCodeUnit(a.path, b.path));
+  }
+  return { read, dropped };
+}
+function unavailableTestSources(reason) {
+  return { base: { unavailable: reason }, head: { unavailable: reason } };
+}
+
 // ../core/src/dependencies/messages.ts
 var NAMED = 10;
 var plural = (n, one, many) => n === 1 ? one : many;
@@ -28610,12 +28786,25 @@ function lookupUnavailableMessage(counts2) {
     text: `Registry lookups did not complete for ${missed} of ${total} added ${plural(total, "package", "packages")}, so D01 to D03 were not checked for ${plural(missed, "it", "them")}: ${reasons.join("; ")}.`
   };
 }
+var mib = (bytes) => `${bytes / 1048576} MiB`;
+function capWords(reason) {
+  switch (reason) {
+    case "too-large":
+      return `: over the ${mib(DEPENDENCY_SOURCE_LIMITS.fileBytes)} cap for one file`;
+    case "over-total-cap":
+      return `: past the ${mib(DEPENDENCY_SOURCE_LIMITS.totalBytes)} cap for one side`;
+    case "over-file-cap":
+      return `: past the ${DEPENDENCY_SOURCE_LIMITS.files}-file cap for one side`;
+    default:
+      return "";
+  }
+}
 function checkIncompleteMessage(unread) {
   const n = unread.length;
-  const named = unread.slice(0, NAMED).map((file) => `${codeSpan(file.path)} (${file.reason})`).join(", ");
+  const named = unread.slice(0, NAMED).map((file) => `${codeSpan(file.path)} (${file.reason}${capWords(file.reason)})`).join(", ");
   const more = n - NAMED;
   return {
-    level: "warn",
+    level: unread.every((file) => file.reason === "unavailable") ? "warn" : "error",
     code: "DEPENDENCY_CHECK_INCOMPLETE",
     text: `${n} manifest or lockfile ${plural(n, "file", "files")} could not be read, so dependency safety did not check ${plural(n, "it", "them")}: ${named}${more > 0 ? `, +${more} more` : ""}.`
   };
@@ -29157,6 +29346,7 @@ function parsePnpmLock(text) {
 
 // ../core/src/dependencies/toml.ts
 var MAX_DEPTH2 = 32;
+var ESCAPES2 = { '"': '"', "\\": "\\", n: "\n", t: "	", r: "\r", b: "\b", f: "\f" };
 var TomlError = class extends Error {
 };
 var isBare = (c) => c >= "A" && c <= "Z" || c >= "a" && c <= "z" || c >= "0" && c <= "9" || c === "_" || c === "-";
@@ -29197,16 +29387,52 @@ function parseToml(text) {
     if (src[pos] === "\r") pos++;
     if (pos < end && src[pos] !== "\n") fail2();
   };
-  const basicString = () => {
-    if (src.startsWith('"""', pos)) {
-      const close = src.indexOf('"""', pos + 3);
-      if (close === -1) fail2();
-      let stop = close;
-      while (src[stop + 3] === '"') stop++;
-      const value2 = src.slice(pos + 3, stop);
-      pos = stop + 3;
-      return value2;
+  const escapeSequence = () => {
+    const next = src[pos + 1];
+    if (next === "u" || next === "U") {
+      const size = next === "u" ? 4 : 8;
+      const hex = src.slice(pos + 2, pos + 2 + size);
+      const code2 = /^[0-9a-fA-F]+$/.test(hex) && hex.length === size ? Number.parseInt(hex, 16) : Number.NaN;
+      if (!Number.isFinite(code2) || code2 > 1114111) fail2();
+      pos += 2 + size;
+      return String.fromCodePoint(code2);
     }
+    const mapped = (next === void 0 ? void 0 : ESCAPES2[next]) ?? fail2();
+    pos += 2;
+    return mapped;
+  };
+  const multiLineBasicString = () => {
+    pos += 3;
+    if (src[pos] === "\n") pos++;
+    else if (src[pos] === "\r" && src[pos + 1] === "\n") pos += 2;
+    let out = "";
+    while (pos < end) {
+      const ch = src[pos];
+      if (ch === '"' && src.startsWith('"""', pos)) {
+        let stop = pos;
+        while (src[stop + 3] === '"') stop++;
+        out += src.slice(pos, stop);
+        pos = stop + 3;
+        return out;
+      }
+      if (ch === "\\") {
+        let next = pos + 1;
+        while (src[next] === " " || src[next] === "	") next++;
+        if (src[next] === "\n" || src[next] === "\r" && src[next + 1] === "\n") {
+          pos = next;
+          while (pos < end && " 	\r\n".includes(src[pos])) pos++;
+          continue;
+        }
+        out += escapeSequence();
+        continue;
+      }
+      out += ch;
+      pos++;
+    }
+    return fail2();
+  };
+  const basicString = () => {
+    if (src.startsWith('"""', pos)) return multiLineBasicString();
     let out = "";
     pos++;
     while (pos < end) {
@@ -29217,21 +29443,7 @@ function parseToml(text) {
       }
       if (ch === "\n") fail2();
       if (ch === "\\") {
-        const next = src[pos + 1];
-        if (next === "u" || next === "U") {
-          const size = next === "u" ? 4 : 8;
-          const hex = src.slice(pos + 2, pos + 2 + size);
-          const code2 = /^[0-9a-fA-F]+$/.test(hex) && hex.length === size ? Number.parseInt(hex, 16) : Number.NaN;
-          if (!Number.isFinite(code2) || code2 > 1114111) fail2();
-          out += String.fromCodePoint(code2);
-          pos += 2 + size;
-          continue;
-        }
-        const map = { '"': '"', "\\": "\\", n: "\n", t: "	", r: "\r", b: "\b", f: "\f" };
-        const mapped = next === void 0 ? void 0 : map[next];
-        if (mapped === void 0) fail2();
-        out += mapped;
-        pos += 2;
+        out += escapeSequence();
         continue;
       }
       out += ch;
@@ -30738,13 +30950,9 @@ function scanAgentSetup(paths) {
 }
 
 // ../core/src/injection/paths.ts
-var DEFAULT_EXEMPT = [
-  "fixtures/**",
-  "**/__fixtures__/**",
-  "**/testdata/**",
-  "**/*.test.*",
-  "**/*.spec.*"
-];
+var DEFAULT_EXEMPT_DIRS = ["fixtures/**", "**/__fixtures__/**", "**/testdata/**"];
+var DEFAULT_EXEMPT_NAMES = ["**/*.test.*", "**/*.spec.*"];
+var DEFAULT_EXEMPT = [...DEFAULT_EXEMPT_DIRS, ...DEFAULT_EXEMPT_NAMES];
 var DEFAULT_PI03_EXEMPT = ["**/test/**"];
 var LOCALE_PATHS = [
   "**/locales/**",
@@ -30777,9 +30985,10 @@ function anyGlob(patterns) {
   const matchers = patterns.map(compileGlob);
   return (path) => matchers.some((matches) => matches(path));
 }
-var isDefaultExempt = anyGlob(DEFAULT_EXEMPT);
+var isExemptDir = anyGlob(DEFAULT_EXEMPT_DIRS);
+var isExemptName = anyGlob(DEFAULT_EXEMPT_NAMES);
 function isDefaultExemptPath(path) {
-  return isDefaultExempt(path);
+  return isExemptDir(path) || isExemptName(path) && instructionKindOf(path) === null;
 }
 function instructionKindOf(path) {
   const kind = classifySetupPath(path);
@@ -31151,7 +31360,8 @@ function longestBlob(text) {
   return bestLength === 0 ? null : { length: bestLength, hex: bestHex };
 }
 function pathRules(extraExempt) {
-  const exempt = anyGlob([...DEFAULT_EXEMPT, ...extraExempt]);
+  const policyExempt = anyGlob(extraExempt);
+  const exempt = (path) => isDefaultExemptPath(path) || policyExempt(path);
   const pi03Only = anyGlob(DEFAULT_PI03_EXEMPT);
   const locale = anyGlob(LOCALE_PATHS);
   return { exempt, pi03Exempt: (path) => pi03Only(path) || locale(path), locale };
@@ -32776,88 +32986,6 @@ function mcpWidenings(path, base, head) {
     else if (before !== text) found.add("server changed");
   }
   return MCP_WIDENINGS.filter((word) => found.has(word));
-}
-
-// ../core/src/jsTsExtensions.ts
-var JS_TS_EXTENSIONS = Object.freeze(["js", "jsx", "ts", "tsx", "mjs", "cjs", "mts", "cts"]);
-function isJsTsExtension(ext) {
-  return JS_TS_EXTENSIONS.includes(ext);
-}
-var FLAVOR = Object.freeze({
-  js: "js",
-  jsx: "js",
-  ts: "ts",
-  tsx: "ts",
-  mjs: "js",
-  cjs: "js",
-  mts: "ts",
-  cts: "ts"
-});
-function jsTsFlavor(ext) {
-  return FLAVOR[ext];
-}
-
-// ../core/src/testFiles.ts
-var TEST_DIRECTORIES = /* @__PURE__ */ new Set(["test", "tests", "__tests__"]);
-var TEST_BASENAME = [
-  new RegExp(`\\.(?:test|spec)\\.(?:${JS_TS_EXTENSIONS.join("|")})$`),
-  /\.(?:e2e|pw)\.ts$/,
-  /^test_.+\.py$/,
-  /_test\.py$/,
-  /_test\.go$/
-];
-function isTestFile(path) {
-  if (hasTestBasename(path)) return true;
-  const segments = path.split("/");
-  return segments.slice(0, -1).some((segment) => TEST_DIRECTORIES.has(segment));
-}
-function hasTestBasename(path) {
-  const basename = path.slice(path.lastIndexOf("/") + 1);
-  return TEST_BASENAME.some((pattern) => pattern.test(basename));
-}
-function isRenamedAwayTest(file) {
-  if (file.status !== "renamed") return false;
-  if (isTestFile(file.oldPath) && !isTestFile(file.path)) return true;
-  return hasTestBasename(file.oldPath) && !hasTestBasename(file.path);
-}
-function isSnapFile(path) {
-  const basename = path.slice(path.lastIndexOf("/") + 1);
-  return basename.length > ".snap".length && basename.endsWith(".snap");
-}
-function keepTestFileText(file) {
-  return isTestFile(file.path) || isTestFile(file.oldPath);
-}
-function testStem(path) {
-  const basename = path.slice(path.lastIndexOf("/") + 1);
-  const dot = basename.lastIndexOf(".");
-  let stem = dot > 0 ? basename.slice(0, dot) : basename;
-  stem = stem.replace(/\.(?:test|spec|e2e|pw)$/, "");
-  if (stem.startsWith("test_") && stem.length > "test_".length) stem = stem.slice("test_".length);
-  if (stem.endsWith("_test") && stem.length > "_test".length) stem = stem.slice(0, -"_test".length);
-  return stem;
-}
-function testPackageDir(path) {
-  const directories = path.split("/").slice(0, -1);
-  let nearest = -1;
-  for (let i = directories.length - 1; i >= 0; i--) {
-    if (TEST_DIRECTORIES.has(directories[i])) {
-      nearest = i;
-      break;
-    }
-  }
-  return (nearest === -1 ? directories : directories.slice(0, nearest)).join("/");
-}
-var DEFINES_TEST = /^(?:(?:it|test|describe|context|specify)(?:\.[A-Za-z]+)*\s*[(`]|(?:async\s+)?def\s+test_|func\s+Test)/;
-function definesTests(text) {
-  return DEFINES_TEST.test(text.slice(0, 400).trimStart());
-}
-function deletedTestFiles(diff) {
-  const found = /* @__PURE__ */ new Set();
-  for (const file of diff) {
-    if (file.status === "deleted" && isTestFile(file.path)) found.add(file.path);
-    else if (isRenamedAwayTest(file)) found.add(file.oldPath);
-  }
-  return [...found].sort(byCodeUnit);
 }
 
 // ../core/src/signals/pythonAliases.ts
@@ -35879,100 +36007,6 @@ function staleInstructionMessages(findings, omitted) {
     messages.push({ level, code: code2, text: `${text}: ${named}${more > 0 ? ` and ${more} more` : ""}. ${after}` });
   }
   return messages;
-}
-
-// ../core/src/testSources.ts
-var MAX_TEST_SOURCE_FILES = 200;
-var MAX_TEST_SOURCE_FILE_BYTES = 524288;
-var MAX_TEST_SOURCE_TOTAL_BYTES = 16777216;
-var TEST_SOURCE_LIMITS = {
-  files: MAX_TEST_SOURCE_FILES,
-  fileBytes: MAX_TEST_SOURCE_FILE_BYTES,
-  totalBytes: MAX_TEST_SOURCE_TOTAL_BYTES
-};
-var DEPENDENCY_SOURCE_LIMITS = {
-  files: 100,
-  fileBytes: 5242880,
-  totalBytes: 33554432
-};
-var TEST_CONFIG_PREFIXES = [
-  "vitest.config.",
-  "vite.config.",
-  "vitest.workspace.",
-  "jest.config.",
-  "playwright.config."
-];
-var TEST_CONFIG_NAMES = /* @__PURE__ */ new Set([
-  "pytest.ini",
-  "pyproject.toml",
-  "setup.cfg",
-  "tox.ini",
-  "conftest.py",
-  "package.json"
-]);
-function isTestConfigFile(path) {
-  const basename = path.slice(path.lastIndexOf("/") + 1);
-  if (TEST_CONFIG_NAMES.has(basename)) return true;
-  if (basename.startsWith(".mocharc")) return true;
-  return TEST_CONFIG_PREFIXES.some((prefix) => basename.length > prefix.length && basename.startsWith(prefix));
-}
-var isTestSource = (path) => !isSnapFile(path) && (isTestFile(path) || isTestConfigFile(path));
-function selectTestSourcePaths(diff) {
-  const base = /* @__PURE__ */ new Set();
-  const head = /* @__PURE__ */ new Set();
-  for (const file of diff) {
-    if ((file.status === "modified" || file.status === "deleted" || file.status === "renamed") && isTestSource(file.oldPath)) {
-      base.add(file.oldPath);
-    }
-    if ((file.status === "added" || file.status === "modified" || file.status === "renamed") && isTestSource(file.path)) {
-      head.add(file.path);
-    }
-  }
-  return { base: [...base].sort(byCodeUnit), head: [...head].sort(byCodeUnit) };
-}
-function isUnsafeTestSourcePath(path) {
-  if (path === "" || path.startsWith("/")) return true;
-  for (let i = 0; i < path.length; i++) {
-    const code2 = path.charCodeAt(i);
-    if (code2 <= 31 || code2 >= 127 && code2 <= 159) return true;
-  }
-  return path.split("/").some((segment) => segment === "" || segment === "." || segment === "..");
-}
-function planTestSourceReads(paths, objects, limits = TEST_SOURCE_LIMITS, first) {
-  const read = [];
-  const dropped = [];
-  let total = 0;
-  let tripped = false;
-  const unique = [...new Set(paths)].sort(byCodeUnit);
-  const ordered = first === void 0 || first.size === 0 ? unique : [...unique.filter((path) => first.has(path)), ...unique.filter((path) => !first.has(path))];
-  for (const path of ordered) {
-    if (isUnsafeTestSourcePath(path)) {
-      dropped.push({ path, reason: "unsafe-path" });
-      continue;
-    }
-    const object = objects.get(path);
-    if (object === void 0 || object === null || object.type !== "blob") {
-      dropped.push({ path, reason: "missing" });
-    } else if (object.size > limits.fileBytes) {
-      dropped.push({ path, reason: "too-large" });
-    } else if (read.length >= limits.files) {
-      dropped.push({ path, reason: "over-file-cap" });
-    } else if (tripped || total + object.size > limits.totalBytes) {
-      tripped = true;
-      dropped.push({ path, reason: "over-total-cap" });
-    } else {
-      total += object.size;
-      read.push(path);
-    }
-  }
-  if (ordered !== unique) {
-    read.sort(byCodeUnit);
-    dropped.sort((a, b) => byCodeUnit(a.path, b.path));
-  }
-  return { read, dropped };
-}
-function unavailableTestSources(reason) {
-  return { base: { unavailable: reason }, head: { unavailable: reason } };
 }
 
 // ../core/src/signals/mockTargets.ts
@@ -40533,6 +40567,14 @@ function stringEnd2(text, open3) {
   }
   return -1;
 }
+function closesMultiLine(line, from, delimiter) {
+  if (delimiter === "'''") return line.includes(delimiter, from);
+  for (let i = from; i < line.length; i++) {
+    if (line[i] === "\\") i++;
+    else if (line.startsWith(delimiter, i)) return true;
+  }
+  return false;
+}
 function stripTomlComment(line) {
   for (let i = 0; i < line.length; i++) {
     const ch = line[i];
@@ -40692,12 +40734,12 @@ function readTable(lines, headerAt2) {
     const first = i;
     const multi = rest.startsWith('"""') ? '"""' : rest.startsWith("'''") ? "'''" : null;
     if (multi !== null) {
-      let closed = rest.slice(3).includes(multi);
+      let closed = closesMultiLine(rest, 3, multi);
       while (!closed) {
         i++;
         const more = lines.at(i);
         if (more === void 0) return null;
-        closed = more.includes(multi);
+        closed = closesMultiLine(more, 0, multi);
       }
       entries.set(key, { value: { type: "opaque", text: normalizeOpaque(rest) }, line: first + 1 });
       i++;
@@ -45072,7 +45114,7 @@ var MESSAGE_HINTS = {
   DEPENDENCY_D04: "Run the package manager's install so the lockfile matches the manifest, and commit both; a lockfile that changes a hash for the same version needs an explanation.",
   DEPENDENCY_D05: "Depend on a published registry version instead, or have a person review where the code comes from; a git, URL or local source is not covered by the registry's checks. For a registry your team runs (Artifactory, Nexus, a private PyPI index), name its host in the dependency-allowed-hosts input or the org policy's dependencies.allowed_hosts.",
   DEPENDENCY_LOOKUP_UNAVAILABLE: "Re-run the job; the registry lookups fail open, so D01 to D03 were not checked for the packages counted.",
-  DEPENDENCY_CHECK_INCOMPLETE: "Keep manifests and lockfiles valid and under 5 MiB, and run on a checkout of the pull request head with fetch-depth: 0, so they can be compared."
+  DEPENDENCY_CHECK_INCOMPLETE: "Keep manifests and lockfiles valid and under 32 MiB, and run on a checkout of the pull request head with fetch-depth: 0, so they can be compared."
 };
 var BLOCK_ONLY_ACCEPT_CLAUSE = /* @__PURE__ */ new Set([
   "TEST_INTEGRITY_TI06",
@@ -45509,8 +45551,10 @@ function dependencyLines(report, maxRows) {
     ["DEPENDENCY_CHECK_INCOMPLETE", "Not checked"]
   ]) {
     const message = report.messages.find((m) => m.code === codeName);
-    if (message !== void 0)
-      lines.push(`- \u26A0\uFE0F ${word}: ${inlineText(message.text)}`, `  - Hint: ${hintFor(codeName, label)}`);
+    if (message !== void 0) {
+      const icon = message.level === "error" ? LEVEL_ICON.error : LEVEL_ICON.warn;
+      lines.push(`- ${icon} ${word}: ${inlineText(message.text)}`, `  - Hint: ${hintFor(codeName, label)}`);
+    }
   }
   if (lines[lines.length - 1] !== "") lines.push("");
   return lines;

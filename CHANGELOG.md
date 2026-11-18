@@ -11,6 +11,13 @@ Releases are cut by a maintainer; see [`docs/RELEASING.md`](./docs/RELEASING.md)
 
 ### Changed
 
+- Dependency safety fails closed on a manifest or lockfile it could not read (CORE-100, part 2). A file the pull
+  request can make unreadable (not valid, over a cap, binary, missing at its revision or at an unsafe path) now gives
+  `DEPENDENCY_CHECK_INCOMPLETE` at level error and fails the check, where it was a warning, so a broken or oversized
+  lockfile no longer passes where the same lockfile read would block on D05; the message names the cap a file went
+  past. It stays a warning when git could not read a side at all (a diff not from local git, a shallow clone). The cap
+  for one file rises from 5 MiB to 32 MiB, the same as for one side, so an honest large lockfile is read (a generated
+  20 MiB `pnpm-lock.yaml` is read and judged in about 0.2 s). With `dependencies: never` nothing changes.
 - Docs: the five workflows in `examples/workflows/` no longer say the step never fails without a threshold (CORE-127).
   Their headers name what fails it by default: a secret in an agent config file (S01-S09), invisible Unicode (PI01),
   a dependency from outside the registry (D05), a dependency change the lockfile does not record (D04) and a run
@@ -23,6 +30,33 @@ Releases are cut by a maintainer; see [`docs/RELEASING.md`](./docs/RELEASING.md)
   mode `lookup` (the input, `dependencies.lookup: true` in `.pharn/ci.yml`, or an org policy), one `GET` per added
   unscoped package to `registry.npmjs.org`, `api.npmjs.org` or `pypi.org`, sending only the package name. They said
   pharn-ci calls only GitHub and pharn.dev. No behaviour change.
+- Fixed: an agent instruction file named like a test file is scanned for prompt injection (CORE-93). The default
+  name exemptions `**/*.test.*` and `**/*.spec.*` no longer apply to the instruction kinds PI04 reads, so hidden
+  Unicode or a hidden instruction in `.cursor/rules/a.test.mdc` or `.claude/commands/x.spec.md` now gives PI01 to
+  PI04 where it passed. `fixtures/`, `__fixtures__/` and `testdata/`, and an app policy's `injection.exempt`, still
+  exempt every path.
+- Docs: the README safety model and `docs/THREAT-MODEL.md` (row G2) count the parser dependency (CORE-128). Only the
+  lcov, Cobertura, diff and config parsers are hand-written; JS/TS test and config files go through TypeScript's parser,
+  used only to build a syntax tree, and Python test files through the runner's `python3` (`ast.parse`). The Action has
+  three direct runtime dependencies, not two: `typescript5` ships as the sha256-pinned `packages/action/dist/typescript.js`.
+- Fixed: a `pyproject.toml` whose multi-line string holds an escaped quote (`"""A \"""quoted\""" word"""`) is read
+  (CORE-94). The TOML readers closed the string at the first `"""`, read the valid file as broken and skipped it with a
+  `DEPENDENCY_CHECK_INCOMPLETE` warning, so a git dependency in it went unreported. Multi-line basic strings are now
+  read character by character with their escapes; the pytest table reader in `pyproject.toml` honours them too.
+- Docs: the README says what the code does (CORE-129). The Config section states each `.pharn/ci.yml` setting's rule
+  against a flag or input (a flag replaces `file`, `format` and `root`; the larger threshold applies; `exclude` and
+  `expect` are merged; `setup.require`, `test_integrity.mode` and the dependency minimums only tighten), and so does
+  the comment in this repo's `.pharn/ci.yml`. The README, and the `accept-label` input description in `action.yml`,
+  say an app policy's `test_integrity.accept_label` replaces the input's name. The Skylos sentence names v0.11.0, the
+  message-code table gains the seven `DEPENDENCY_*` codes, the skills table lists all five pharn-ci skills (0.1.x to
+  0.9.x), the secret redaction helpers are called internal (`@pharn-ci/core` is private), the development table lists
+  `packages/node-io`, and the `@pharn-ci/core` package description says Report v2. The `github-token` input row says
+  the agent-PR commit list is read on every run that has a pull request, not only on `pull_request` runs.
+- Docs: the README quick start gains "Make untested files count" (CORE-102): the setting that makes vitest
+  (`coverage.include`), jest (`collectCoverageFrom`) and pytest-cov (`[tool.coverage.run] source`) list a new source
+  file no test imports at 0%, so it counts against diff coverage instead of being left out. The vitest, jest and pytest
+  example workflows name the setting and its config file; the cargo and .NET ones say an untested file is already
+  reported. `docs/LIMITS.md` links to it.
 - Docs: `docs/PRECISION.md` gains a Python precision corpus (CORE-72): 600 merged PRs of `langchain-ai/langchain`,
   `pydantic/pydantic` and `python-poetry/poetry`, frozen in `docs/precision/corpus-python/`, with every block finding
   reviewed by hand. TI02 falsely blocks 6 of 600 Python PRs (1.0 %, tests renamed in place and rewritten); TI01 0.7 %;

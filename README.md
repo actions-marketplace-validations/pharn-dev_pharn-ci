@@ -217,6 +217,24 @@ carries a `COVERAGE_FILE_MISSING` message. Each file it reads is logged as `cove
 (auto-discovered)`. A complete workflow for each of vitest, jest, pytest, .NET and cargo, with no
 `coverage-file` set, is in [`examples/workflows/`](examples/workflows/).
 
+### Make untested files count
+
+Diff coverage counts only the files your coverage report lists. With the default settings of vitest, jest and
+pytest-cov, a new source file that no test imports is not in the report, so it does not lower diff coverage, even at
+`threshold: 100`; pharn-ci only warns about it (`TESTS_NOT_EXERCISING_CHANGES`, for JavaScript and TypeScript). Tell
+the runner which files are your source, and an untested file is listed at 0%:
+
+| Runner     | Setting                                                         | Where                                   | Checked on                          |
+| ---------- | --------------------------------------------------------------- | --------------------------------------- | ----------------------------------- |
+| vitest     | `test: { coverage: { include: ["src/**/*.{ts,tsx}"] } }`        | `vitest.config.ts`                      | vitest 5.1.1                        |
+| jest       | `collectCoverageFrom: ["src/**/*.{js,ts}"]`                     | `jest.config.js`, or `"jest"` in `package.json` | jest 30.5.2                 |
+| pytest-cov | `source = ["mypackage"]` under `[tool.coverage.run]`            | `pyproject.toml`, or `.coveragerc`      | pytest-cov 7.1.0, coverage.py 7.17.3 |
+
+Use the glob or package that holds your source. vitest 3 did this by default (`coverage.all: true`); vitest 4 removed
+`coverage.all`, and only `coverage.include` brings unloaded files into the report. coverage.py finds unimported files
+only in the source directory itself and in directories with an `__init__.py`. cargo-llvm-cov and coverlet need no
+setting: every file compiled into the crate, or into an assembly the test project references, is in the report.
+
 ### Coverage per ecosystem
 
 Point `coverage-file` at what your test run writes. Each of these tools produces a format pharn-ci
@@ -439,7 +457,7 @@ This is the "Test integrity" section of the report for a change that turns `it(`
 >   - Hint: Remove the skip so the test runs again, or say in the PR why it must stay, for example a test that fails in CI; a reviewer who is not the PR author can record that sign-off by applying the accept label `pharn/accepted`.
 
 The benchmark for this is Skylos's list of nine ways to hide a failing test. The nine cases are reproduced in vitest
-under `fixtures/skylos-nine/` and pinned by tests: the signals of this release catch **8 of 9** (`deleted-test` by TI01,
+under `fixtures/skylos-nine/` and pinned by tests: the signals of v0.11.0 catch **8 of 9** (`deleted-test` by TI01,
 `added-skip` by TI03, `emptied-assertion` by TI05, `deselect-setting` by TI09, `replaced-test` by TI02,
 `loosened-assertion` by TI06, `edited-expected-value` by TI07 and `always-true-matcher` by TI17). The other one is
 missed: TI15 exists and misses `hard-coded-answer`. What each signal misses is in [docs/LIMITS.md](./docs/LIMITS.md#what-test-integrity-does-not-catch).
@@ -473,8 +491,8 @@ files only when the diff came from the local checkout; in PR-number mode and wit
 be the pull request head, so the message says so and nothing is read. What the scan misses is in
 [docs/LIMITS.md](./docs/LIMITS.md#secrets-in-agent-configs).
 
-The shapes and the redaction helpers are exported from `@pharn-ci/core` (`findSecretSpans`, `redactSecrets`,
-`truncateUtf8`, `redactMessage`, `MESSAGE_MAX_BYTES`).
+The shapes and the redaction helpers (`findSecretSpans`, `redactSecrets`, `truncateUtf8`, `redactMessage`,
+`MESSAGE_MAX_BYTES`) are internal to pharn-ci: `@pharn-ci/core` is a private workspace package and is not published.
 
 ---
 
@@ -539,7 +557,9 @@ user, chat-template tokens, a role marker at the start of a prose line, and, for
 agent. A finding names the phrase id, never the line.
 
 **Exemptions.** Every signal skips `fixtures/**`, `**/__fixtures__/**`, `**/testdata/**`, `**/*.test.*` and
-`**/*.spec.*`; PI03 also skips `**/test/**` and locale files (`**/{locales,messages,i18n,lang}/**`, `*.po`, `*.arb`),
+`**/*.spec.*`, except that the two test-file names never exempt an agent instruction file (the kinds PI04 reads):
+`.cursor/rules/a.test.mdc` and `.claude/commands/x.spec.md` are scanned like any instruction file, while the three
+directories still exempt one; PI03 also skips `**/test/**` and locale files (`**/{locales,messages,i18n,lang}/**`, `*.po`, `*.arb`),
 where PI01 also accepts the directional marks and the soft hyphen. An app policy can add exemptions
 (`injection.exempt`), add phrases (`injection.phrases`, reported as `PX01`, `PX02`, ...) and set each signal's
 severity (`injection.signals`, `off` included). A `file:` policy is carried by the pull request, so it can only
@@ -680,9 +700,13 @@ and the verdict is `fail`, `warn` a warning. The test-integrity mode and the acc
 optional `dependencies` object (present only when the change touched a manifest or lockfile) holds `checked` (how many
 dependencies and lockfile entries were added or changed), `lookups` (`off`, `done` or `unavailable`) and `signals`
 (id, severity, ecosystem, path, line, detail, and the package name and version spec only when they pass a strict
-allow-list; at most 200, `truncated` counts the rest). A manifest or lockfile that could not be read (over 5 MiB,
-not valid, or a diff not from local git) is listed in `dependencies.unread` with one `DEPENDENCY_CHECK_INCOMPLETE`
-warning. The comment shows a **📦 Dependencies** section when something was added or changed. Messages name counts and
+allow-list; at most 200, `truncated` counts the rest). A manifest or lockfile that could not be read is listed in
+`dependencies.unread` with one `DEPENDENCY_CHECK_INCOMPLETE` message. It is an `error`, and the verdict is `fail`, when
+the pull request can be the cause: a file that is not valid, over 32 MiB (the cap for one file, the same as the cap for
+one side), past 100 files or 32 MiB a side, binary, or missing at its revision. The message names each file, its reason
+and the cap it went past. It stays a warning only when git could not read that side at all (a diff not from local git,
+a shallow clone): the runner's doing, not the pull request's. So a lockfile the check could not read never passes where
+the same lockfile read would block. With `dependencies: never` nothing is read and there is no message. The comment shows a **📦 Dependencies** section when something was added or changed. Messages name counts and
 `path:line` only. A Dependabot bump that changes the manifest and the lockfile together, and a lockfile-only refresh
 of transitive versions, give no finding. What it misses is in [docs/LIMITS.md](./docs/LIMITS.md#dependency-safety).
 
@@ -933,7 +957,7 @@ of the App never both appear for one upload.
 | `test-integrity`    | `warn`                      | How strictly to treat weakened tests: `block`, `warn` or `off`. `test_integrity.mode` in `.pharn/ci.yml` can only make it stricter, never looser (a looser value is ignored with `TEST_INTEGRITY_MODE_IGNORED`). In `block` a block-level finding fails the check, in `warn` it warns, in `off` nothing is checked. The signals so far are TI01 (a test file deleted), TI02 (a test removed from a test file that stays), TI03 (a skip added to a test), TI04 (a `.only`, `fit` or `fdescribe` added), TI05 (a test emptied of its assertions, or with fewer), TI06 (a test weakened), TI07 (an expected value of a test edited to match the source), TI08 (snapshots regenerated or updated in bulk), TI09 (a test-runner setting loosened), TI10 (a test script in `package.json` weakened), TI11 (CI stopped running tests), TI12 (a module under test mocked), TI13 (a coverage-ignore comment added to source), TI14 (a lower coverage threshold or a wider exclusion in the config), TI15 (a source condition that compares with a value the tests add), TI16 (a lint or type suppression comment added to a test file) and TI17 (an assertion that always passes) |
 | `dependencies`      | `auto`                      | [Dependency safety](#dependency-safety) for the packages a change adds or changes: `auto` runs the offline checks D04 (lockfile drift) and D05 (a source outside the npm and PyPI registries); `lookup` also looks each added unscoped package up in `registry.npmjs.org`, `api.npmjs.org` and `pypi.org` (D01 to D03; only the package name is sent); `never` runs nothing. `dependencies.lookup: true` in `.pharn/ci.yml` turns lookups on over `auto`, never over `never`. Any other value fails the step |
 | `dependency-allowed-hosts` | none               | Registry hosts your team runs (Artifactory, Nexus, a private PyPI index) whose URLs [D05](#dependency-safety) accepts besides the four public ones, comma or newline separated. Each is an exact host name matched case-insensitively (the letters A-Z and a-z, digits, `.` and `-`; no scheme, path, port, user name or wildcard), at most 50, and a URL on it still has to be `https` with no user name, password or port. An app policy's `dependencies.allowed_hosts` replaces the list; `.pharn/ci.yml` cannot set it. An entry that is not a host name fails the step |
-| `accept-label`      | `pharn/accepted`            | Name of the pull request label a reviewer who is not the PR author applies to sign off `test-integrity: block` findings, at most 50 characters. Read only from this input, never from `.pharn/ci.yml`. See [Accept label](#accept-label) |
+| `accept-label`      | `pharn/accepted`            | Name of the pull request label a reviewer who is not the PR author applies to sign off `test-integrity: block` findings, at most 50 characters. An app policy's `test_integrity.accept_label` replaces it; never read from `.pharn/ci.yml` or a `file:` policy. See [Accept label](#accept-label) |
 | `policy`            | `auto`                      | Where the [org policy](#org-policy) comes from: `auto` fetches it from the pharn.dev app when the job grants `id-token: write` (only the OIDC token and the repo name are sent; no policy or no token is silent), `never` uses none, `required` fails the check when no policy can be fetched, `file:<path>` reads a policy document from the workspace (the pull request can change it, so it can only tighten; nothing is fetched). Any other value fails the step |
 | `app-url`           | `https://pharn.dev`         | Origin of the pharn.dev app the policy is fetched from. `https` only, with no credentials, path, query or fragment; the OIDC audience stays `pharn.dev` whatever it is |
 | `upload`            | `auto`                      | Whether to [upload the run to pharn.dev](#upload-to-pharndev-optional): `auto` uploads `report.json` and `meta.json` (redacted) when the job grants `id-token: write` and the organization installed the Pharn GitHub App, `never` turns it off. A failed upload never fails the check. Not read from `.pharn/ci.yml`. Any other value fails the step |
@@ -942,7 +966,7 @@ of the App never both appear for one upload.
 | `fail-on-verdict`   | `true`                      | Fail the step when the verdict is `fail`, whatever made it fail: diff coverage, a test-integrity block, or an org policy violation or error (a required policy included). With `false` the step reports and never gates |
 | `fail-on-threshold` | none                        | Deprecated old name of `fail-on-verdict`, still read with a warning when `fail-on-verdict` is not set; ignored (with a warning) when both are |
 | `config`            | `.pharn/ci.yml`, may be absent | Config file path; a file named here that does not exist fails the step |
-| `github-token`      | `github.token`              | Token for the comment and diff fallback, and in `pr-number` mode always for reading the pull request, its diff and its file tree; `pull-requests: write` for the comment (`pull-requests: read` is enough for `pr-number` mode without one), may be empty with `comment: false` and a local diff outside `pr-number` mode. On every `pull_request` run it also lists the pull request's commits (`GET /repos/{owner}/{repo}/pulls/{n}/commits`, at most 3 pages) for [agent-PR detection](#agent-prs), which needs `pull-requests: read`; with an empty or under-scoped token the commits cannot be read and every pull request counts as an agent PR. With `test-integrity: block` the [accept label](#accept-label) also reads the pull request and its issue events (`GET /repos/{owner}/{repo}/issues/{issue_number}/events`), which `pull-requests: read` (or `issues: read`) allows |
+| `github-token`      | `github.token`              | Token for the comment and diff fallback, and in `pr-number` mode always for reading the pull request, its diff and its file tree; `pull-requests: write` for the comment (`pull-requests: read` is enough for `pr-number` mode without one), may be empty with `comment: false` and a local diff outside `pr-number` mode. On every run that has a pull request (an event payload with one, such as `pull_request` and `pull_request_target`, or `pr-number` mode) it also lists the pull request's commits (`GET /repos/{owner}/{repo}/pulls/{n}/commits`, at most 3 pages) for [agent-PR detection](#agent-prs), which needs `pull-requests: read`; with an empty or under-scoped token the commits cannot be read and every pull request counts as an agent PR. With `test-integrity: block` the [accept label](#accept-label) also reads the pull request and its issue events (`GET /repos/{owner}/{repo}/issues/{issue_number}/events`), which `pull-requests: read` (or `issues: read`) allows |
 
 | Output          |                                                       |
 | --------------- | ----------------------------------------------------- |
@@ -954,7 +978,8 @@ of the App never both appear for one upload.
 ### Accept label
 
 In `test-integrity: block` a block-level finding fails the check. A reviewer who is not the PR author can sign it off
-by applying the accept label (`pharn/accepted`, or the name in the `accept-label` input) to the pull request. The
+by applying the accept label (`pharn/accepted`, the name in the `accept-label` input, or the name an app policy sets)
+to the pull request. The
 Action then downgrades every block finding to `warn`, adds `TEST_INTEGRITY_ACCEPTED` (`info`) and records who accepted
 it in `testIntegrity.accepted`; the comment says `Accepted via label ... by @login`. The label also lowers a per-file
 `TEST_INTEGRITY_INDEX_UNAVAILABLE` error and a `TEST_INTEGRITY_TEXT_TRUNCATED` error to `warn`, but never the error that
@@ -968,8 +993,11 @@ check are unaffected, so a run below its threshold still fails.
   as ignored. A login is read as GitHub spells it: a letter or digit, then up to 38 letters, digits or `-`, or an
   Enterprise Managed User login `handle_shortcode` (such as `reviewer_acme`: the handle, one `_` and a shortcode of 3
   to 8 letters or digits, at most 39 characters). An actor whose login is neither is unreadable.
-- **Where it is set.** Only the `accept-label` input in the workflow. `test_integrity.accept_label` in `.pharn/ci.yml`
-  is refused with an error, because the change under review can edit that file.
+- **Where it is set.** The `accept-label` input in the workflow, or an app policy's `test_integrity.accept_label`, which
+  replaces the input's name when it passes the same check (a name the check refuses leaves the input's name in force,
+  with one warning that does not name it). `test_integrity.accept_label` in `.pharn/ci.yml` is refused with an error,
+  and in a `file:` policy it is not applied (`POLICY_OVERRIDE_IGNORED`), because the change under review can edit
+  those files.
 - **When it is looked at.** On `pull_request` runs and `pr-number` runs, in `test-integrity: block`, with at least one
   block finding, or one of those two errors, and only when the pull request carries the label. `merge_group`, `push`, `pull_request_target` and
   `workflow_run` runs without `pr-number` never ask, so a block there stays a block. The CLI has no pull request and no
@@ -1154,7 +1182,7 @@ The CLI is not published to npm yet; build it from source.
 
 ## Config
 
-`.pharn/ci.yml` (CLI flags and Action inputs override it):
+`.pharn/ci.yml` (each setting meets the CLI flag or Action input by its own rule, listed after the example):
 
 ```yaml
 coverage:
@@ -1175,6 +1203,22 @@ setup:
 #   min_age_days: 30 # D02; can only be raised
 #   min_weekly_downloads: 100 # D03; can only be raised
 ```
+
+The pull request carries this file, so a flag or input does not simply override it. Setting by setting:
+
+- `coverage.file`, `coverage.format` and `coverage.root`: the flag or input replaces the config's value.
+- `coverage.threshold`: the larger of the flag or input and the config applies; with no flag or input the config's
+  value applies as written.
+- `coverage.exclude` and `setup.expect`: the config's entries plus the flag's or input's.
+- `setup.require`: `true` in either turns it on; a `false` does not turn off the other's `true`.
+- `test_integrity.mode`: can only make the `test-integrity` flag or input (default `warn`) stricter; a looser value is
+  ignored with `TEST_INTEGRITY_MODE_IGNORED`.
+- `dependencies.lookup: true`: turns lookups on over the `dependencies` input's `auto`, never over `never`.
+  `dependencies.min_age_days` and `dependencies.min_weekly_downloads` can only raise the defaults (30 and 100).
+- `test_integrity.accept_label` and `dependencies.allowed_hosts` are refused with an error: set the `accept-label` and
+  `dependency-allowed-hosts` inputs instead.
+
+An org policy applies over all of these; see [Org policy](#org-policy), **Precedence**.
 
 ### Coverage files and globs
 
@@ -1306,6 +1350,13 @@ message `code`s, not on text:
 | `INJECTION_PI04` | A line added to an agent instruction file holds a base64 or hex run of more than 200 characters (`warn`, or the level the policy sets). Each signal names the run's kind and length |
 | `INJECTION_PI05` | An agent instruction file is added inside a vendored directory (`warn`, or the level the policy sets). Each signal names the file's kind and the directory |
 | `INJECTION_TEXT_TRUNCATED` | A file had more added text than the scan reads (50,000 lines, or 8,000,000 characters across the diff), so a finding past the cut is not seen (`warn`). The text names up to 5 files |
+| `DEPENDENCY_D01` | An added npm or PyPI package the Action looked up does not exist in the registry ([Dependency safety](#dependency-safety)) (`error`). One message per code; the text names counts, thresholds and up to 10 `path:line` locations, never a package name or file text, and the findings are in `dependencies.signals` |
+| `DEPENDENCY_D02` | An added package was first published fewer than `dependencies.min_age_days` days before the head commit (`warn`) |
+| `DEPENDENCY_D03` | An added unscoped npm package was downloaded fewer than `dependencies.min_weekly_downloads` times last week (`warn`) |
+| `DEPENDENCY_D04` | Lockfile drift: a manifest's dependencies changed and the lockfile that governs it did not change or does not record them, or a lockfile gives the same version a different integrity hash (`error`) |
+| `DEPENDENCY_D05` | An added or changed dependency or lockfile entry comes from a git repository, a URL outside the allowed registries or a local file, or a requirements file adds a package index outside them (`error`) |
+| `DEPENDENCY_LOOKUP_UNAVAILABLE` | Registry lookups did not complete for some added packages (no usable answer, or over the limit of 50 lookups per run), so D01 to D03 were not checked for them (`warn`) |
+| `DEPENDENCY_CHECK_INCOMPLETE` | A manifest or lockfile the change touches could not be read or parsed, so dependency safety did not check it; the files are in `dependencies.unread` (`warn`) |
 | `FLAKY_QUARANTINED_FAILURES` | Failed tests of the JUnit results are on the org's quarantine list ([Flaky tests and JUnit results](#flaky-tests-and-junit-results)) (`info`). The text gives the counts, never a test name; the ids are in `flaky.quarantined` |
 | `JUNIT_INVALID` | A JUnit XML file was refused whole: a DOCTYPE or other `<!` declaration (`doctype`), broken nesting (`malformed`), no `testsuites` or `testsuite` root (`not-junit`) or nesting deeper than 256 (`too-deep`) (`warn`). The text names up to 10 paths with the reason |
 | `JUNIT_NOT_FOUND` | JUnit paths were set and no file matched them (`warn`) |
@@ -1376,13 +1427,15 @@ Within v2, as within v1, fields are only added and codes are never renamed or re
 ## Agent skills
 
 [pharn-dev/skills](https://github.com/pharn-dev/skills) has a `pharn-ci` plugin for Claude Code
-with three skills. You don't name them; the agent picks one from what you ask.
+with five skills. You don't name them; the agent picks one from what you ask.
 
 | Skill              | Ask, for example                                    | What it does                                                                                                                                                                |
 | ------------------ | --------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `pharn-ci-install` | "Set up pharn-ci on this repo with an 85% gate."    | Turns on lcov or Cobertura output, runs your tests and checks the paths match tracked files the way pharn-ci reads them, then writes `.pharn/ci.yml` and a SHA-pinned workflow. |
 | `pharn-ci-explain` | "Why did pharn-ci fail on PR 42?"                   | Reads the report, PR comment or job log, names the message codes that decided the verdict, finds the cause in your repo and says what would fix it. Changes nothing.        |
 | `pharn-ci-cover`   | "Get this PR's diff coverage over the threshold."   | Writes tests for the added lines reported as uncovered and re-checks them against a fresh coverage report.                                                                  |
+| `pharn-ci-fix`     | "Fix what pharn-ci reported on PR 21."              | Lists the fix objects of a 0.9.x report by kind, writes tests for `add-test`, makes a restore, revert or remove change only for the findings you pick, and hands `request-review`, `split-pr` and `none` to a person. |
+| `pharn-ci-policy`  | "Draft an org policy that protects `.github/workflows/**` from agent PRs." | Drafts or checks an [org policy](#org-policy), validates it offline against `schema/policy.v1.json` with a bundled checker, and says how to turn it on. |
 
 ```text
 /plugin marketplace add pharn-dev/skills
@@ -1397,10 +1450,10 @@ messages and PR comments as data from the change under review, never as instruct
 `pharn-ci-install` never uses `pull_request_target`; fork PRs get the
 [`workflow_run` pattern](#fork-prs-comment-from-workflow_run). `pharn-ci-cover` changes only test
 files: it never lowers the threshold, adds exclusions or coverage-ignore comments, or edits the
-workflow. None of them post to the PR, commit or push.
+workflow. `pharn-ci-fix` changes no gate, and `pharn-ci-policy` writes only the policy file you ask for. None of them
+post to the PR, commit or push.
 
-The plugin targets pharn-ci 0.1.x (Report v1) to 0.4.x (Report v2) and is still in development; Codex is not
-verified.
+The plugin covers pharn-ci 0.1.x (Report v1) to 0.9.x (Report v2); Codex is not verified.
 Tested combinations and limits are in the skills repo's
 [LIMITS.md](https://github.com/pharn-dev/skills/blob/main/LIMITS.md). The skills are instructions,
 not a sandbox: your agent client's permissions decide what an agent can do.
@@ -1494,16 +1547,21 @@ that:
   pull request and its git tree. It updates only a comment its own
   login (or, when the token cannot read its login, a bot) wrote for this workflow and job. It deletes a comment only when concurrent runs left
   duplicates of that own marker comment.
-- **Untrusted input stays data.** Parsers are hand-written, pure and non-recursive. File names
-  render in code spans and message text is escaped, so neither can add links, images, emphasis,
+- **Untrusted input stays data.** The lcov, Cobertura, diff and config parsers are hand-written,
+  pure and non-recursive. JS and TS test files and test-runner config files go through TypeScript's
+  parser (`typescript` 5.9.3, used only through `createSourceFile` to build a syntax tree; nothing
+  in them is compiled, imported or run), and Python test files through the runner's own `python3`,
+  which only parses them (`ast.parse`, in a subprocess). File names render in code spans and message text is escaped, so neither can add links, images, emphasis,
   mentions or HTML to the PR comment. Git runs without a shell, and refs starting with `-` are
   rejected.
 - **Pure core.** `packages/core` cannot do I/O; a test, a lint rule and its tsconfig enforce it.
 - **Reviewable releases.** The committed Action bundle is rebuilt and diffed in CI. Third-party
-  actions are pinned to commit SHAs. The Action has two direct runtime dependencies
-  (`@actions/core`, `@actions/github`), bundled into `packages/action/dist` together with their
-  transitive dependencies. CodeQL, gitleaks and Socket checks run on every PR, and release tags are
-  never moved.
+  actions are pinned to commit SHAs. The Action has three direct runtime dependencies:
+  `@actions/core` and `@actions/github`, bundled into `packages/action/dist/index.js` together with
+  their transitive dependencies, and `typescript5` (`typescript` 5.9.3), shipped as
+  `packages/action/dist/typescript.js` and loaded on the first parse, only if its sha256 matches the
+  pin held in `index.js` ([THREAT-MODEL, row G1](docs/THREAT-MODEL.md#2-surfaces-threats-and-mitigations)).
+  CodeQL, gitleaks and Socket checks run on every PR, and release tags are never moved.
 
 Each claim is mapped to the test or check that enforces it in
 [`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md). pharn-ci cannot measure a `pull_request_target`
@@ -1562,6 +1620,7 @@ pnpm pharn-ci check   # run the built CLI on this repo
 | `packages/core`   | Pure functions: lcov, Cobertura and diff parsing, diff coverage, setup scan, Report v2. |
 | `packages/cli`    | `pharn-ci check`: reads files, runs git, calls core, prints output.                    |
 | `packages/action` | Thin Action wrapper: inputs, PR diff, sticky comment, job summary, exit code.          |
+| `packages/node-io` | Private Node I/O shared by cli and action: git, file reads, directory listing, coverage-file reading, the `python3` subprocess that indexes Python test files, and the command `pharn-ci test` wraps. Bundled into their dists. |
 
 The rules every change follows are in [`AGENTS.md`](AGENTS.md).
 

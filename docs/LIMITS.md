@@ -83,8 +83,9 @@ see [`THREAT-MODEL.md`](./THREAT-MODEL.md).
   decided by your coverage tool, not by pharn-ci.
 - **Files missing from the coverage report are invisible.** A new source file that no test imports
   is often absent from the coverage report entirely, so it adds nothing to the denominator instead
-  of counting as 0%. Configure your coverage tool to include all source files (for example vitest's
-  `coverage.include` or `all`) if you want untested files to count.
+  of counting as 0%. Configure your coverage tool to include all source files if you want untested files to count:
+  [Make untested files count](../README.md#make-untested-files-count) gives the setting for vitest (`coverage.include`;
+  vitest 4 removed `coverage.all`), jest (`collectCoverageFrom`) and pytest-cov (`[tool.coverage.run] source`).
 - **Deleted and binary files are skipped.** Renamed files are measured under their new path; a
   pure rename adds no lines. Rename detection is git's default similarity (`--find-renames`).
 - **No coverable changes passes.** When none of the added lines are tracked by the coverage report,
@@ -1344,9 +1345,14 @@ a text filter for content aimed at the next agent, not a judgement of what a tex
 - **Hidden Markdown is a short list.** PI02 reads HTML comments, reference definitions and quoted link titles. Image alt
   text, `<details>` blocks, HTML attributes, CSS that hides text, white-on-white text, zero-size fonts and footnotes
   are not treated as hidden; their text is still read by PI03.
-- **Exempt paths are not read.** Test files (`*.test.*`, `*.spec.*`), `fixtures/`, `__fixtures__/` and `testdata/` are
+- **Exempt paths are not read.** Test files (`*.test.*`, `*.spec.*`) that are not instruction files, `fixtures/`, `__fixtures__/` and `testdata/` are
   never read, `test/` directories and locale files are not read for phrases, and an app policy can exempt more. A
   pull request can put content in an exempt path; an agent that reads it is not warned.
+- **Which exemptions apply to an agent instruction file.** The test-file names do not: an instruction file (the kinds
+  PI04 reads) called `.cursor/rules/a.test.mdc` or `.claude/commands/x.spec.md` is scanned. The directories do: an
+  instruction file under `fixtures/`, `__fixtures__/` or `testdata/` (an `AGENTS.md` there that an agent working in
+  that directory reads) is not scanned, and neither is one an app policy's `injection.exempt` covers. `test/`
+  directories and locale files still skip PI03 for it.
 - **Vendored directories by name.** PI05 knows six directory names and the inventory's instruction kinds; an
   instruction file under another vendoring layout (`external/`, `deps/`, a git submodule) is not flagged, and a modified
   one in a vendored directory is not either (only added or renamed-in files).
@@ -1442,9 +1448,14 @@ comes from and how new it is, not what it does. What it misses:
   range is not detected (no semver resolution). Python lockfile hashes are not compared.
 - **Requirements files.** `-r` and `-c` includes are not followed; environment variables in a line are not expanded; a
   local directory (`-e .`, `./pkg`) is not a dependency, only a local archive (`.whl`, `.tar.gz`, `.zip`) is.
-- **Caps.** A manifest or lockfile over 5 MiB, past 100 files or 32 MiB a side is not read and is named in
-  `dependencies.unread` (`DEPENDENCY_CHECK_INCOMPLETE`, warn), never guessed; a TOML syntax error makes the whole file
-  unread. At most 200 findings are listed (`truncated` counts the rest).
+- **Caps.** A manifest or lockfile over 32 MiB (the cap for one file, the same as the cap for one side), past 100 files
+  or 32 MiB a side is not read and is named in `dependencies.unread`, never guessed; a TOML syntax error makes the whole
+  file unread. `DEPENDENCY_CHECK_INCOMPLETE` is an error (verdict `fail`) when any unread file's reason is one the pull
+  request can cause (`unparsable`, `too-large`, `over-file-cap`, `over-total-cap`, `binary`, `missing`, `unsafe-path`),
+  and its text names the cap a file went past; it is a warning only when every unread file is `unavailable` (git could
+  not read that side at all, such as a diff not from local git). A YAML or TOML feature the hand-written readers do not
+  know makes an honest file `unparsable`, and so an error: the fix is to keep the file in the shape the package manager
+  writes. At most 200 findings are listed (`truncated` counts the rest).
 - **Lookups (D01 to D03) are opt-in, Action-only and fail-open.** Scoped npm names (`@scope/x`) are never looked up, so
   a slopsquatted scoped name is not caught; nor are `workspace:`, git, URL and path specs, or names a touched lockfile
   resolves off the registries. At most 50 packages, 4 at once, 5 s each and 60 s per run; a timeout, an error status, a
