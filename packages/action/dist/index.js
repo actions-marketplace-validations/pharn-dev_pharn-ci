@@ -38210,7 +38210,7 @@ function callsHelper(body) {
   }
   return false;
 }
-var MODIFIERS_THAT_EXCUSE = ["skip", "todo", "skipIf", "runIf"];
+var MODIFIERS_THAT_EXCUSE = ["skip", "todo"];
 var ASSERTION_ROOT = /^assert\w*$/;
 var isAssertionRoot = (token) => token === "expect" || token === "should" || ASSERTION_ROOT.test(token);
 function align(base, head, fromLeft) {
@@ -38926,7 +38926,7 @@ function countTautologies(body, language) {
 // ../core/src/signals/ti06.ts
 var MAX_DETAIL4 = 300;
 var MAX_LABELS = 5;
-var MODIFIERS_THAT_EXCUSE2 = ["skip", "todo", "skipIf", "runIf"];
+var MODIFIERS_THAT_EXCUSE2 = ["skip", "todo"];
 var TAUTOLOGY_REASON = "an assertion that compares a literal with itself was added";
 var TRY_REASON = "an assertion moved into a try block that has a catch";
 var RETURN_REASON = "an assertion moved after an early return";
@@ -41243,6 +41243,79 @@ function keyOf2(part) {
   if (tokens2[i] === "--") i += 1;
   return ["run", ...flags, script, ...tokens2.slice(i)].join(" ");
 }
+var REPORT_FLAGS = /* @__PURE__ */ new Set([
+  "--coverage",
+  "--coverage=true",
+  "--coverage.enabled",
+  "--coverage.enabled=true",
+  "--cov",
+  "--cov-branch",
+  "--ci"
+]);
+var REPORT_VALUE_NAMES = [
+  "--coverage.reporter",
+  "--coverage.provider",
+  "--coverage.reportsDirectory",
+  "--coverageReporters",
+  "--coverageProvider",
+  "--coverageDirectory",
+  "--cov-report",
+  "--reporter",
+  "--reporters",
+  "--junitxml"
+];
+function isReportFlag(token) {
+  if (REPORT_FLAGS.has(token)) return true;
+  if (token.startsWith("--cov=") && token.length > "--cov=".length) return true;
+  return REPORT_VALUE_NAMES.some(
+    (name) => token === name || token.startsWith(`${name}=`) && token.length > name.length + 1
+  );
+}
+var REPORT_VALUE_FLAGS = /* @__PURE__ */ new Set(["--cov-report", "--junitxml", "--reporter", "--reporters"]);
+var VERBOSITY_RUNNER = new RegExp(
+  `^${PY_WRAPPER}(?:(?:python3?\\s+-m\\s+)?pytest|python3?\\s+-m\\s+unittest|tox|go\\s+test)(?:\\s|$)`
+);
+var MAX_FLAG_CANDIDATES = 16;
+var PLAIN_TOKEN = /^[\w.,:=/@+-]+$/;
+function splitFlags(key) {
+  const tokens2 = key.split(" ");
+  const verbosity = VERBOSITY_RUNNER.test(key);
+  const base = [];
+  const flags = [];
+  for (let i = 0; i < tokens2.length; i++) {
+    const token = tokens2[i];
+    if (verbosity && (token === "-v" || token === "-q")) {
+      flags.push(token);
+    } else if (PLAIN_TOKEN.test(token) && isReportFlag(token)) {
+      const value = tokens2[i + 1];
+      if (REPORT_VALUE_FLAGS.has(token) && value !== void 0 && !value.startsWith("-") && PLAIN_TOKEN.test(value)) {
+        flags.push(`${token} ${value}`);
+        i += 1;
+      } else {
+        flags.push(token);
+      }
+    } else {
+      base.push(token);
+    }
+  }
+  return { base: base.join(" "), flags };
+}
+function carriesFlags(added, removed) {
+  const left = /* @__PURE__ */ new Map();
+  for (const flag of added) left.set(flag, (left.get(flag) ?? 0) + 1);
+  for (const flag of removed) {
+    const count2 = left.get(flag) ?? 0;
+    if (count2 === 0) return false;
+    left.set(flag, count2 - 1);
+  }
+  return true;
+}
+function keptBy(key, addedKeys, addedByBase) {
+  if (addedKeys.has(key)) return true;
+  const { base, flags } = splitFlags(key);
+  const candidates = addedByBase.get(base) ?? [];
+  return candidates.slice(0, MAX_FLAG_CANDIDATES).some((added) => carriesFlags(added, flags));
+}
 function testKeysOf(line) {
   const text = commandText(line);
   if (text === "") return [];
@@ -41290,13 +41363,22 @@ function detectTI11(diff, mode) {
       }
     }
   }
+  const addedByBase = /* @__PURE__ */ new Map();
+  for (const key of addedKeys) {
+    const { base, flags } = splitFlags(key);
+    const list = addedByBase.get(base);
+    if (list === void 0) addedByBase.set(base, [flags]);
+    else list.push(flags);
+  }
   const signals = [];
   for (const file of files) {
     const path = file.path;
     const added = (file.hunks ?? []).flatMap((hunk) => hunk.added);
     const removed = (file.hunks ?? []).flatMap((hunk) => hunk.removed);
     const emit = (severity2, line, detail) => signals.push({ id: "TI11", severity: severity2, path, line, detail });
-    const lostCommand = removed.find((entry) => testKeysOf(entry.text).some((key) => !addedKeys.has(key)));
+    const lostCommand = removed.find(
+      (entry) => testKeysOf(entry.text).some((key) => !keptBy(key, addedKeys, addedByBase))
+    );
     if (lostCommand !== void 0) emit(mode, lostCommand.line, SENTENCES2.testStep);
     const lostTrigger = removed.find((entry) => carriesPullRequestTrigger(entry.text));
     if (lostTrigger !== void 0 && !added.some((entry) => carriesPullRequestTrigger(entry.text))) {
@@ -41399,12 +41481,31 @@ var SPACES = String.raw`[ \t]*`;
 var WORD_END = "(?![A-Za-z0-9_])";
 var JS_MARKER = new RegExp(`${BLOCK_OR_LINE_START}${SPACES}(istanbul|v8|c8)[ \\t]+ignore${WORD_END}`, "i");
 var PY_MARKER = new RegExp(`#${SPACES}pragma:?${SPACES}no${SPACES}cover${WORD_END}`, "i");
+function skipBlanks3(text, from) {
+  let i = from;
+  while (text[i] === " " || text[i] === "	") i++;
+  return i;
+}
+function lineLevelJs(text, end) {
+  const start = skipBlanks3(text, end);
+  if (start === end) return false;
+  let stop = start;
+  while (stop < text.length && /[A-Za-z]/.test(text[stop])) stop++;
+  if (stop === start || /[0-9_]/.test(text[stop] ?? "")) return false;
+  const word = text.slice(start, stop).toLowerCase();
+  if (word === "next") {
+    const after = skipBlanks3(text, stop);
+    return !(after > stop && /[0-9]/.test(text[after] ?? ""));
+  }
+  return word === "if" || word === "else";
+}
 function markerOf(text, language) {
   const match = (language === "jsts" ? JS_MARKER : PY_MARKER).exec(text);
   if (match === null) return null;
   const marker = language === "python" ? match[0].toLowerCase().replace(/[ \t:]+/g, "") : match[0].toLowerCase().replace(/[ \t]+/g, " ");
   const family = language === "python" ? "pragma" : match[1].toLowerCase();
-  return { family, marker };
+  const lineLevel = language === "python" || lineLevelJs(text, match.index + match[0].length);
+  return { family, marker, lineLevel };
 }
 function detectTI13(diff, mode) {
   const signals = [];
@@ -41433,8 +41534,10 @@ function detectTI13(diff, mode) {
       if (left > 0) removed.set(entry.marker, left - 1);
       else fresh.push(entry);
     }
-    for (const { line, family } of fresh.slice(0, MAX_PER_FILE4)) {
-      signals.push({ id: "TI13", severity: mode, path: file.path, line, detail: DETAILS3[family] });
+    const newFile = file.status === "added";
+    for (const { line, family, lineLevel } of fresh.slice(0, MAX_PER_FILE4)) {
+      const severity2 = newFile && lineLevel ? "warn" : mode;
+      signals.push({ id: "TI13", severity: severity2, path: file.path, line, detail: DETAILS3[family] });
     }
   }
   return signals.sort(
@@ -41876,7 +41979,7 @@ var isWordChar2 = (c) => c >= "0" && c <= "9" || c >= "A" && c <= "Z" || c >= "a
 var isTokenChar = (c) => isWordChar2(c) || c === "@" || c === "-";
 var endsWord = (text, at) => at >= text.length || !isWordChar2(text.charAt(at));
 var normalize2 = (text) => text.replace(/\s+/g, " ").trim();
-function skipBlanks3(text, from) {
+function skipBlanks4(text, from) {
   let i = from;
   while (i < text.length && isBlank6(text.charAt(i))) i++;
   return i;
@@ -41886,7 +41989,7 @@ function jsMarker(text) {
     if (text.charAt(i) !== SLASH) continue;
     const opener = text.slice(i, i + 2);
     if (opener !== LINE_OPENER && opener !== BLOCK_OPENER) continue;
-    const start = skipBlanks3(text, i + 2);
+    const start = skipBlanks4(text, i + 2);
     let end = start;
     while (end < text.length && isTokenChar(text.charAt(end))) end++;
     if (!JS_MARKERS.has(text.slice(start, end))) continue;
@@ -41901,7 +42004,7 @@ function jsMarker(text) {
 }
 function startsPythonMarker(text, at) {
   if (text.startsWith(TYPE_WORD, at)) {
-    const word = skipBlanks3(text, at + TYPE_WORD.length);
+    const word = skipBlanks4(text, at + TYPE_WORD.length);
     return text.startsWith(IGNORE_WORD, word) && endsWord(text, word + IGNORE_WORD.length);
   }
   if (text.slice(at, at + NOQA_WORD.length).toLowerCase() === NOQA_WORD) {
@@ -41909,7 +42012,7 @@ function startsPythonMarker(text, at) {
     return next >= text.length || text.charAt(next) === ":" || !isWordChar2(text.charAt(next));
   }
   if (text.startsWith(PYLINT_WORD, at)) {
-    const word = skipBlanks3(text, at + PYLINT_WORD.length);
+    const word = skipBlanks4(text, at + PYLINT_WORD.length);
     for (const name of [`${DISABLE_WORD}-next`, DISABLE_WORD]) {
       if (!text.startsWith(name, word)) continue;
       const next = word + name.length;
@@ -41918,14 +42021,14 @@ function startsPythonMarker(text, at) {
     return false;
   }
   if (text.startsWith(PYRIGHT_WORD, at)) {
-    const word = skipBlanks3(text, at + PYRIGHT_WORD.length);
+    const word = skipBlanks4(text, at + PYRIGHT_WORD.length);
     return text.startsWith(IGNORE_WORD, word) && endsWord(text, word + IGNORE_WORD.length);
   }
   return false;
 }
 function pythonMarker(text) {
   for (let i = text.indexOf(HASH); i !== -1; i = text.indexOf(HASH, i + 1)) {
-    const start = skipBlanks3(text, i + 1);
+    const start = skipBlanks4(text, i + 1);
     if (startsPythonMarker(text, start)) return normalize2(text.slice(start));
   }
   return null;
@@ -41979,7 +42082,7 @@ var MAX_ALWAYS_TRUE_NAMES = 50;
 var isBlank7 = (c) => c === " " || c === "	";
 var isWordChar3 = (c) => c >= "0" && c <= "9" || c >= "A" && c <= "Z" || c >= "a" && c <= "z" || c === "_" || c === "$";
 var isWordStart = (c) => isWordChar3(c) && !(c >= "0" && c <= "9");
-function skipBlanks4(text, from) {
+function skipBlanks5(text, from) {
   let i = from;
   while (i < text.length && isBlank7(text.charAt(i))) i++;
   return i;
@@ -42019,7 +42122,7 @@ function isTrueValue(text, at) {
   if (!text.startsWith("true", at)) return false;
   const after = at + 4;
   if (after < text.length && isWordChar3(text.charAt(after))) return false;
-  const next = skipBlanks4(text, after);
+  const next = skipBlanks5(text, after);
   if (next >= text.length) return true;
   const c = text.charAt(next);
   return c === "," || c === "}" || c === ")" || c === "]" || c === ";" || c === "/";
@@ -42067,14 +42170,14 @@ function readLine(text, from, state, found) {
       if (state.inObject && state.depth === 1 && state.expectKey && isWordStart(c)) {
         let name = word;
         if (word === "async") {
-          const next = skipBlanks4(text, i);
+          const next = skipBlanks5(text, i);
           if (next < text.length && isWordStart(text.charAt(next))) {
             const nextEnd = wordEnd2(text, next);
             name = text.slice(next, nextEnd);
             i = nextEnd;
           }
         }
-        const after = skipBlanks4(text, i);
+        const after = skipBlanks5(text, i);
         state.expectKey = false;
         const sep2 = text.charAt(after);
         state.current = null;
@@ -42088,9 +42191,9 @@ function readLine(text, from, state, found) {
       }
       if (state.current !== null && word === "pass" && !afterDot) {
         state.current.passes++;
-        const colon = skipBlanks4(text, i);
+        const colon = skipBlanks5(text, i);
         if (text.charAt(colon) === ":" && text.charAt(colon + 1) !== ":") {
-          if (isTrueValue(text, skipBlanks4(text, colon + 1))) state.current.trues++;
+          if (isTrueValue(text, skipBlanks5(text, colon + 1))) state.current.trues++;
         }
       }
       continue;
@@ -42192,7 +42295,7 @@ function callsAnyOf(text, names) {
     if (start >= text.length || !isWordStart(text.charAt(start))) continue;
     const end = wordEnd2(text, start);
     if (names.get(text.slice(start, end)) !== true) continue;
-    if (text.charAt(skipBlanks4(text, end)) === "(") return true;
+    if (text.charAt(skipBlanks5(text, end)) === "(") return true;
   }
   return false;
 }
@@ -42222,7 +42325,7 @@ function indentOf3(text) {
   }
   return width;
 }
-var isEmptyLine = (text) => skipBlanks4(text, 0) >= text.length;
+var isEmptyLine = (text) => skipBlanks5(text, 0) >= text.length;
 function hasWord(text, word) {
   for (let i = text.indexOf(word); i !== -1; i = text.indexOf(word, i + 1)) {
     const before = i === 0 ? "" : text.charAt(i - 1);
@@ -42232,7 +42335,7 @@ function hasWord(text, word) {
   return false;
 }
 function afterKeyword(text, word) {
-  const start = skipBlanks4(text, 0);
+  const start = skipBlanks5(text, 0);
   if (!text.startsWith(word, start)) return -1;
   const end = start + word.length;
   if (end < text.length && isWordChar3(text.charAt(end))) return -1;
@@ -42241,10 +42344,10 @@ function afterKeyword(text, word) {
 function defName(text) {
   const end = afterKeyword(text, "def");
   if (end === -1 || end >= text.length || !isBlank7(text.charAt(end))) return null;
-  const start = skipBlanks4(text, end);
+  const start = skipBlanks5(text, end);
   const nameEnd = wordEnd2(text, start);
   if (nameEnd === start || !isWordStart(text.charAt(start))) return null;
-  return text.charAt(skipBlanks4(text, nameEnd)) === "(" ? text.slice(start, nameEnd) : null;
+  return text.charAt(skipBlanks5(text, nameEnd)) === "(" ? text.slice(start, nameEnd) : null;
 }
 function bodyIsAlwaysTrue(body) {
   let returns = 0;
@@ -42293,17 +42396,17 @@ function scanHelpers(lines) {
   return out;
 }
 function endsCondition(rest) {
-  const next = skipBlanks4(rest, 0);
+  const next = skipBlanks5(rest, 0);
   if (next >= rest.length) return true;
   const c = rest.charAt(next);
   return c === "," || c === "#";
 }
 function helperCall(text, at, helpers) {
-  const start = skipBlanks4(text, at);
+  const start = skipBlanks5(text, at);
   if (start >= text.length || !isWordStart(text.charAt(start))) return -1;
   const end = wordEnd2(text, start);
   if (!helpers.has(text.slice(start, end))) return -1;
-  const open3 = skipBlanks4(text, end);
+  const open3 = skipBlanks5(text, end);
   if (text.charAt(open3) !== "(") return -1;
   return matchingClose(text, open3);
 }
@@ -42320,12 +42423,12 @@ function alwaysTrueHelperLines(file) {
       if (closed2 !== -1 && endsCondition(text.slice(closed2))) out.push(entry.line);
       continue;
     }
-    const start = skipBlanks4(text, 0);
+    const start = skipBlanks5(text, 0);
     const form = "self.assertTrue(";
     if (!text.startsWith(form, start)) continue;
     const closed = helperCall(text, start + form.length, helpers);
     if (closed === -1) continue;
-    const next = skipBlanks4(text, closed);
+    const next = skipBlanks5(text, closed);
     const c = text.charAt(next);
     if (c === ")" || c === ",") out.push(entry.line);
   }
@@ -42348,9 +42451,9 @@ function jsEquality(text) {
     }
   }
   if (at === -1) return null;
-  let i = skipBlanks4(text, at + width);
+  let i = skipBlanks5(text, at + width);
   if (!text.startsWith(JS_WILDCARD, i)) return { wildcard: false };
-  i = skipBlanks4(text, i + JS_WILDCARD.length);
+  i = skipBlanks5(text, i + JS_WILDCARD.length);
   return { wildcard: text.charAt(i) === ")" };
 }
 function operandFrom(text, from, closeStops) {
@@ -42421,7 +42524,7 @@ function secondArgument(text, open3) {
   return -1;
 }
 function pyEquality(text) {
-  const start = skipBlanks4(text, 0);
+  const start = skipBlanks5(text, 0);
   if (text.startsWith("assert", start) && isBlank7(text.charAt(start + 6))) {
     const equals = topLevelEquals(text, start + 6);
     if (equals === -1) return null;
@@ -44269,18 +44372,18 @@ var MESSAGE_HINTS = {
   TEST_INTEGRITY_TI03: (label) => `Remove the skip so the test runs again, or say in the PR why it must stay, for example a test that fails in CI; a reviewer who is not the PR author can record that sign-off by applying the accept label ${label}.`,
   TEST_INTEGRITY_TI04: "Remove the marker so the whole suite runs, or say in the PR why only the marked tests should run.",
   TEST_INTEGRITY_TI05: (label) => `Restore the assertions the test had, or say in the PR why it checks less now; a reviewer who is not the PR author can record that sign-off by applying the accept label ${label}.`,
-  TEST_INTEGRITY_TI06: (label) => `Restore the stronger matcher, guard or placement of the assertion, or say in the PR why the test checks less now; a reviewer who is not the PR author can record that sign-off by applying the accept label ${label}.`,
+  TEST_INTEGRITY_TI06: "Restore the stronger matcher, guard or placement of the assertion, or say in the PR why the test checks less now.",
   TEST_INTEGRITY_TI07: "Check each new expected value against what the code should do, not what it now returns; if the behaviour change is meant, say so in the PR so a reviewer can confirm it.",
   TEST_INTEGRITY_TI08: "Review the snapshot changes, or regenerate them in a separate change, and keep snapshot-update flags out of the test command.",
   TEST_INTEGRITY_TI09: (label) => `Restore the setting, or say in the PR why it changes; a reviewer who is not the PR author can record that sign-off by applying the accept label ${label}. A raised retry count or timeout is a warning only.`,
-  TEST_INTEGRITY_TI12: (label) => `Mock a collaborator of the code under test instead of the code itself, or say in the PR why this module is mocked; a reviewer who is not the PR author can record that sign-off by applying the accept label ${label}.`,
+  TEST_INTEGRITY_TI12: "Mock a collaborator of the code under test instead of the code itself, or say in the PR why this module is mocked.",
   TEST_INTEGRITY_TI10: (label) => `Restore the test script, or say in the PR why it changes so a reviewer can confirm it; a reviewer who is not the PR author can record that sign-off by applying the accept label ${label}.`,
   TEST_INTEGRITY_TI13: (label) => `Write a test for the code in place of the ignore comment, or say in the PR why it cannot be tested; a reviewer who is not the PR author can record that sign-off by applying the accept label ${label}.`,
   TEST_INTEGRITY_TI11: "Restore the test step or trigger, or say in the PR why CI stops running these tests so a reviewer can confirm it.",
   TEST_INTEGRITY_TI14: "Restore the threshold or the exclusions, or say in the PR why they change so a reviewer can confirm it.",
   TEST_INTEGRITY_TI15: "Check that the code handles the general case and not only the test's value, and add a test with another input.",
   TEST_INTEGRITY_TI16: "Fix the lint or type error the comment hides, or say in the PR why the test needs it.",
-  TEST_INTEGRITY_TI17: (label) => `Restore the assertion that can fail, or say in the PR why the test checks less now; a reviewer who is not the PR author can record that sign-off by applying the accept label ${label}.`,
+  TEST_INTEGRITY_TI17: "Restore the assertion that can fail, or say in the PR why the test checks less now.",
   TEST_INTEGRITY_INDEX_UNAVAILABLE: "Review the named test files by hand for removed tests and weakened assertions. A file over 512 KiB, one with many syntax errors, a missing Python 3.8 or newer for `.py` files, or git objects that could not be read stop the comparison.",
   TEST_INTEGRITY_TEXT_TRUNCATED: "Review the named files by hand for skipped, focused or weakened tests, or split the change so each file stays under the limit.",
   TEST_INTEGRITY_ACCEPTED: "A reviewer other than the PR author signed off, so the block findings are warnings. The sign-off belongs to the pull request, not to a commit: remove the label if a later push should be judged again.",
@@ -44341,10 +44444,17 @@ var MESSAGE_HINTS = {
   DEPENDENCY_LOOKUP_UNAVAILABLE: "Re-run the job; the registry lookups fail open, so D01 to D03 were not checked for the packages counted.",
   DEPENDENCY_CHECK_INCOMPLETE: "Keep manifests and lockfiles valid and under 5 MiB, and run on a checkout of the pull request head with fetch-depth: 0, so they can be compared."
 };
-function hintFor(code2, label) {
+var BLOCK_ONLY_ACCEPT_CLAUSE = /* @__PURE__ */ new Set([
+  "TEST_INTEGRITY_TI06",
+  "TEST_INTEGRITY_TI12",
+  "TEST_INTEGRITY_TI17"
+]);
+function hintFor(code2, label, blocks = false) {
   if (!Object.hasOwn(MESSAGE_HINTS, code2)) return void 0;
   const hint = MESSAGE_HINTS[code2];
-  return typeof hint === "function" ? hint(labelSpan(label)) : hint;
+  if (typeof hint === "function") return hint(labelSpan(label));
+  if (!blocks || !BLOCK_ONLY_ACCEPT_CLAUSE.has(code2)) return hint;
+  return `${hint.slice(0, -1)}; a reviewer who is not the PR author can record that sign-off by applying the accept label ${labelSpan(label)}.`;
 }
 function labelSpan(text) {
   const safe = replaceUnsafeChars(text, "\uFFFD");
@@ -44372,8 +44482,8 @@ var SIGNAL_HINT_IDS = /* @__PURE__ */ new Set([
   "TI16",
   "TI17"
 ]);
-function signalHint(id, label) {
-  return SIGNAL_HINT_IDS.has(id) ? hintFor(`TEST_INTEGRITY_${id}`, label) : void 0;
+function signalHint(id, label, blocks) {
+  return SIGNAL_HINT_IDS.has(id) ? hintFor(`TEST_INTEGRITY_${id}`, label, blocks) : void 0;
 }
 var MAX_FINDINGS = 20;
 var OPEN_FINDINGS = 10;
@@ -44406,7 +44516,7 @@ function testIntegrityLines(report) {
       const out = [
         `- ${SEVERITY_ICON[signal2.severity] ?? LEVEL_ICON.info} **${inlineText(signal2.id)}** ${location} \u2014 ${inlineText(signal2.detail)}`
       ];
-      const hint = signalHint(signal2.id, label);
+      const hint = signalHint(signal2.id, label, signal2.severity === "block");
       if (hint !== void 0) out.push(`  - Hint: ${hint}`);
       return out;
     };
@@ -44957,7 +45067,7 @@ function policyCell(report) {
 }
 function renderMessage(m, report) {
   const line = `- ${LEVEL_ICON[m.level]} \`${m.code}\` ${inlineText(m.text)}`;
-  const hint = hintFor(m.code, acceptLabelOf(report));
+  const hint = hintFor(m.code, acceptLabelOf(report), m.level === "error");
   return hint === void 0 ? line : `${line}
   - Hint: ${hint}`;
 }

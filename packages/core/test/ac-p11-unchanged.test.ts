@@ -19,6 +19,9 @@ const MARK = "E3 item 24a part B (P11)";
 const git = (...args: string[]) =>
   execFileSync("git", args, { cwd: ROOT, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
 const read = (path: string) => readFileSync(join(ROOT, path), "utf8");
+/** CORE-71 (R2.8): the new TI11 flag fixtures and TI13 new-file fixtures, added or untracked until committed. */
+const CORE71_FIXTURES =
+  /(?:^|\t)fixtures\/test-integrity\/(?:TI11\/(?:pass-(?:pytest-cov-flags|vitest-coverage|jest-ci-coverage|cov-report-value)|block-(?:pytest-path-added|pytest-k-added|pytest-cov-or-true|pass-with-no-tests-added|exclude-added|jest-version-flag|cov-separate-value|coverage-exclude-added|coverage-path-ignore-added|cov-config-added|coverage-false))|TI13\/(?:warn-pragma-new-file|warn-istanbul-next-new-file|block-c8-file-new-file|block-v8-start-new-file))\.diff$/;
 
 /** The tests the PLAN lists as deliberately updated; each must carry a comment naming this item. */
 const DELIBERATE = [
@@ -112,6 +115,17 @@ describe("existing tests, fixtures and goldens stay as they are", () => {
       // Re-pinned for markdown-byte-compare (review SPEC finding 29): markdown.test.ts's two snapshots moved, unchanged,
       // into these two new committed files.
       if (/^A\tfixtures\/markdown\/(?:missing|no-coverable)\.md$/.test(line)) continue;
+      // Re-pinned for CORE-71 (R2.8): the TI13 new-file fixture that must block carries the whole-file hint now (a
+      // line-level hint in a new file is warn); with `file` turned back into `next` it is its content at the base byte
+      // for byte. Its new TI11 and TI13 fixture files are added.
+      if (line === "M\tfixtures/test-integrity/TI13/block-new-file.diff") {
+        expect(
+          read("fixtures/test-integrity/TI13/block-new-file.diff").replace("ignore file", "ignore next"),
+          line,
+        ).toBe(git("show", `${BASE}:fixtures/test-integrity/TI13/block-new-file.diff`));
+        continue;
+      }
+      if (CORE71_FIXTURES.test(line) && line.startsWith("A\t")) continue;
       // Re-pinned for E3 item 23 (policy settings) and E3 item 24 (P07): their new fixtures under
       // fixtures/policy-settings/ and fixtures/policy-rules/p07/ are added too.
       // Re-pinned for the 2026-11-01 review fixes: their new TI10 and TI14 fixture files are added too.
@@ -132,7 +146,8 @@ describe("existing tests, fixtures and goldens stay as they are", () => {
         // Re-pinned for flaky tests (A6): its new fixtures under fixtures/junit/ are added too.
         // Re-pinned for dependency safety (A13, v0.8.0): its fixtures under fixtures/dependencies/ are added too.
         // Re-pinned for CORE-39 (job-log escaping): its cases under fixtures/log-escape/ are added too.
-        /^A\tfixtures\/junit\/[^/]+$|^A\tfixtures\/stale-instructions\/[^/]+$|^A\tfixtures\/(?:dependencies|exercise|injection|log-escape)\/[^\t]+$|^A\tfixtures\/policy-rules\/(?:p11|p07|p13|p14)\/[^/]+\/[^/]+$|^A\tfixtures\/policy-settings\/[^\t]+$|^A\tfixtures\/test-integrity\/TI03\/[^\t]+$|^A\tfixtures\/test-integrity\/TI17\/[^\t]+$|^A\tfixtures\/test-integrity\/(?:TI10\/(?:block-colon-only|block-true-only|block-true-or-run|pass-true-then-run)|TI14\/block-threshold-(?:emptied|lowered-nbsp-comment|padded-past-cap))\.diff$|^A\tfixtures\/test-integrity\/(?:TI01\/(?:block-test-mts-deleted|block-spec-cts-deleted)|TI04\/block-test-mts-it-only|TI13\/pass-test-mts-istanbul)\/[^\t]+$|^A\tfixtures\/test-integrity\/TI09\/(?:block-opaque-head|block-too-deep-head|pass-added-opaque-config|pass-opaque-base-and-head)\/[^\t]+$|^A\tfixtures\/test-integrity\/(?:index-unavailable\/(?:added-broken|added-parseable|added-python|added-six-broken|mixed|mixed-python)|TI01\/block-same-stem-(?:unparsed|dropped))\/[^\t]+$/,
+        // Re-pinned for CORE-54 (skipIf and runIf no longer excuse TI05 and TI06): its new TI05 and TI06 cases are added too.
+        /^A\tfixtures\/test-integrity\/(?:TI05\/(?:block-pytest-skipif-emptied|block-runif-true-emptied|block-skipif-false-emptied|pass-pytest-skip-emptied|pass-pytest-skipif-unchanged|pass-skipif-unchanged)|TI06\/(?:pass-pytest-skip-weakened|pass-skip-weakened|warn-pytest-skipif-weakened|warn-skipif-weakened))\/[^\t]+$|^A\tfixtures\/junit\/[^/]+$|^A\tfixtures\/stale-instructions\/[^/]+$|^A\tfixtures\/(?:dependencies|exercise|injection|log-escape)\/[^\t]+$|^A\tfixtures\/policy-rules\/(?:p11|p07|p13|p14)\/[^/]+\/[^/]+$|^A\tfixtures\/policy-settings\/[^\t]+$|^A\tfixtures\/test-integrity\/TI03\/[^\t]+$|^A\tfixtures\/test-integrity\/TI17\/[^\t]+$|^A\tfixtures\/test-integrity\/(?:TI10\/(?:block-colon-only|block-true-only|block-true-or-run|pass-true-then-run)|TI14\/block-threshold-(?:emptied|lowered-nbsp-comment|padded-past-cap))\.diff$|^A\tfixtures\/test-integrity\/(?:TI01\/(?:block-test-mts-deleted|block-spec-cts-deleted)|TI04\/block-test-mts-it-only|TI13\/pass-test-mts-istanbul)\/[^\t]+$|^A\tfixtures\/test-integrity\/TI09\/(?:block-opaque-head|block-too-deep-head|pass-added-opaque-config|pass-opaque-base-and-head)\/[^\t]+$|^A\tfixtures\/test-integrity\/(?:index-unavailable\/(?:added-broken|added-parseable|added-python|added-six-broken|mixed|mixed-python)|TI01\/block-same-stem-(?:unparsed|dropped))\/[^\t]+$/,
       );
     }
     const untracked = git("ls-files", "--others", "--exclude-standard", "--", "fixtures/")
@@ -146,6 +161,8 @@ describe("existing tests, fixtures and goldens stay as they are", () => {
       // its new index-unavailable and TI01 case directories. Re-pinned for markdown-byte-compare (review
       // SPEC finding 29): so are the two files markdown.test.ts's snapshots moved into.
       if (/^fixtures\/markdown\/(?:missing|no-coverable)\.md$/.test(path)) continue;
+      // Re-pinned for CORE-71 (R2.8): so are its new TI11 and TI13 fixture files.
+      if (CORE71_FIXTURES.test(path) && path.startsWith("fixtures/")) continue;
       // Re-pinned for policy-p13 (Horizon 2 item H1): its fixtures under fixtures/policy-rules/p13/ are untracked until
       // committed.
       // Re-pinned for stale instructions (Horizon 2 item H3): its fixtures under fixtures/stale-instructions/ are
@@ -154,7 +171,8 @@ describe("existing tests, fixtures and goldens stay as they are", () => {
         // Re-pinned for H4 (prompt-injection scan): its fixtures under fixtures/injection/ are untracked until committed.
         // Re-pinned for flaky tests (A6): its fixtures under fixtures/junit/ are untracked until committed.
         // Re-pinned for CORE-39 (job-log escaping): so are its cases under fixtures/log-escape/.
-        /^fixtures\/junit\/[^/]+$|^fixtures\/stale-instructions\/[^/]+$|^fixtures\/(?:dependencies|exercise|injection|log-escape)\/[^\t]+$|^fixtures\/policy-rules\/(?:p11|p07|p13|p14)\/[^/]+\/[^/]+$|^fixtures\/test-integrity\/TI03\/[^\t]+$|^fixtures\/test-integrity\/TI17\/[^\t]+$|^fixtures\/test-integrity\/(?:TI10\/(?:block-colon-only|block-true-only|block-true-or-run|pass-true-then-run)|TI14\/block-threshold-(?:emptied|lowered-nbsp-comment|padded-past-cap))\.diff$|^fixtures\/policy-settings\/unparseable\/[^\t]+$|^fixtures\/test-integrity\/(?:TI01\/(?:block-test-mts-deleted|block-spec-cts-deleted)|TI04\/block-test-mts-it-only|TI13\/pass-test-mts-istanbul)\/[^\t]+$|^fixtures\/test-integrity\/TI09\/(?:block-opaque-head|block-too-deep-head|pass-added-opaque-config|pass-opaque-base-and-head)\/[^\t]+$|^fixtures\/test-integrity\/(?:index-unavailable\/(?:added-broken|added-parseable|added-python|added-six-broken|mixed|mixed-python)|TI01\/block-same-stem-(?:unparsed|dropped))\/[^\t]+$/,
+        // Re-pinned for CORE-54 (skipIf and runIf no longer excuse TI05 and TI06): so are its new TI05 and TI06 cases.
+        /^fixtures\/test-integrity\/(?:TI05\/(?:block-pytest-skipif-emptied|block-runif-true-emptied|block-skipif-false-emptied|pass-pytest-skip-emptied|pass-pytest-skipif-unchanged|pass-skipif-unchanged)|TI06\/(?:pass-pytest-skip-weakened|pass-skip-weakened|warn-pytest-skipif-weakened|warn-skipif-weakened))\/[^\t]+$|^fixtures\/junit\/[^/]+$|^fixtures\/stale-instructions\/[^/]+$|^fixtures\/(?:dependencies|exercise|injection|log-escape)\/[^\t]+$|^fixtures\/policy-rules\/(?:p11|p07|p13|p14)\/[^/]+\/[^/]+$|^fixtures\/test-integrity\/TI03\/[^\t]+$|^fixtures\/test-integrity\/TI17\/[^\t]+$|^fixtures\/test-integrity\/(?:TI10\/(?:block-colon-only|block-true-only|block-true-or-run|pass-true-then-run)|TI14\/block-threshold-(?:emptied|lowered-nbsp-comment|padded-past-cap))\.diff$|^fixtures\/policy-settings\/unparseable\/[^\t]+$|^fixtures\/test-integrity\/(?:TI01\/(?:block-test-mts-deleted|block-spec-cts-deleted)|TI04\/block-test-mts-it-only|TI13\/pass-test-mts-istanbul)\/[^\t]+$|^fixtures\/test-integrity\/TI09\/(?:block-opaque-head|block-too-deep-head|pass-added-opaque-config|pass-opaque-base-and-head)\/[^\t]+$|^fixtures\/test-integrity\/(?:index-unavailable\/(?:added-broken|added-parseable|added-python|added-six-broken|mixed|mixed-python)|TI01\/block-same-stem-(?:unparsed|dropped))\/[^\t]+$/,
       );
     }
 
