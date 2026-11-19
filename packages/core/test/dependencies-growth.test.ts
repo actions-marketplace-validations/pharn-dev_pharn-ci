@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { check } from "../src/check.js";
 import { parseNpmLock } from "../src/dependencies/npmLock.js";
+import { parseNpmManifest } from "../src/dependencies/npmManifest.js";
 import { parsePnpmLock } from "../src/dependencies/pnpmLock.js";
 import { parsePythonLock } from "../src/dependencies/pythonLock.js";
 import { parseRequirements } from "../src/dependencies/pythonManifest.js";
@@ -67,6 +68,23 @@ describe("dependency readers are linear", { timeout: 120_000 }, () => {
     await linear("pnpm flow", (size) => `lockfileVersion: 9\na: {${sized("k: 'v,', ", size)}}`, parsePnpmLock);
   });
 
+  // CORE-110: the YAML subset pnpm writes is read in one pass per line, on long hostile lines that are read to the end.
+  it("pnpm-lock.yaml: long lines of blanks, list items, flow parts, nesting and plain text", async () => {
+    const read = (text: string) => expect(parsePnpmLock(text)).not.toBeNull();
+    const pnpm = (body: string) => `lockfileVersion: '9.0'\n${body}\n`;
+    await linear("blanks before a colon", (size) => pnpm(`k${sized(" \t", size)}:\t\tv`), read);
+    await linear("blanks after a colon", (size) => pnpm(`k:${sized("\t ", size)}v`), read);
+    await linear("list items on one line", (size) => pnpm(`a:\n  ${sized("- ", size)}x`), read);
+    await linear(
+      "distinct flow keys",
+      (size) => pnpm(`a: {${entries(size, (i) => `k${i} : 'v,#', `).join("")}z: 1}`),
+      read,
+    );
+    await linear("nested flow", (size) => pnpm(`a: ${"[".repeat(size / 2)}${"]".repeat(size / 2)}`), read);
+    await linear("plain text and a comment", (size) => pnpm(`a: ${sized("x:x ", size)}# c: d`), read);
+    await linear("quoted key and blanks", (size) => pnpm(`'${sized("''", size)}' ${sized(" ", size)}: v`), read);
+  });
+
   it("yarn.lock and a header of commas", async () => {
     const make = (size: number) =>
       entries(
@@ -105,6 +123,39 @@ describe("dependency readers are linear", { timeout: 120_000 }, () => {
     );
     await linear("continuations", (size) => `a==1 ${sized("\\\n ", size)}`, parseRequirements);
     await linear("spaces", (size) => `a${sized(" \t", size)}--x`, parseRequirements);
+    // CORE-108: option lines are split like shlex and every option resolved like optparse.
+    await linear(
+      "options on one line",
+      (size) => sized("--pre --ex 'https://x/' -ihttps://y/ ", size),
+      parseRequirements,
+    );
+    await linear("one long option", (size) => `--${sized("x", size)}`, parseRequirements);
+    await linear("unclosed quote", (size) => `--index-url "${sized('\\"x', size)}`, parseRequirements);
+    await linear("backslashes", (size) => `${sized("\\", size)}x\\`, parseRequirements);
+  });
+
+  // CORE-115: package.json override fields; a long parent key over many nested leaves must not be copied into each leaf.
+  it("package.json overrides, resolutions and pnpm.overrides", async () => {
+    const leaves = (size: number) =>
+      entries(size, (i) => `"p${i}":"github:a/b",`)
+        .join("")
+        .slice(0, -1);
+    await linear(
+      "long parent key",
+      (size) => `{"overrides":{"${"k".repeat(size / 2)}":{${leaves(size / 2)}}}}`,
+      parseNpmManifest,
+    );
+    await linear(
+      "flat fields",
+      (size) =>
+        `{"overrides":{${leaves(size / 3)}},"resolutions":{${leaves(size / 3)}},"pnpm":{"overrides":{${leaves(size / 3)}}}}`,
+      parseNpmManifest,
+    );
+    await linear(
+      "selectors",
+      (size) => `{"pnpm":{"overrides":{"${sized("a@>", size)}":"1"}},"resolutions":{"${sized("@a/", size)}":"1"}}`,
+      parseNpmManifest,
+    );
   });
 
   // CORE-100: a lockfile may now be 32 MiB, so the whole path a large pnpm-lock.yaml takes through check() (both sides

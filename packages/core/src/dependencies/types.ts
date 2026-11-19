@@ -39,22 +39,40 @@ export interface ManifestDependency {
   named: boolean;
   /** The version spec as written ("" when none). */
   spec: string;
-  /** The section it is declared in, e.g. `dependencies`, `devDependencies`, `project.dependencies`. */
+  /**
+   * The section it is declared in, e.g. `dependencies`, `devDependencies`, `project.dependencies`, or one of the
+   * package.json override fields `overrides`, `resolutions` and `pnpm.overrides`.
+   */
   section: string;
+  /**
+   * For an override: the selector it is declared under (the key as written for a top-level npm override, a yarn
+   * resolution and a pnpm override; for npm's nested `{"a": {"b": …}}`, a digest of the parent path, `>` and `b`), which
+   * tells two overrides of one package apart. `name` is then the package the override replaces (for a `.` key, the
+   * parent's). For the second and later items of a pyproject.toml array of sources (uv's multiple sources, poetry's
+   * multiple constraints): the name, a NUL and the item's position, which tells the items of one dependency apart.
+   */
+  key?: string;
   line: number;
   /** Where the spec points. */
   kind: SourceKind;
   /** For kind `url`: whether the URL is https on an allowed registry host. */
   allowedUrl?: boolean;
-  /** For kind `url`: the URL as written, so a host the run allows can be applied to it later. */
+  /** For kind `url`: the URL as written (for `jsr:`, `https://npm.jsr.io/`), so a host the run allows can be applied to it later. */
   url?: string;
+  /** For a `jsr:` spec: names the registry in the D05 detail. */
+  registry?: "jsr";
 }
 
-/** An index or find-links option of a requirements file (`--index-url`, `-i`, `--extra-index-url`, `-f`). */
+/**
+ * A package index a manifest adds: an index or find-links option of a requirements file (`--index-url`, `-i`,
+ * `--extra-index-url`, `-f`), or the url of a pyproject.toml poetry source, uv index or uv index key.
+ */
 export interface IndexOption {
   url: string;
   line: number;
   allowed: boolean;
+  /** For pyproject.toml: the table or key it is declared in (`tool.poetry.source`, `tool.uv.index`, `tool.uv.index-url`, …), named in the D05 detail. */
+  table?: string;
 }
 
 /** A parsed manifest. `peer` sections are declared but never installed, so the lockfile checks skip them. */
@@ -72,6 +90,19 @@ export type LockSource =
   | { kind: "file"; text: string }
   | { kind: "link" };
 
+/**
+ * A file URL a lockfile records for a package, which the package manager downloads it from (uv.lock's `sdist` and
+ * `wheels`). `allowed`: https on the host of the package's registry or source URL, or on a file host of that registry
+ * (`REGISTRY_FILE_HOSTS`), with no user name, password or port. A host the run allows is applied in check.ts.
+ */
+export interface LockArtifact {
+  kind: "sdist" | "wheel";
+  url: string;
+  allowed: boolean;
+  /** 1-based line of the URL. */
+  line: number;
+}
+
 /** One resolved package of a lockfile. */
 export interface LockEntry {
   /** The entry's key: its path (package-lock.json), package key (pnpm), header (yarn) or name@version (Python). */
@@ -81,6 +112,11 @@ export interface LockEntry {
   /** The integrity or checksum as written, or null. */
   integrity: string | null;
   source: LockSource;
+  /**
+   * uv.lock only, for a registry or URL source: the `url` of its `sdist` and of each `wheels` item, in file order.
+   * Absent for every other format and source; D05 judges them with the source (CORE-9 R4.8).
+   */
+  artifacts?: LockArtifact[];
   line: number;
 }
 

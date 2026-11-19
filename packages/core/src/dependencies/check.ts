@@ -7,17 +7,18 @@ import { type DependencyLookups, lookupName, type PlannedLookup, planLookups } f
 import { checkIncompleteMessage, dependencySignalMessages, lookupUnavailableMessage } from "./messages.js";
 import { isReportableName, isReportableVersion, normalizePypiName } from "./names.js";
 import { parseNpmLock } from "./npmLock.js";
-import { parseNpmManifest } from "./npmManifest.js";
+import { isOverrideSection, parseNpmManifest } from "./npmManifest.js";
 import { candidateLockfiles, classifyDependencyFile, type DependencyFileKind, touchedPaths } from "./paths.js";
 import { parsePnpmLock } from "./pnpmLock.js";
 import { parsePythonLock } from "./pythonLock.js";
-import { parsePyproject, parseRequirements } from "./pythonManifest.js";
+import { BUILD_REQUIRES_SECTION, parsePyproject, parseRequirements } from "./pythonManifest.js";
 import type { ResolvedDependencySettings } from "./settings.js";
 import { isOffRegistry } from "./specs.js";
 import type {
   DependencyEcosystem,
   DependencySignal,
   DependencySignalId,
+  LockArtifact,
   LockEntry,
   ManifestDependency,
   ParsedLockfile,
@@ -94,6 +95,15 @@ const KIND_WORDS: Readonly<Record<Exclude<SourceKind, "registry">, string>> = {
   url: "a URL outside the allowed registries",
   file: "a local file",
 };
+
+/** The D05 words of a uv.lock file URL off the registry of a package whose source is on one (CORE-9 R4.8). */
+const ARTIFACT_WORDS: Readonly<Record<LockArtifact["kind"], string>> = {
+  sdist: "an sdist URL outside the allowed registries",
+  wheel: "a wheel URL outside the allowed registries",
+};
+
+/** The D05 words of a `jsr:` spec: JSR is a registry, but not one the run allows unless `npm.jsr.io` is an allowed host. */
+const JSR_WORDS = "the JSR registry, outside the allowed registries";
 
 /** What `analyze` found: the offline findings (D04, D05), the added dependencies (for lookups) and what was not read. */
 interface Analysis {
@@ -204,23 +214,33 @@ function analyze(
     analysis.checked += changes.added.length + changes.changed.length;
     for (const dep of [...changes.added, ...changes.changed]) {
       if (dep.kind !== "registry" && isOffRegistry(dep.kind, dep.allowedUrl === true || onAllowedHost(dep.url))) {
+        const from = dep.registry === "jsr" ? JSR_WORDS : KIND_WORDS[dep.kind];
+        const field = isOverrideSection(dep.section) ? ` in ${dep.section}` : "";
         analysis.signals.push(
-          signal("D05", eco, path, dep.line, `declared from ${KIND_WORDS[dep.kind]}`, manifestNames(eco, dep)),
+          signal("D05", eco, path, dep.line, `declared from ${from}${field}`, manifestNames(eco, dep)),
         );
       }
     }
     const baseIndexes = new Set((base?.indexes ?? []).map((option) => option.url));
     for (const option of head.indexes) {
       if (!option.allowed && !onAllowedHost(option.url) && !baseIndexes.has(option.url)) {
+        const where = option.table === undefined ? "" : ` in ${option.table}`;
         analysis.signals.push(
-          signal("D05", eco, path, option.line, "adds a package index outside the allowed registries"),
+          signal("D05", eco, path, option.line, `adds a package index outside the allowed registries${where}`),
         );
       }
     }
-    for (const dep of changes.added) analysis.added.push({ ecosystem: eco, dep, path });
+    // An override names a package already in the tree, so it is looked up only for an `npm:` alias, whose target is new.
+    for (const dep of changes.added) {
+      if (isOverrideSection(dep.section) && !dep.spec.trim().toLowerCase().startsWith("npm:")) continue;
+      analysis.added.push({ ecosystem: eco, dep, path });
+    }
 
     if (kind.format !== "package-json" && kind.format !== "pyproject") return;
-    const installed = (deps: ManifestDependency[]) => deps.filter((dep) => dep.section !== "peerDependencies");
+    // Peer dependencies are never installed; build requirements are installed at build time, but no lockfile records
+    // them, so neither is lockfile drift.
+    const installed = (deps: ManifestDependency[]) =>
+      deps.filter((dep) => dep.section !== "peerDependencies" && dep.section !== BUILD_REQUIRES_SECTION);
     const declared = installed([...changes.added, ...changes.changed]);
     if (declared.length === 0 && installed(changes.removed).length === 0) return;
     const governing: Array<{ path: string; lock: ParsedLockfile | null }> = [];
@@ -241,7 +261,8 @@ function analyze(
       );
       return;
     }
-    for (const dep of declared) {
+    // An override is judged by "the lockfile did not change" only: no lockfile records it as an importer specifier.
+    for (const dep of declared.filter((d) => !isOverrideSection(d.section))) {
       const verdicts = updated.map((entry) =>
         entry.lock === null ? null : recordsDependency(entry.lock, relativeDir(entry.path, path) ?? "", dep),
       );
@@ -266,18 +287,31 @@ function analyze(
     analysis.checked += changes.added.length + changes.changed.length;
     for (const entry of changes.sourceNew) {
       const source = entry.source;
-      if (source.kind === "url" && !source.allowed && onAllowedHost(source.text)) {
-        if (entry.name !== null)
+      const privateHost = source.kind === "url" && !source.allowed && onAllowedHost(source.text);
+      const off =
+        !privateHost && ((source.kind === "url" && !source.allowed) || source.kind === "git" || source.kind === "file")
+          ? (source.kind as "url" | "git" | "file")
+          : null;
+      // A source on a registry still downloads from the file URLs a uv.lock records: the first one off the registry's
+      // hosts and the allowed hosts is the package's one finding. An off-registry source is that finding already.
+      const artifact =
+        off === null ? entry.artifacts?.find((file) => !file.allowed && !onAllowedHost(file.url)) : undefined;
+      if (off === null && artifact === undefined) {
+        if (privateHost && entry.name !== null)
           analysis.offRegistry.add(`${eco}:${eco === "pypi" ? normalizePypiName(entry.name) : entry.name}`);
         continue;
       }
-      const off =
-        (source.kind === "url" && !source.allowed) || source.kind === "git" || source.kind === "file"
-          ? (source.kind as "url" | "git" | "file")
-          : null;
-      if (off === null) continue;
       analysis.signals.push(
-        signal("D05", eco, path, entry.line, `resolved from ${KIND_WORDS[off]}`, entryNames(eco, entry)),
+        artifact === undefined
+          ? signal("D05", eco, path, entry.line, `resolved from ${KIND_WORDS[off ?? "url"]}`, entryNames(eco, entry))
+          : signal(
+              "D05",
+              eco,
+              path,
+              artifact.line,
+              `resolved from ${ARTIFACT_WORDS[artifact.kind]}`,
+              entryNames(eco, entry),
+            ),
       );
       if (entry.name !== null)
         analysis.offRegistry.add(`${eco}:${eco === "pypi" ? normalizePypiName(entry.name) : entry.name}`);

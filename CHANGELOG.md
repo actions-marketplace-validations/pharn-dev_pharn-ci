@@ -11,6 +11,63 @@ Releases are cut by a maintainer; see [`docs/RELEASING.md`](./docs/RELEASING.md)
 
 ### Changed
 
+- Docs: `docs/LIMITS.md` lists, in one place, the files and spellings dependency safety (D04 and D05) still does not
+  read (CORE-117). The spellings closed by the lockfile and manifest readers stay described as read.
+- Dependency safety judges a `uv.lock` package's sdist and wheel URLs (CORE-9 R4.8). D05 judged a uv package by its
+  `source` alone, so a package that kept `source = { registry = "https://pypi.org/simple" }` and pointed
+  `wheels[].url` or `sdist.url` at another host passed, and `uv sync --frozen` downloads from those URLs. Now the
+  `url` of `sdist` and of every `wheels` item, in any TOML spelling, must be https on the package's registry host, a
+  file host of that registry (PyPI: `files.pythonhosted.org`) or an allowed host; anything else is D05 for the
+  package, with the detail naming the sdist or wheel URL. A pull request that changes only an artifact URL is judged
+  too. An `sdist` that is not a table, a `wheels` that is not an array of tables, or a `url` that is not a string makes
+  the file unread (`DEPENDENCY_CHECK_INCOMPLETE`, an error). No new message code and no schema change.
+- Dependency safety reads a `poetry.lock` or `uv.lock` package's source in every TOML spelling (CORE-114). The poetry
+  reader took the source only from a `[package.source]` sub-table and the uv reader only from an inline
+  `source = { … }`, and the TOML reader kept a dotted key (`source.url = …`) as one flat key, so an off-registry source
+  written the other way passed D05, and poetry and uv install from it. The TOML reader now folds dotted keys, headers
+  and array tables into one nested document, both readers take `source` from it whether it is a sub-table, an inline
+  table or dotted keys, and the packages may also be a static `package = [ … ]` array. What TOML forbids makes the
+  file unread (`DEPENDENCY_CHECK_INCOMPLETE`, an error) where the reader used to keep the last value: a key or table
+  defined twice, a dotted key that redefines a value or extends an inline table or a header's table, a header that
+  reopens a table dotted keys defined, and a `package` or `source` that is not a table. In a `pyproject.toml`, a dotted
+  key under a dependency table (`evil.git = "https://…"` under `[tool.poetry.dependencies]` or `[tool.uv.sources]`) is
+  now that dependency's table, where it was a registry dependency named `evil.git`.
+- Dependency safety reads pnpm-lock.yaml the way pnpm reads it (CORE-110). The reader took `key: value` only with one
+  space after the colon and none before it, so `tarball:<tab>https://…` or `resolution : {tarball: …}` passed D05, and
+  pnpm installs from both; it now reads any spaces or tabs on either side of a key's colon, for the source (D05) and the
+  integrity (D04). A hand-edited pnpm lockfile with a YAML anchor, alias, tag, block scalar or merge key, a value on the
+  line after its key, a flow mapping across lines, a duplicated key, tab indentation, an extra document, or a
+  `tarball`, `type`, `repo` or `directory` that is not a plain string now fails the check as unread
+  (`DEPENDENCY_CHECK_INCOMPLETE`, an error), where it was read on a guess before; pnpm writes none of these. A pnpm 10
+  env document (`---` first) is read as well as the lockfile document, where its keys used to shadow the lockfile's.
+- Dependency safety reads a requirements file's options the way pip reads them (CORE-108). D05 read the index and
+  editable options by their full names only, so `--extra-index https://…`, `--index …`, `--find …`, `-ihttps://…`,
+  `-egit+https://…` and `--extra-index=…` passed, and pip installs from each. It now resolves a long option by any
+  unique prefix of the options pip 20.3 to 26.3 allow in a requirements file (including `--pypi-url`), reads a value
+  attached to a short option, every option on a line, quotes as `shlex` splits them, and a `\` continuation joined as
+  pip joins it. An option line pip refuses (an unknown option, a prefix of several such as `--e` or `--no`, a missing
+  value) makes the file unread: `DEPENDENCY_CHECK_INCOMPLETE`, an error, where the line was skipped before.
+- Dependency safety reads `package.json` overrides and three more spec forms (CORE-115). npm's `overrides` (every
+  nested leaf), yarn's `resolutions` and `pnpm.overrides` are now read like the dependency sections: an override that
+  points a package at a git repository, a URL, a local path or `jsr:` is D05 (the detail names the field), and an
+  override added, changed or removed without a lockfile change is D04, where neither was read before. A spec that holds
+  a `:` or a `/` after `npm:`, `workspace:`, `catalog:` and `patch:` is off the registry: `ssh://git@host/x.git`,
+  `user@host:x.git` and `https:host/x` were classed as registry versions and are now D05. `jsr:` is D05 unless
+  `npm.jsr.io` is an allowed host. Stricter: a repository with an existing git or tarball override, or a dependency
+  in one of the three forms, gets a D05 on the next pull request that adds or changes that entry (an entry unchanged
+  since the merge base is not judged again). No new message code and no schema change.
+- Dependency safety reads `pyproject.toml` in every spelling and the places beside the dependency tables that name a
+  package source (CORE-116). A poetry dependency written as its own sub-table (`[tool.poetry.dependencies.evil-pkg]`
+  with `git = "https://…"`, also under a poetry group) was not seen at all, honest or not; it is now the inline table it
+  equals, for D05 and D04, because the reader takes every table from the nested TOML document whether it is a header,
+  an inline table or dotted keys. Newly read: `[build-system] requires` (installed and run at build time: D05 and the
+  lookups, never D04, since no lockfile records it), the `url` of each `[[tool.poetry.source]]` and `[[tool.uv.index]]`
+  (whatever its priority, `explicit` or `default`) and uv's `index-url`, `extra-index-url` and `find-links` in
+  `[tool.uv]` and `[tool.uv.pip]`: an index the change adds off the allowed registries is D05, as an index option in a
+  requirements file is, and the detail names the table. An array of sources for one dependency (uv's multiple sources,
+  poetry's multiple constraints) is read item by item, where it was one registry dependency, so a git item in it is
+  D05. Stricter: a repository that adds such a source or index gets a D05 on that pull request. No new message code and
+  no schema change.
 - Docs: the README is down from about 1,665 lines to about 250 and doubles as the Marketplace page (CORE-137): what
   pharn-ci is, a complete workflow checked in a sandbox repository, one paragraph per check, the most-used inputs, and
   what leaves the job. The reference chapters moved to `docs/` with their text unchanged: the Action reference

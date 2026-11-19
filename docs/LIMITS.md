@@ -1444,23 +1444,69 @@ What they miss:
 
 Dependency safety (D01 to D05, `DEPENDENCY_*`) reads the manifests and lockfiles a change touches, at the merge base
 and at HEAD, and with lookups on asks the public registries about the packages the change adds. It checks where code
-comes from and how new it is, not what it does. What it misses:
+comes from and how new it is, not what it does. The files and spellings it does not read are the list below; nothing
+else in this document repeats that list. A file the readers refuse (a shape they do not know) is an error
+(`DEPENDENCY_CHECK_INCOMPLETE`), not an item on the list.
+
+### What dependency safety does not read
+
+A change in one of these is not checked. Review it by hand.
+
+- **Other ecosystems and files.** Not classified, so a change to them is not a dependency change: Go (`go.mod`,
+  `go.sum`), Cargo, Bundler, Composer, Maven, Gradle, NuGet, `Pipfile`, `Pipfile.lock`, `setup.py`, `setup.cfg`,
+  `environment.yml`, `bun.lock` and `bun.lockb`.
+- **Requirements includes.** `-r` / `--requirement` and `-c` / `--constraint` are recognised as pip options and the
+  files they name are not opened.
+- **`pyproject.toml` tables the reader does not walk.** `[tool.pdm]` and `[tool.hatch]` sources and dependencies, a
+  build backend's own settings (`[tool.setuptools]`, `[tool.hatch.metadata]`), and `[project] dynamic` dependencies a
+  backend computes. A dependency-group `include-group` entry is not followed: the group it names is read only when
+  that group's own table is in the file. A uv workspace member's `pyproject.toml` that the change does not touch is
+  not read.
+- **Registry settings outside the manifests.** `.npmrc`, `.yarnrc.yml` (yarn berry's `packageExtensions` included),
+  `pip.conf` and `PIP_INDEX_URL`. pnpm records no registry host for a registry package, so a private registry set only
+  in `.npmrc` is invisible to D05.
+- **`pnpm-workspace.yaml` overrides** (pnpm 10) and **`package.json` `bundleDependencies`.**
+- **A pnpm resolution of another type.** The source is read from `tarball`, `type`, `repo` and `directory` only. A
+  resolution pnpm knows of another type (`binary` or `variations`, for a `runtime:` dependency such as Node.js) is
+  taken as the registry, and its `url` is not judged.
+
+What the check does read, and how it judges it:
 
 - **Only npm and Python.** `package.json`, `package-lock.json`, `npm-shrinkwrap.json`, `pnpm-lock.yaml` (lockfile
   versions 5 to 9), `yarn.lock` (classic and berry), requirements files, `pyproject.toml`, `poetry.lock` and `uv.lock`.
-  Go (`go.mod`, `go.sum`), Cargo, Bundler, Composer, Maven, Gradle, NuGet, `Pipfile.lock`, `setup.py`, `setup.cfg`,
-  `environment.yml` and `bun.lockb` are not read.
 - **Only what is added or changed.** A dependency already in the base is never judged again, however old its risk; a
   version change of an existing package is not looked up (the package was there before). Removed dependencies are only
   counted for D04's "the lockfile did not change" case.
-- **Declared sources only.** A registry set outside the lockfile (`.npmrc`, `.yarnrc.yml`, pip configuration,
-  `PIP_INDEX_URL`) is not seen. pnpm records no registry host for a registry package, so a private registry configured
-  in `.npmrc` is invisible to D05 there; a yarn berry `npm:` resolution is trusted as the configured registry. A
-  private registry or mirror that a lockfile does record (Artifactory, Verdaccio, GitHub Packages, a private PyPI
-  index) is reported as off the registry (D05) unless its host is on the allowed list: the `dependency-allowed-hosts`
-  input, the CLI's `--dependency-allowed-host` flag or an app policy's `dependencies.allowed_hosts` ([Dependency
+- **Declared sources only.** A yarn berry `npm:` resolution is trusted as the configured registry. A private registry
+  or mirror that a lockfile does record (Artifactory, Verdaccio, GitHub Packages, a private PyPI index) is reported as
+  off the registry (D05) unless its host is on the allowed list: the `dependency-allowed-hosts` input, the CLI's
+  `--dependency-allowed-host` flag or an app policy's `dependencies.allowed_hosts` ([Dependency
   safety](checks/dependencies.md)). The list is host names only, so a registry that is allowed is trusted as a whole: D05 does not look
   at a path, a port or a token, and a package on an allowed host is not looked up, so D01 to D03 never judge it.
+- **Override fields.** In `package.json`, npm's `overrides` (walked through nested objects to every string leaf, a `.`
+  key naming its parent), yarn's `resolutions` and `pnpm.overrides` are read like the dependency sections: a git, URL,
+  path or `jsr:` value is D05 (the detail names the field), and an added, changed or removed override with no change to
+  the governing lockfile is D04. Whether the lockfile records the override is not compared (no lockfile lists it as an
+  importer specifier), so an override with a lockfile change passes D04. An npm `$name` value points at a direct
+  dependency, which is judged in its own section, so it is not a source. Like any dependency, an
+  override already at the merge base is not judged again: a git or tarball override a repository already has gets its
+  D05 from the first pull request that adds or changes that override. An override is looked up (D01 to D03) only when its
+  value is an `npm:` alias.
+- **Spec forms.** After the registry protocols (`npm:`, `workspace:`, `catalog:`, `patch:`), any npm spec that holds a
+  `:` or a `/` is off the registry: `ssh://…` and `user@host:x.git` are git, `https:host/x` and any other scheme a URL
+  (never on an allowed host, since it has no `//`), `@scope/x` and a Windows path a local path. A semver range and a
+  dist-tag hold neither. `jsr:` installs from `npm.jsr.io`, so it is D05 unless that host is on the allowed list; the
+  lockfile's `npm.jsr.io` tarball URLs are judged the same way.
+- **uv.lock file URLs.** A uv package's `sdist` and `wheels` URLs are judged with its source: for a registry package
+  each must be https, with no user name, password or port, on the registry's own host, on a file host D05 knows for
+  that registry (only PyPI's `files.pythonhosted.org`) or on an allowed host. So a PyPI package's wheel on
+  `registry.npmjs.org` is D05 although that host is allowed for npm, and a private registry that serves its files from
+  a second host needs that host allowed too. One finding per package, naming the first URL off those hosts; an
+  off-registry source is that finding already. A `url` source's artifacts are judged by the source URL's host, though
+  uv 0.13.9 downloads from the source URL itself. A git, path, directory, editable or virtual package is judged by its
+  source only (its artifacts must still be the shape uv writes). An artifact URL already at the merge base is not
+  judged again. `poetry.lock` records no file URLs (its `files` hold file names and hashes; poetry downloads from the
+  source or its configured index), so there is nothing more to judge there.
 - **Allowed hosts are exact.** `registry.npmjs.org`, `registry.yarnpkg.com`, `pypi.org` and `files.pythonhosted.org`,
   and the hosts a run allows, https only, no user name, password or port. `http://registry.npmjs.org`, a CDN mirror or a
   regional registry is D05 unless its own host is allowed. An allowed host matches by its full name, case-insensitively:
@@ -1478,8 +1524,33 @@ comes from and how new it is, not what it does. What it misses:
   change fires D04 only when an entry keeps its key and version but its hash of the same algorithm changes (a
   Dependabot-style refresh changes versions and passes); a direct dependency moved to a version outside its declared
   range is not detected (no semver resolution). Python lockfile hashes are not compared.
-- **Requirements files.** `-r` and `-c` includes are not followed; environment variables in a line are not expanded; a
-  local directory (`-e .`, `./pkg`) is not a dependency, only a local archive (`.whl`, `.tar.gz`, `.zip`) is.
+- **Requirements files.** Environment variables in a line are not expanded; a
+  local directory (`-e .`, `./pkg`) is not a dependency, only a local archive (`.whl`, `.tar.gz`, `.zip`) is. Options
+  are read as pip 20.3 to 26.3 read them (a long option by any unique prefix, a value attached to `-i`, `-f` or `-e`,
+  several options on a line); an option line no such pip accepts makes the file unread. An option line that carries
+  `-e` is read whole (every editable and every index option on it), where pip installs its first editable and ignores
+  the rest, so D05 can flag an index pip would not use there; options after a
+  requirement on the same line are cut off and not checked (pip ignores an index option there, and refuses the whole
+  file for an unknown one). A pip version outside that range with a new option starting with an existing option's
+  prefix could read a spelling differently.
+- **`pyproject.toml`.** Read from the nested TOML document, so a table is the same whether it is written as a
+  `[header]`, an inline table or dotted keys (a poetry dependency in its own sub-table, `[tool.poetry.dependencies.x]`,
+  is the inline table it equals). Dependencies: `[build-system] requires`, `[project]` dependencies,
+  `[project.optional-dependencies]`, `[dependency-groups]`, poetry's `[tool.poetry.dependencies]`,
+  `[tool.poetry.dev-dependencies]` and
+  `[tool.poetry.group.<name>.dependencies]` (not `python`) and uv's `[tool.uv.sources]`; an array of sources for one
+  dependency is read item by item. Indexes: the `url` of each `[[tool.poetry.source]]` and `[[tool.uv.index]]`,
+  whatever its `priority`, `explicit` or `default` (an index a dependency may never use is still judged), and uv's
+  `index-url`, `extra-index-url` and `find-links` in `[tool.uv]` and `[tool.uv.pip]`; a source with no `url` (poetry's
+  `PyPI`) is the public index. Build requirements are judged for D05 and the lookups but never for D04: no lockfile
+  records them.
+- **pnpm-lock.yaml is read as the YAML pnpm writes.** Block mappings, one-line flow mappings and sequences, block
+  sequences, plain and quoted scalars and comments are read, with any spaces or tabs before or after a key's colon, as
+  js-yaml (which pnpm loads the lockfile with) reads them. An anchor, alias, tag, block scalar or `<<` merge key, a
+  value on the line after its key, a flow collection across lines, a key given twice in one mapping, a tab in the
+  indentation, a document marker past pnpm 10's env document, or a `resolution` whose `tarball`, `type`, `repo` or
+  `directory` is not a plain string makes the file unread (`unparsable`), even where pnpm would install from it: pnpm
+  never writes these, so a lockfile that has one was edited by hand.
 - **Caps.** A manifest or lockfile over 32 MiB (the cap for one file, the same as the cap for one side), past 100 files
   or 32 MiB a side is not read and is named in `dependencies.unread`, never guessed; a TOML syntax error makes the whole
   file unread. `DEPENDENCY_CHECK_INCOMPLETE` is an error (verdict `fail`) when any unread file's reason is one the pull

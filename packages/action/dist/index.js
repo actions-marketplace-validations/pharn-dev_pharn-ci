@@ -28504,7 +28504,7 @@ function selectDependencyPaths(diff, repoFiles) {
 }
 
 // ../core/src/dependencies/compare.ts
-var depKey = (dep) => `${dep.section}\0${dep.name}`;
+var depKey = (dep) => `${dep.section}\0${dep.key ?? dep.name}`;
 function manifestChanges(base, head) {
   const before = /* @__PURE__ */ new Map();
   for (const dep of base?.deps ?? []) before.set(depKey(dep), dep);
@@ -28521,7 +28521,13 @@ function manifestChanges(base, head) {
   const removed = [...before.entries()].filter(([key]) => !seen.has(key)).map(([, dep]) => dep);
   return { added, changed, removed };
 }
-var sourceText = (source) => "text" in source ? `${source.kind}:${source.text}` : source.kind;
+var sourceText = (entry) => {
+  const source = entry.source;
+  const text = "text" in source ? `${source.kind}:${source.text}` : source.kind;
+  const artifacts = (entry.artifacts ?? []).map((artifact) => `
+${artifact.kind}:${artifact.url}`).join("");
+  return `${text}${artifacts}`;
+};
 function algorithms(integrity) {
   return integrity.trim().split(/\s+/).map((part) => {
     const dash = part.indexOf("-");
@@ -28542,7 +28548,7 @@ function lockChanges(base, head) {
       out.sourceNew.push(entry);
       continue;
     }
-    const sourceMoved = sourceText(old.source) !== sourceText(entry.source);
+    const sourceMoved = sourceText(old) !== sourceText(entry);
     if (old.version !== entry.version || old.integrity !== entry.integrity || sourceMoved) out.changed.push(entry);
     if (sourceMoved) out.sourceNew.push(entry);
     if (old.version !== null && old.version === entry.version && old.integrity !== null && entry.integrity !== null && old.integrity !== entry.integrity && algorithms(old.integrity) === algorithms(entry.integrity)) {
@@ -29099,10 +29105,20 @@ function isAllowedRegistryUrl(url, hosts = ALLOWED_RESOLVE_HOSTS) {
   if (parts === null) return false;
   return parts.scheme === "https" && !parts.userinfo && !parts.port && hosts.includes(parts.host);
 }
+var REGISTRY_FILE_HOSTS = /* @__PURE__ */ new Map([
+  ["pypi.org", ["files.pythonhosted.org"]]
+]);
+function artifactHosts(registryUrl) {
+  const host = urlParts(registryUrl.trim())?.host ?? "";
+  if (host === "") return [];
+  return [host, ...REGISTRY_FILE_HOSTS.get(host) ?? []];
+}
 
 // ../core/src/dependencies/specs.ts
 var GIT_PREFIXES = ["git+", "git:", "git@", "github:", "gitlab:", "bitbucket:", "gist:"];
 var FILE_PREFIXES = ["file:", "link:", "portal:", "./", "../", "/", "~/", "exec:"];
+var JSR_REGISTRY_URL = "https://npm.jsr.io/";
+var isAsciiLetter2 = (c) => c >= 65 && c <= 90 || c >= 97 && c <= 122;
 function classifyNpmSpec(spec) {
   const text = spec.trim();
   const lower = text.toLowerCase();
@@ -29115,7 +29131,20 @@ function classifyNpmSpec(spec) {
     return { kind: "registry" };
   }
   if (lower.startsWith("patch:")) return { kind: "registry" };
-  if (text.includes("/") && !text.startsWith("@") && !text.includes(":")) return { kind: "git" };
+  if (lower.startsWith("jsr:")) return { kind: "url", allowedUrl: false, url: JSR_REGISTRY_URL, registry: "jsr" };
+  const hash = text.indexOf("#");
+  const colon = (hash === -1 ? text : text.slice(0, hash)).indexOf(":");
+  if (colon !== -1) {
+    if (colon === 1 && isAsciiLetter2(text.charCodeAt(0)) && (text[2] === "\\" || text[2] === "/")) {
+      return { kind: "file" };
+    }
+    if (lower.startsWith("ssh:") || text.slice(0, colon).includes("@")) return { kind: "git" };
+    return { kind: "url", allowedUrl: isAllowedRegistryUrl(text) };
+  }
+  if (text.includes("/")) {
+    return { kind: text.startsWith("@") ? "file" : "git" };
+  }
+  if (text.includes(":")) return { kind: "url", allowedUrl: false };
   if (lower.endsWith(".tgz") || lower.endsWith(".tar.gz")) return { kind: "file" };
   return { kind: "registry" };
 }
@@ -29138,8 +29167,40 @@ function isOffRegistry(kind, allowedUrl) {
 
 // ../core/src/dependencies/npmManifest.ts
 var NPM_SECTIONS = ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies"];
+var NPM_OVERRIDE_SECTIONS = ["overrides", "resolutions", "pnpm.overrides"];
+function isOverrideSection(section) {
+  return NPM_OVERRIDE_SECTIONS.includes(section);
+}
 function membersOf(value) {
   return value !== void 0 && value.type === "object" ? value.members : null;
+}
+function withoutVersion(selector) {
+  const at = selector.indexOf("@", 1);
+  return at === -1 ? selector : selector.slice(0, at);
+}
+function pathDigest(text) {
+  let h1 = 3735928559;
+  let h2 = 1103547991;
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    h1 = Math.imul(h1 ^ c, 2654435761);
+    h2 = Math.imul(h2 ^ c, 1597334677);
+  }
+  h1 = Math.imul(h1 ^ h1 >>> 16, 2246822507) ^ Math.imul(h2 ^ h2 >>> 13, 3266489909);
+  h2 = Math.imul(h2 ^ h2 >>> 16, 2246822507) ^ Math.imul(h1 ^ h1 >>> 13, 3266489909);
+  return `#${(4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(36)}`;
+}
+function pnpmTarget(key) {
+  for (let i = key.length - 1; i > 0; i--) {
+    if (key[i] === ">" && key[i - 1] !== "@" && key[i - 1] !== ">") return withoutVersion(key.slice(i + 1));
+  }
+  return withoutVersion(key);
+}
+function yarnTarget(key) {
+  const parts = key.split("/");
+  const last = parts[parts.length - 1];
+  const scope = parts.length > 1 ? parts[parts.length - 2] : "";
+  return withoutVersion(scope.startsWith("@") ? `${scope}/${last}` : last);
 }
 function parseNpmManifest(text) {
   const parsed = parseSettingsJson(text, { jsonc: false });
@@ -29147,24 +29208,44 @@ function parseNpmManifest(text) {
   const root = membersOf(parsed.value);
   if (root === null) return null;
   const deps = [];
+  const add = (name, member, section, key) => {
+    if (member.value.type !== "string") return;
+    const spec = member.value.value;
+    const kind = classifyNpmSpec(spec);
+    deps.push({
+      name,
+      named: name !== "",
+      spec,
+      section,
+      line: member.keyLine,
+      ...key === void 0 ? {} : { key },
+      kind: kind.kind,
+      ...kind.allowedUrl === void 0 ? {} : { allowedUrl: kind.allowedUrl },
+      ...kind.kind === "url" ? { url: kind.url ?? spec.trim() } : {},
+      ...kind.registry === void 0 ? {} : { registry: kind.registry }
+    });
+  };
   for (const section of NPM_SECTIONS) {
     const members = membersOf(root.get(section)?.value);
     if (members === null) continue;
-    for (const [name, member] of members) {
-      if (member.value.type !== "string") continue;
-      const spec = member.value.value;
-      const kind = classifyNpmSpec(spec);
-      deps.push({
-        name,
-        named: true,
-        spec,
-        section,
-        line: member.keyLine,
-        kind: kind.kind,
-        ...kind.allowedUrl === void 0 ? {} : { allowedUrl: kind.allowedUrl },
-        ...kind.kind === "url" ? { url: spec.trim() } : {}
-      });
+    for (const [name, member] of members) add(name, member, section);
+  }
+  const walk = (members, parentId, parentName) => {
+    for (const [key, member] of members) {
+      const name = key === "." ? parentName : withoutVersion(key);
+      const nested2 = membersOf(member.value);
+      if (nested2 === null) add(name, member, "overrides", parentId === "" ? key : `${parentId}>${key}`);
+      else walk(nested2, pathDigest(`${parentId}\0${key}`), name);
     }
+  };
+  const overrides = membersOf(root.get("overrides")?.value);
+  if (overrides !== null) walk(overrides, "", "");
+  for (const [key, member] of membersOf(root.get("resolutions")?.value) ?? []) {
+    add(yarnTarget(key), member, "resolutions", key);
+  }
+  const pnpm = membersOf(root.get("pnpm")?.value);
+  for (const [key, member] of membersOf(pnpm?.get("overrides")?.value) ?? []) {
+    add(pnpmTarget(key), member, "pnpm.overrides", key);
   }
   return { ecosystem: "npm", deps, indexes: [] };
 }
@@ -29262,81 +29343,230 @@ function unquoteScalar(text) {
 }
 function closingQuote2(text, open3) {
   const quote = text[open3];
+  if (quote === "'") {
+    let i = text.indexOf("'", open3 + 1);
+    while (i !== -1 && text[i + 1] === "'") i = text.indexOf("'", i + 2);
+    return i;
+  }
   for (let i = open3 + 1; i < text.length; i++) {
-    if (quote === '"' && text[i] === "\\") i++;
-    else if (text[i] === quote) {
-      if (quote === "'" && text[i + 1] === "'") i++;
-      else return i;
-    }
+    if (text[i] === "\\") i++;
+    else if (text[i] === quote) return i;
   }
   return -1;
+}
+var isBlank = (ch) => ch === " " || ch === "	";
+function commentAt(text) {
+  const space = text.indexOf(" #");
+  const tab = text.indexOf("	#");
+  if (space === -1) return tab === -1 ? text.length : tab + 1;
+  return tab === -1 || space < tab ? space + 1 : tab + 1;
+}
+function hasMappingColon(text) {
+  return text.includes(": ") || text.includes(":	") || text.endsWith(":");
 }
 function splitKey(content) {
   if (content.startsWith('"') || content.startsWith("'")) {
     const end = closingQuote2(content, 0);
-    if (end === -1 || content[end + 1] !== ":") return null;
-    return { key: unquoteScalar(content.slice(0, end + 1)), value: content.slice(end + 2).trim() };
+    if (end === -1) return null;
+    let colon = end + 1;
+    while (isBlank(content[colon])) colon++;
+    if (content[colon] !== ":") return null;
+    return { key: unquoteScalar(content.slice(0, end + 1)), value: content.slice(colon + 1).trim() };
   }
-  const at = content.indexOf(": ");
-  if (at !== -1) return { key: content.slice(0, at), value: content.slice(at + 2).trim() };
-  if (content.endsWith(":")) return { key: content.slice(0, -1), value: "" };
+  const comment = commentAt(content);
+  for (let i = content.indexOf(":"); i !== -1 && i < comment; i = content.indexOf(":", i + 1)) {
+    if (i + 1 === content.length || isBlank(content[i + 1])) {
+      const key = content.slice(0, i).trim();
+      return key === "" ? null : { key, value: content.slice(i + 1).trim() };
+    }
+  }
   return null;
 }
-function flowMap(text, line) {
-  const inner = text.endsWith("}") ? text.slice(1, -1) : text.slice(1);
-  const children = /* @__PURE__ */ new Map();
-  let start = 0;
-  let quote = null;
-  const take = (end) => {
-    const part = inner.slice(start, end).trim();
-    const colon = part.indexOf(":");
-    if (colon > 0) {
-      children.set(unquoteScalar(part.slice(0, colon)), {
-        value: unquoteScalar(part.slice(colon + 1)),
-        line,
-        children: null
-      });
+var NOT_WRITTEN = /* @__PURE__ */ new Set(["*", "&", "!", "|", ">", "%", "@", "`"]);
+function plainKeyAllowed(written, key) {
+  if (written.startsWith("'") || written.startsWith('"')) return true;
+  const first = key[0];
+  return !NOT_WRITTEN.has(first) && first !== "?" && first !== "{" && first !== "[" && key !== "<<";
+}
+function restIsComment(text, from) {
+  let i = from;
+  while (isBlank(text[i])) i++;
+  return i === text.length || i > from && text[i] === "#";
+}
+var CLOSER = { "{": "}", "[": "]" };
+function scanFlow(text, commas) {
+  const open3 = [];
+  let scalarStart = true;
+  let quoted = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === " " || ch === "	") continue;
+    if (ch === "#" && isBlank(text[i - 1])) return -1;
+    if (scalarStart && (ch === "'" || ch === '"')) {
+      const end = closingQuote2(text, i);
+      if (end === -1) return -1;
+      i = end;
+      scalarStart = false;
+      quoted = true;
+      continue;
     }
-  };
-  for (let i = 0; i < inner.length; i++) {
-    const ch = inner[i];
-    if (quote !== null) {
-      if (ch === quote) quote = null;
-    } else if (ch === '"' || ch === "'") {
-      quote = ch;
+    if (scalarStart && NOT_WRITTEN.has(ch)) return -1;
+    const wasQuoted = quoted;
+    quoted = false;
+    if (ch === "{" || ch === "[") {
+      open3.push(CLOSER[ch]);
+      scalarStart = true;
+    } else if (ch === "}" || ch === "]") {
+      if (open3.pop() !== ch) return -1;
+      if (open3.length === 0) return i + 1;
+      scalarStart = false;
     } else if (ch === ",") {
-      take(i);
-      start = i + 1;
+      if (open3.length === 1) commas.push(i);
+      scalarStart = true;
+    } else if (ch === ":" && (wasQuoted || i + 1 === text.length || isBlank(text[i + 1]))) {
+      scalarStart = true;
+    } else {
+      PLAIN_RUN.lastIndex = i + 1;
+      if (PLAIN_RUN.test(text)) i = PLAIN_RUN.lastIndex - 1;
+      scalarStart = false;
     }
   }
-  take(inner.length);
+  return -1;
+}
+var PLAIN_RUN = /[^ \t#'"{}[\],:]+/y;
+function flowScalar(text) {
+  if (text.startsWith("'") || text.startsWith('"')) {
+    return closingQuote2(text, 0) === text.length - 1 ? unquoteScalar(text) : null;
+  }
+  if (text.startsWith("{") || text.startsWith("[")) return text;
+  return hasMappingColon(text) ? null : text;
+}
+function flowMap(text, end, commas, line) {
+  const children = /* @__PURE__ */ new Map();
+  const bounds = [0, ...commas, end - 1];
+  for (let k = 0; k + 1 < bounds.length; k++) {
+    const part = text.slice(bounds[k] + 1, bounds[k + 1]).trim();
+    if (part === "") {
+      if (k + 2 === bounds.length && (k > 0 || commas.length === 0)) continue;
+      return null;
+    }
+    const pair = splitKey(part);
+    if (pair === null || !plainKeyAllowed(part, pair.key) || children.has(pair.key)) return null;
+    const value = flowScalar(pair.value);
+    if (value === null) return null;
+    children.set(pair.key, { value, line, children: null });
+  }
   return children;
 }
-function parseYamlTree(text) {
+function blockValue(text, line) {
+  if (text === "" || text.startsWith("#")) return { value: "", children: null, closed: false };
+  const first = text[0];
+  if (NOT_WRITTEN.has(first)) return null;
+  if (first === "'" || first === '"') {
+    const end = closingQuote2(text, 0);
+    if (end === -1 || !restIsComment(text, end + 1)) return null;
+    return { value: unquoteScalar(text.slice(0, end + 1)), children: null, closed: true };
+  }
+  if (first === "{" || first === "[") {
+    const commas = [];
+    const end = scanFlow(text, commas);
+    if (end === -1 || !restIsComment(text, end)) return null;
+    if (first === "[") return { value: text.slice(0, end), children: null, closed: true };
+    const children = flowMap(text, end, commas, line);
+    return children === null ? null : { value: "", children, closed: true };
+  }
+  const value = text.slice(0, commentAt(text)).trimEnd();
+  return hasMappingColon(value) ? null : { value, children: null, closed: true };
+}
+function parseYamlTree(text, lineOffset = 0) {
   const root = { value: "", line: 0, children: /* @__PURE__ */ new Map() };
-  const stack = [{ indent: -1, node: root }];
+  const stack = [{ indent: -1, node: root, closed: false }];
+  const parentAt = (indent) => {
+    while (stack.length > 1 && stack[stack.length - 1].indent >= indent) stack.pop();
+    const top = stack[stack.length - 1];
+    return top.closed ? null : top.node;
+  };
   const lines = text.split("\n");
-  for (let i = 0; i < lines.length; i++) {
-    const raw = lines[i];
+  let started = false;
+  let explicit = null;
+  for (let n = 0; n < lines.length; n++) {
+    const raw = lines[n];
+    const i = n + lineOffset;
     const line = raw.endsWith("\r") ? raw.slice(0, -1) : raw;
+    if (line.includes("\r")) return null;
     let indent = 0;
     while (indent < line.length && line[indent] === " ") indent++;
     const content = line.slice(indent).trimEnd();
-    if (content === "" || content.startsWith("#") || content === "-" || content.startsWith("- ")) continue;
-    const pair = splitKey(content);
-    if (pair === null) continue;
-    while (stack.length > 1 && stack[stack.length - 1].indent >= indent) stack.pop();
-    const parent = stack[stack.length - 1].node;
+    if (content === "" || content.startsWith("#")) continue;
+    if (content.startsWith("	")) return null;
+    if (indent === 0 && content === "---" && !started) {
+      started = true;
+      continue;
+    }
+    started = true;
+    let at = 0;
+    let itemIndent = indent;
+    while (content[at] === "-" && (at + 1 === content.length || content[at + 1] === " ")) {
+      if (parentAt(itemIndent) === null) return null;
+      stack.push({ indent: itemIndent, node: { value: "", line: i + 1, children: null }, closed: false });
+      let next = at + 1;
+      while (content[next] === " ") next++;
+      itemIndent += next - at;
+      at = next;
+    }
+    if (at === content.length) continue;
+    let rest = at === 0 ? content : content.slice(at);
+    if (rest.startsWith("	") || rest.startsWith("-	")) return null;
+    if (explicit !== null) {
+      if (itemIndent !== explicit.indent || !(rest === ":" || rest.startsWith(": "))) return null;
+      const parent2 = parentAt(itemIndent);
+      if (parent2 === null) return null;
+      if (parent2.children === null) parent2.children = /* @__PURE__ */ new Map();
+      if (parent2.children.has(explicit.key)) return null;
+      const node2 = { value: "", line: explicit.line, children: null };
+      parent2.children.set(explicit.key, node2);
+      explicit = null;
+      let next = 1;
+      while (rest[next] === " ") next++;
+      const after = rest.slice(next);
+      const inner = after === "" ? null : splitKey(after);
+      if (inner === null) {
+        const value2 = blockValue(after, i + 1);
+        if (value2 === null) return null;
+        node2.value = value2.value;
+        node2.children = value2.children;
+        stack.push({ indent: itemIndent, node: node2, closed: value2.closed });
+        continue;
+      }
+      stack.push({ indent: itemIndent, node: node2, closed: false });
+      itemIndent += next;
+      rest = after;
+    } else if (rest === "?" || rest.startsWith("? ")) {
+      const written = rest.slice(1).trim();
+      const key = written.startsWith("[") ? null : blockValue(written, i + 1);
+      if (key === null || !key.closed || key.children !== null) return null;
+      explicit = { key: key.value, indent: itemIndent, line: i + 1 };
+      continue;
+    }
+    const pair = splitKey(rest);
+    if (pair === null) {
+      if (at === 0) return null;
+      if (blockValue(rest, i + 1)?.closed !== true) return null;
+      stack[stack.length - 1].closed = true;
+      continue;
+    }
+    if (!plainKeyAllowed(rest, pair.key)) return null;
+    const parent = parentAt(itemIndent);
+    if (parent === null) return null;
     if (parent.children === null) parent.children = /* @__PURE__ */ new Map();
-    const node = {
-      value: pair.value.startsWith("{") ? "" : unquoteScalar(pair.value),
-      line: i + 1,
-      children: pair.value.startsWith("{") ? flowMap(pair.value, i + 1) : null
-    };
-    if (!parent.children.has(pair.key)) parent.children.set(pair.key, node);
-    stack.push({ indent, node });
+    if (parent.children.has(pair.key)) return null;
+    const value = blockValue(pair.value, i + 1);
+    if (value === null) return null;
+    const node = { value: value.value, line: i + 1, children: value.children };
+    parent.children.set(pair.key, node);
+    stack.push({ indent: itemIndent, node, closed: value.closed });
   }
-  return root;
+  return explicit === null ? root : null;
 }
 function importerSpecs(node) {
   const specs = /* @__PURE__ */ new Map();
@@ -29374,29 +29604,70 @@ function pnpmSource(resolution) {
   if (type === "directory" || directory !== void 0) return { kind: "file", text: directory ?? "" };
   return { kind: "registry" };
 }
-function parsePnpmLock(text) {
-  const root = parseYamlTree(text).children;
-  if (!root.has("lockfileVersion")) return null;
-  const importers = /* @__PURE__ */ new Map();
-  const listed2 = root.get("importers")?.children;
-  if (listed2 !== void 0 && listed2 !== null) {
-    for (const [dir, node] of listed2) importers.set(dir === "." ? "" : dir, importerSpecs(node.children ?? /* @__PURE__ */ new Map()));
-  } else {
-    importers.set("", importerSpecs(root));
+var SOURCE_KEYS = ["tarball", "type", "repo", "directory"];
+function readableResolution(node) {
+  if (node === void 0) return null;
+  if (node.children === null) return void 0;
+  for (const key of SOURCE_KEYS) {
+    const field = node.children.get(key);
+    if (field === void 0) continue;
+    if (field.children !== null || field.value === "" || field.value.startsWith("{") || field.value.startsWith("["))
+      return void 0;
   }
+  return node.children;
+}
+function pnpmDocuments(text) {
+  const body = text.charCodeAt(0) === 65279 ? text.slice(1) : text;
+  if (body.startsWith("---\n")) {
+    const separator = body.indexOf("\n---\n", 4);
+    if (separator !== -1) {
+      const env = body.slice(4, separator + 1);
+      let lines = 0;
+      for (let i = 0; i < env.length; i++) if (env[i] === "\n") lines++;
+      return [
+        { text: env, lineOffset: 1 },
+        { text: body.slice(separator + 5), lineOffset: lines + 2 }
+      ];
+    }
+  }
+  return [{ text: body, lineOffset: 0 }];
+}
+function parsePnpmLock(text) {
+  const documents = [];
+  for (const document2 of pnpmDocuments(text)) {
+    const tree = parseYamlTree(document2.text, document2.lineOffset);
+    if (tree === null) return null;
+    documents.push(tree.children);
+  }
+  if (!documents[documents.length - 1].has("lockfileVersion")) return null;
+  const importers = /* @__PURE__ */ new Map();
+  const addImporter = (dir, specs) => {
+    const known2 = importers.get(dir);
+    if (known2 === void 0) importers.set(dir, specs);
+    else for (const [name, spec] of specs) if (!known2.has(name)) known2.set(name, spec);
+  };
   const entries = [];
-  for (const [key, node] of root.get("packages")?.children ?? /* @__PURE__ */ new Map()) {
-    const fields = node.children;
-    const parts = pnpmKeyParts(key);
-    const resolution = fields?.get("resolution")?.children ?? null;
-    entries.push({
-      key,
-      name: fields?.get("name")?.value ?? parts.name,
-      version: fields?.get("version")?.value ?? parts.version,
-      integrity: resolution?.get("integrity")?.value ?? null,
-      source: pnpmSource(resolution),
-      line: node.line
-    });
+  for (const root of documents) {
+    const listed2 = root.get("importers")?.children;
+    if (listed2 !== void 0 && listed2 !== null) {
+      for (const [dir, node] of listed2) addImporter(dir === "." ? "" : dir, importerSpecs(node.children ?? /* @__PURE__ */ new Map()));
+    } else {
+      addImporter("", importerSpecs(root));
+    }
+    for (const [key, node] of root.get("packages")?.children ?? /* @__PURE__ */ new Map()) {
+      const fields = node.children;
+      const parts = pnpmKeyParts(key);
+      const resolution = readableResolution(fields?.get("resolution"));
+      if (resolution === void 0) return null;
+      entries.push({
+        key,
+        name: fields?.get("name")?.value ?? parts.name,
+        version: fields?.get("version")?.value ?? parts.version,
+        integrity: resolution?.get("integrity")?.value ?? null,
+        source: pnpmSource(resolution),
+        line: node.line
+      });
+    }
   }
   return { ecosystem: "npm", format: "pnpm", entries, importers, specs: null, names: null };
 }
@@ -29407,7 +29678,8 @@ var ESCAPES2 = { '"': '"', "\\": "\\", n: "\n", t: "	", r: "\r", b: "\b", f: "\f
 var TomlError = class extends Error {
 };
 var isBare = (c) => c >= "A" && c <= "Z" || c >= "a" && c <= "z" || c >= "0" && c <= "9" || c === "_" || c === "-";
-function parseToml(text) {
+var newTable = (line) => ({ type: "table", entries: /* @__PURE__ */ new Map(), line });
+function parseTomlDocument(text) {
   const src = text.charCodeAt(0) === 65279 ? text.slice(1) : text;
   const lineStarts2 = [0];
   for (let i = 0; i < src.length; i++) if (src[i] === "\n") lineStarts2.push(i + 1);
@@ -29545,10 +29817,33 @@ function parseToml(text) {
     for (; ; ) {
       skipSpaces2();
       if (src[pos] !== ".") return parts;
+      if (parts.length >= MAX_DEPTH2) fail2();
       pos++;
       skipSpaces2();
       parts.push(keyPart());
     }
+  };
+  const origin = /* @__PURE__ */ new Map();
+  let dotted = [];
+  const assign = (table, parts, value2, line, open3, created) => {
+    let target = table;
+    for (let i = 0; i < parts.length - 1; i++) {
+      const key = parts[i];
+      const next = target.entries.get(key);
+      if (next === void 0) {
+        const child = newTable(line);
+        target.entries.set(key, child);
+        created(child);
+        target = child;
+      } else if (next.type === "table" && open3(next)) {
+        target = next;
+      } else {
+        fail2();
+      }
+    }
+    const last = parts[parts.length - 1];
+    if (target.entries.has(last)) fail2();
+    target.entries.set(last, value2);
   };
   const value = (depth) => {
     if (depth > MAX_DEPTH2) fail2();
@@ -29573,19 +29868,28 @@ function parseToml(text) {
     }
     if (ch === "{") {
       pos++;
-      const entries = /* @__PURE__ */ new Map();
+      const table = newTable(line);
+      const made = /* @__PURE__ */ new Set();
       for (; ; ) {
         skipAll();
         if (src[pos] === "}") {
           pos++;
-          return { type: "table", entries, line };
+          return table;
         }
-        const key = dottedKey().join(".");
+        const keyLine = lineAt(pos);
+        const parts = dottedKey();
         skipSpaces2();
         if (src[pos] !== "=") fail2();
         pos++;
         skipSpaces2();
-        entries.set(key, value(depth + 1));
+        assign(
+          table,
+          parts,
+          value(depth + 1),
+          keyLine,
+          (parent) => made.has(parent),
+          (child) => made.add(child)
+        );
         skipAll();
         if (src[pos] === ",") pos++;
         else if (src[pos] !== "}") fail2();
@@ -29596,7 +29900,53 @@ function parseToml(text) {
     if (src.slice(start, pos).trim() === "") fail2();
     return { type: "other", line };
   };
+  const openHeader = (root2, path, array, line) => {
+    let table = root2;
+    for (let i = 0; i < path.length - 1; i++) {
+      const key = path[i];
+      let next = table.entries.get(key);
+      if (next === void 0) {
+        next = newTable(line);
+        origin.set(next, "implicit");
+        table.entries.set(key, next);
+      } else if (next.type === "array" && origin.get(next) === "array-table") {
+        next = next.items[next.items.length - 1];
+      }
+      if (next === void 0 || next.type !== "table" || origin.get(next) === "frozen") fail2();
+      table = next;
+    }
+    const last = path[path.length - 1];
+    const existing = table.entries.get(last);
+    if (array) {
+      let list = existing;
+      if (list === void 0) {
+        list = { type: "array", items: [], line };
+        origin.set(list, "array-table");
+        table.entries.set(last, list);
+      } else if (list.type !== "array" || origin.get(list) !== "array-table") {
+        fail2();
+      }
+      const element = newTable(line);
+      origin.set(element, "defined");
+      list.items.push(element);
+      return element;
+    }
+    if (existing === void 0) {
+      const created = newTable(line);
+      origin.set(created, "defined");
+      table.entries.set(last, created);
+      return created;
+    }
+    if (existing.type !== "table" || origin.get(existing) !== "implicit") fail2();
+    const defined = existing;
+    origin.set(defined, "defined");
+    defined.line = line;
+    return defined;
+  };
+  const root = newTable(1);
+  origin.set(root, "defined");
   const tables = [{ path: [], array: false, line: 1, entries: /* @__PURE__ */ new Map() }];
+  let current = root;
   try {
     for (; ; ) {
       skipAll();
@@ -29611,36 +29961,64 @@ function parseToml(text) {
         if (array ? !src.startsWith("]]", pos) : src[pos] !== "]") fail2();
         pos += array ? 2 : 1;
         endOfLine();
+        for (const table of dotted) origin.set(table, "defined");
+        dotted = [];
+        current = openHeader(root, path, array, line);
         tables.push({ path, array, line, entries: /* @__PURE__ */ new Map() });
         continue;
       }
-      const key = dottedKey().join(".");
+      const parts = dottedKey();
       skipSpaces2();
       if (src[pos] !== "=") fail2();
       pos++;
       skipSpaces2();
       const parsed = value(0);
       endOfLine();
-      tables[tables.length - 1].entries.set(key, parsed);
+      if (parsed.type === "table" || parsed.type === "array") origin.set(parsed, "frozen");
+      assign(
+        current,
+        parts,
+        parsed,
+        line,
+        (parent) => {
+          const from = origin.get(parent);
+          if (from === "implicit") {
+            origin.set(parent, "dotted");
+            dotted.push(parent);
+          }
+          return from === "implicit" || from === "dotted";
+        },
+        (child) => {
+          origin.set(child, "dotted");
+          dotted.push(child);
+        }
+      );
+      const header2 = tables[tables.length - 1];
+      const first = parts[0];
+      if (!header2.entries.has(first)) header2.entries.set(first, current.entries.get(first));
     }
   } catch (error2) {
     if (error2 instanceof TomlError) return null;
     throw error2;
   }
-  return tables;
+  return { root, tables };
 }
-function isTable(table, path) {
-  return table.path.length === path.length && table.path.every((part, i) => part === path[i]);
+function valueAt(table, path) {
+  let value = table;
+  for (const key of path) {
+    if (value?.type !== "table") return void 0;
+    value = value.entries.get(key);
+  }
+  return value;
 }
 
 // ../core/src/dependencies/pythonLock.ts
+var PYPI_INDEX = "https://pypi.org/simple";
 function stringIn(entries, key) {
   const value = entries?.get(key);
   return value !== void 0 && value.type === "string" ? value.value : null;
 }
-function uvSource(value) {
-  if (value === void 0 || value.type !== "table") return { kind: "registry" };
-  const entries = value.entries;
+function uvSource(entries) {
   const registry = stringIn(entries, "registry");
   if (registry !== null) return { kind: "url", allowed: isAllowedRegistryUrl(registry), text: registry };
   const git = stringIn(entries, "git");
@@ -29651,6 +30029,24 @@ function uvSource(value) {
   if (path !== null) return { kind: "file", text: path };
   return { kind: "link" };
 }
+function uvArtifacts(entries, hosts) {
+  const artifacts = [];
+  const add = (kind, table) => {
+    if (table.type !== "table") return false;
+    const url = table.entries.get("url");
+    if (url === void 0) return true;
+    if (url.type !== "string") return false;
+    artifacts.push({ kind, url: url.value, allowed: isAllowedRegistryUrl(url.value, hosts), line: url.line });
+    return true;
+  };
+  const sdist = entries.get("sdist");
+  if (sdist !== void 0 && !add("sdist", sdist)) return null;
+  const wheels = entries.get("wheels");
+  if (wheels === void 0) return artifacts;
+  if (wheels.type !== "array") return null;
+  for (const wheel of wheels.items) if (!add("wheel", wheel)) return null;
+  return artifacts;
+}
 function poetrySource(entries) {
   const type = stringIn(entries, "type");
   const url = stringIn(entries, "url") ?? "";
@@ -29660,38 +30056,39 @@ function poetrySource(entries) {
   return sourceOfResolved(url);
 }
 function parsePythonLock(text, format) {
-  const tables = parseToml(text);
-  if (tables === null) return null;
+  const document2 = parseTomlDocument(text);
+  if (document2 === null) return null;
+  const packages = valueAt(document2.root, ["package"]);
+  if (packages !== void 0 && packages.type !== "array") return null;
   const entries = [];
   const names = /* @__PURE__ */ new Set();
-  let current = null;
-  const finish3 = () => {
-    if (current === null || current.name === null) return;
-    const name = normalizePypiName(current.name);
+  for (const item of packages?.items ?? []) {
+    if (item.type !== "table") return null;
+    const source = item.entries.get("source");
+    if (source !== void 0 && source.type !== "table") return null;
+    const lockSource = source === void 0 ? { kind: "registry" } : format === "uv" ? uvSource(source.entries) : poetrySource(source.entries);
+    let artifacts;
+    if (format === "uv") {
+      const from = lockSource.kind === "registry" ? PYPI_INDEX : lockSource.kind === "url" ? lockSource.text : null;
+      const read = uvArtifacts(item.entries, from === null ? [] : artifactHosts(from));
+      if (read === null) return null;
+      if (from !== null) artifacts = read;
+    }
+    const rawName = stringIn(item.entries, "name");
+    if (rawName === null) continue;
+    const version2 = stringIn(item.entries, "version");
+    const name = normalizePypiName(rawName);
     names.add(name);
     entries.push({
-      key: `${name}@${current.version ?? ""}`,
-      name: current.name,
-      version: current.version,
+      key: `${name}@${version2 ?? ""}`,
+      name: rawName,
+      version: version2,
       integrity: null,
-      source: current.source,
-      line: current.line
+      source: lockSource,
+      ...artifacts === void 0 ? {} : { artifacts },
+      line: item.line
     });
-  };
-  for (const table of tables) {
-    if (table.array && isTable(table, ["package"])) {
-      finish3();
-      current = {
-        line: table.line,
-        name: stringIn(table.entries, "name"),
-        version: stringIn(table.entries, "version"),
-        source: format === "uv" ? uvSource(table.entries.get("source")) : { kind: "registry" }
-      };
-    } else if (!table.array && isTable(table, ["package", "source"]) && current !== null && format === "poetry") {
-      current.source = poetrySource(table.entries);
-    }
   }
-  finish3();
   return { ecosystem: "pypi", format, entries, importers: null, specs: null, names };
 }
 
@@ -29755,14 +30152,136 @@ function parseRequirement(text, line, section) {
   const spec = body.startsWith("(") && body.endsWith(")") ? body.slice(1, -1).trim() : body;
   return { name, named: true, spec, section, line, kind: "registry" };
 }
-var INDEX_OPTIONS = /* @__PURE__ */ new Set(["-i", "--index-url", "--extra-index-url", "-f", "--find-links"]);
-var EDITABLE_OPTIONS = /* @__PURE__ */ new Set(["-e", "--editable"]);
-function optionOf(text) {
-  const eq = text.indexOf("=");
-  const space = text.search(/[ \t]/);
-  const cut = eq !== -1 && (space === -1 || eq < space) && text.startsWith("--") ? eq : space;
-  if (cut === -1) return { option: text, arg: "" };
-  return { option: text.slice(0, cut), arg: text.slice(cut + 1).trim() };
+var PIP_20 = 1;
+var PIP_23 = 2;
+var PIP_25 = 4;
+var PIP_26 = 8;
+var PIP_VERSIONS = [PIP_20, PIP_23, PIP_25, PIP_26];
+var EVERY_PIP = PIP_20 | PIP_23 | PIP_25 | PIP_26;
+var pipOption = (names, value, role = "other", pip = EVERY_PIP) => ({
+  short: names.filter((name) => !name.startsWith("--")),
+  long: names.filter((name) => name.startsWith("--")),
+  value,
+  role,
+  pip
+});
+var PIP_OPTIONS = [
+  pipOption(["-i", "--index-url", "--pypi-url"], true, "index"),
+  pipOption(["--extra-index-url"], true, "index"),
+  pipOption(["--no-index"], false),
+  pipOption(["-c", "--constraint"], true),
+  pipOption(["-r", "--requirement"], true),
+  pipOption(["-e", "--editable"], true, "editable"),
+  pipOption(["-f", "--find-links"], true, "index"),
+  pipOption(["--no-binary"], true),
+  pipOption(["--only-binary"], true),
+  pipOption(["--prefer-binary"], false),
+  pipOption(["--require-hashes"], false),
+  pipOption(["--no-require-hashes"], false, "other", PIP_26),
+  pipOption(["--pre"], false),
+  pipOption(["--all-releases"], true, "other", PIP_26),
+  pipOption(["--only-final"], true, "other", PIP_26),
+  pipOption(["--trusted-host"], true),
+  pipOption(["--use-feature"], true),
+  pipOption(["--install-option"], true, "other", PIP_20),
+  pipOption(["--global-option"], true, "other", PIP_20 | PIP_23),
+  pipOption(["--hash"], true),
+  pipOption(["-C", "--config-settings"], true, "other", PIP_23 | PIP_25 | PIP_26)
+];
+function longOption(name) {
+  const found = /* @__PURE__ */ new Set();
+  for (const version2 of PIP_VERSIONS) {
+    const options = PIP_OPTIONS.filter((option) => (option.pip & version2) !== 0);
+    const exact = options.find((option) => option.long.includes(name));
+    if (exact !== void 0) {
+      found.add(exact);
+      continue;
+    }
+    const matches = options.flatMap((option) => option.long.filter((long) => long.startsWith(name)).map(() => option));
+    if (matches.length === 1) found.add(matches[0]);
+  }
+  return found.size === 1 ? [...found][0] : null;
+}
+var shortOption = (letter) => PIP_OPTIONS.find((option) => option.short.includes(`-${letter}`)) ?? null;
+function shellWords(text) {
+  const words = [];
+  let word = [];
+  let inWord = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (c === " " || c === "	" || c === "\r" || c === "\n") {
+      if (inWord) words.push(word.join(""));
+      word = [];
+      inWord = false;
+      continue;
+    }
+    inWord = true;
+    if (c === "\\") {
+      if (i + 1 >= text.length) return null;
+      word.push(text[++i]);
+    } else if (c === "'") {
+      const close = text.indexOf("'", i + 1);
+      if (close === -1) return null;
+      word.push(text.slice(i + 1, close));
+      i = close;
+    } else if (c === '"') {
+      let j = i + 1;
+      for (; j < text.length && text[j] !== '"'; j++) {
+        if (text[j] === "\\" && (text[j + 1] === '"' || text[j + 1] === "\\")) j++;
+        word.push(text[j]);
+      }
+      if (j >= text.length) return null;
+      i = j;
+    } else {
+      word.push(c);
+    }
+  }
+  if (inWord) words.push(word.join(""));
+  return words;
+}
+function optionLine(text) {
+  const words = shellWords(text);
+  if (words === null) return null;
+  const read = { indexes: [], editables: [] };
+  const take = (option, value) => {
+    if (value === "") return;
+    if (option.role === "index") read.indexes.push(value);
+    else if (option.role === "editable") read.editables.push(value);
+  };
+  for (let k = 0; k < words.length; k++) {
+    const word = words[k];
+    if (word === "--") break;
+    if (word.startsWith("--")) {
+      const eq = word.indexOf("=");
+      const option = longOption(eq === -1 ? word : word.slice(0, eq));
+      if (option === null) return null;
+      if (!option.value) {
+        if (eq !== -1) return null;
+        continue;
+      }
+      if (eq !== -1) take(option, word.slice(eq + 1));
+      else if (k + 1 < words.length) take(option, words[++k]);
+      else return null;
+    } else if (word.startsWith("-") && word.length > 1) {
+      for (let c = 1; c < word.length; c++) {
+        const option = shortOption(word[c]);
+        if (option === null) return null;
+        if (!option.value) continue;
+        if (c + 1 < word.length) take(option, word.slice(c + 1));
+        else if (k + 1 < words.length) take(option, words[++k]);
+        else return null;
+        break;
+      }
+    }
+  }
+  return read;
+}
+function withoutBackslashes(text) {
+  let start = 0;
+  let end = text.length;
+  while (start < end && text[start] === "\\") start++;
+  while (end > start && text[end - 1] === "\\") end--;
+  return text.slice(start, end);
 }
 function withoutComment(line) {
   if (line.trimStart().startsWith("#")) return "";
@@ -29779,20 +30298,24 @@ function parseRequirements(text) {
     const start = i + 1;
     let part = withoutComment(lines[i].replace(/\r$/, ""));
     const parts = [];
-    while (part.endsWith("\\") && i + 1 < lines.length) {
-      parts.push(part.slice(0, -1));
+    while (part.endsWith("\\")) {
+      parts.push(withoutBackslashes(part));
+      if (i + 1 >= lines.length) {
+        part = "";
+        break;
+      }
       i++;
       part = withoutComment(lines[i].replace(/\r$/, ""));
     }
     parts.push(part);
-    const t = parts.join(" ").trim();
+    const t = parts.join("").trim();
     if (t === "") continue;
     if (t.startsWith("-")) {
-      const { option, arg } = optionOf(t);
-      if (INDEX_OPTIONS.has(option) && arg !== "") {
-        indexes.push({ url: arg, line: start, allowed: isAllowedRegistryUrl(arg) });
-      } else if (EDITABLE_OPTIONS.has(option) && arg !== "") {
-        const dep2 = parseRequirement(arg, start, "requirements");
+      const read = optionLine(t);
+      if (read === null) return null;
+      for (const url of read.indexes) indexes.push({ url, line: start, allowed: isAllowedRegistryUrl(url) });
+      for (const editable of read.editables) {
+        const dep2 = parseRequirement(editable, start, "requirements");
         if (dep2 !== null) deps.push(dep2);
       }
       continue;
@@ -29807,10 +30330,23 @@ function requirementStrings(value) {
   if (value === void 0 || value.type !== "array") return [];
   return value.items.flatMap((item) => item.type === "string" ? [{ text: item.value, line: item.line }] : []);
 }
+function tableDependencies(name, value, section) {
+  if (value.type !== "array") {
+    const dep = tableDependency(name, value, section);
+    return dep === null ? [] : [dep];
+  }
+  if (!value.items.some((item) => item.type === "table")) {
+    return [{ name, named: true, spec: "", section, line: value.line, kind: "registry" }];
+  }
+  return value.items.flatMap((item, i) => {
+    const dep = item.type === "table" ? tableDependency(name, item, section) : null;
+    if (dep === null) return [];
+    return [i === 0 ? dep : { ...dep, key: `${name}\0${i}` }];
+  });
+}
 function tableDependency(name, value, section) {
   if (value.type === "string")
     return { name, named: true, spec: value.value, section, line: value.line, kind: "registry" };
-  if (value.type === "array") return { name, named: true, spec: "", section, line: value.line, kind: "registry" };
   if (value.type !== "table") return null;
   const text = (key) => {
     const entry = value.entries.get(key);
@@ -29837,32 +30373,71 @@ function tableDependency(name, value, section) {
   }
   return { name, named: true, spec: text("version") ?? "", section, line: value.line, kind: "registry" };
 }
+function tableAt(root, path) {
+  const value = valueAt(root, path);
+  return value?.type === "table" ? value : null;
+}
+var BUILD_REQUIRES_SECTION = "build-system.requires";
 function parsePyproject(text) {
-  const tables = parseToml(text);
-  if (tables === null) return null;
+  const doc = parseTomlDocument(text);
+  if (doc === null) return null;
+  const { root } = doc;
   const deps = [];
-  const add = (dep) => {
-    if (dep !== null) deps.push(dep);
+  const requirements = (value, section) => {
+    for (const item of requirementStrings(value)) {
+      const dep = parseRequirement(item.text, item.line, section);
+      if (dep !== null) deps.push(dep);
+    }
   };
-  for (const table of tables) {
-    if (isTable(table, ["project"])) {
-      for (const item of requirementStrings(table.entries.get("dependencies"))) {
-        add(parseRequirement(item.text, item.line, "project.dependencies"));
-      }
-    } else if (isTable(table, ["project", "optional-dependencies"]) || isTable(table, ["dependency-groups"])) {
-      for (const [group, value] of table.entries) {
-        for (const item of requirementStrings(value)) {
-          add(parseRequirement(item.text, item.line, `${table.path.join(".")}.${group}`));
-        }
-      }
-    } else if (isTable(table, ["tool", "poetry", "dependencies"]) || isTable(table, ["tool", "poetry", "dev-dependencies"]) || table.path.length === 5 && table.path[0] === "tool" && table.path[1] === "poetry" && table.path[2] === "group" && table.path[4] === "dependencies" || isTable(table, ["tool", "uv", "sources"])) {
-      for (const [name, value] of table.entries) {
-        if (name === "python" && table.path[1] === "poetry") continue;
-        add(tableDependency(name, value, table.path.join(".")));
-      }
+  const dependencyTable = (path) => {
+    const table = tableAt(root, path);
+    if (table === null) return;
+    const section = path.join(".");
+    for (const [name, value] of table.entries) {
+      if (name === "python" && path[1] === "poetry") continue;
+      deps.push(...tableDependencies(name, value, section));
+    }
+  };
+  requirements(valueAt(root, ["build-system", "requires"]), BUILD_REQUIRES_SECTION);
+  requirements(valueAt(root, ["project", "dependencies"]), "project.dependencies");
+  for (const path of [["project", "optional-dependencies"], ["dependency-groups"]]) {
+    for (const [group, value] of tableAt(root, path)?.entries ?? []) requirements(value, `${path.join(".")}.${group}`);
+  }
+  dependencyTable(["tool", "poetry", "dependencies"]);
+  dependencyTable(["tool", "poetry", "dev-dependencies"]);
+  for (const group of tableAt(root, ["tool", "poetry", "group"])?.entries.keys() ?? []) {
+    dependencyTable(["tool", "poetry", "group", group, "dependencies"]);
+  }
+  dependencyTable(["tool", "uv", "sources"]);
+  const indexes = [];
+  const index = (value, table) => {
+    if (value?.type !== "string") return;
+    indexes.push({ url: value.value, line: value.line, allowed: isAllowedRegistryUrl(value.value), table });
+  };
+  for (const path of [
+    ["tool", "poetry", "source"],
+    ["tool", "uv", "index"]
+  ]) {
+    const value = valueAt(root, path);
+    const entries = value?.type === "array" ? value.items : value === void 0 ? [] : [value];
+    for (const entry of entries) if (entry.type === "table") index(entry.entries.get("url"), path.join("."));
+  }
+  for (const path of [
+    ["tool", "uv"],
+    ["tool", "uv", "pip"]
+  ]) {
+    const table = tableAt(root, path);
+    if (table === null) continue;
+    const prefix = path.join(".");
+    index(table.entries.get("index-url"), `${prefix}.index-url`);
+    for (const key of ["extra-index-url", "find-links"]) {
+      const value = table.entries.get(key);
+      for (const item of value?.type === "array" ? value.items : [value]) index(item, `${prefix}.${key}`);
     }
   }
-  return { ecosystem: "pypi", deps, indexes: [] };
+  deps.sort((a, b) => a.line - b.line);
+  indexes.sort((a, b) => a.line - b.line);
+  return { ecosystem: "pypi", deps, indexes };
 }
 
 // ../core/src/dependencies/yarnLock.ts
@@ -29986,6 +30561,11 @@ var KIND_WORDS = {
   url: "a URL outside the allowed registries",
   file: "a local file"
 };
+var ARTIFACT_WORDS = {
+  sdist: "an sdist URL outside the allowed registries",
+  wheel: "a wheel URL outside the allowed registries"
+};
+var JSR_WORDS = "the JSR registry, outside the allowed registries";
 function nameFields(ecosystem, name, version2) {
   return {
     ...name !== null && isReportableName(ecosystem, name) ? { name } : {},
@@ -30056,22 +30636,28 @@ function analyze(diff, sources, repoFiles, allowedHosts) {
     analysis.checked += changes.added.length + changes.changed.length;
     for (const dep of [...changes.added, ...changes.changed]) {
       if (dep.kind !== "registry" && isOffRegistry(dep.kind, dep.allowedUrl === true || onAllowedHost(dep.url))) {
+        const from = dep.registry === "jsr" ? JSR_WORDS : KIND_WORDS[dep.kind];
+        const field = isOverrideSection(dep.section) ? ` in ${dep.section}` : "";
         analysis.signals.push(
-          signal("D05", eco, path, dep.line, `declared from ${KIND_WORDS[dep.kind]}`, manifestNames(eco, dep))
+          signal("D05", eco, path, dep.line, `declared from ${from}${field}`, manifestNames(eco, dep))
         );
       }
     }
     const baseIndexes = new Set((base?.indexes ?? []).map((option) => option.url));
     for (const option of head.indexes) {
       if (!option.allowed && !onAllowedHost(option.url) && !baseIndexes.has(option.url)) {
+        const where = option.table === void 0 ? "" : ` in ${option.table}`;
         analysis.signals.push(
-          signal("D05", eco, path, option.line, "adds a package index outside the allowed registries")
+          signal("D05", eco, path, option.line, `adds a package index outside the allowed registries${where}`)
         );
       }
     }
-    for (const dep of changes.added) analysis.added.push({ ecosystem: eco, dep, path });
+    for (const dep of changes.added) {
+      if (isOverrideSection(dep.section) && !dep.spec.trim().toLowerCase().startsWith("npm:")) continue;
+      analysis.added.push({ ecosystem: eco, dep, path });
+    }
     if (kind.format !== "package-json" && kind.format !== "pyproject") return;
-    const installed = (deps) => deps.filter((dep) => dep.section !== "peerDependencies");
+    const installed = (deps) => deps.filter((dep) => dep.section !== "peerDependencies" && dep.section !== BUILD_REQUIRES_SECTION);
     const declared = installed([...changes.added, ...changes.changed]);
     if (declared.length === 0 && installed(changes.removed).length === 0) return;
     const governing = [];
@@ -30092,7 +30678,7 @@ function analyze(diff, sources, repoFiles, allowedHosts) {
       );
       return;
     }
-    for (const dep of declared) {
+    for (const dep of declared.filter((d) => !isOverrideSection(d.section))) {
       const verdicts = updated.map(
         (entry) => entry.lock === null ? null : recordsDependency(entry.lock, relativeDir(entry.path, path) ?? "", dep)
       );
@@ -30116,15 +30702,23 @@ function analyze(diff, sources, repoFiles, allowedHosts) {
     analysis.checked += changes.added.length + changes.changed.length;
     for (const entry of changes.sourceNew) {
       const source = entry.source;
-      if (source.kind === "url" && !source.allowed && onAllowedHost(source.text)) {
-        if (entry.name !== null)
+      const privateHost = source.kind === "url" && !source.allowed && onAllowedHost(source.text);
+      const off = !privateHost && (source.kind === "url" && !source.allowed || source.kind === "git" || source.kind === "file") ? source.kind : null;
+      const artifact = off === null ? entry.artifacts?.find((file) => !file.allowed && !onAllowedHost(file.url)) : void 0;
+      if (off === null && artifact === void 0) {
+        if (privateHost && entry.name !== null)
           analysis.offRegistry.add(`${eco}:${eco === "pypi" ? normalizePypiName(entry.name) : entry.name}`);
         continue;
       }
-      const off = source.kind === "url" && !source.allowed || source.kind === "git" || source.kind === "file" ? source.kind : null;
-      if (off === null) continue;
       analysis.signals.push(
-        signal("D05", eco, path, entry.line, `resolved from ${KIND_WORDS[off]}`, entryNames(eco, entry))
+        artifact === void 0 ? signal("D05", eco, path, entry.line, `resolved from ${KIND_WORDS[off ?? "url"]}`, entryNames(eco, entry)) : signal(
+          "D05",
+          eco,
+          path,
+          artifact.line,
+          `resolved from ${ARTIFACT_WORDS[artifact.kind]}`,
+          entryNames(eco, entry)
+        )
       );
       if (entry.name !== null)
         analysis.offRegistry.add(`${eco}:${eco === "pypi" ? normalizePypiName(entry.name) : entry.name}`);
@@ -30497,12 +31091,12 @@ var RUNNER_SKIPPED = /* @__PURE__ */ new Set(["exec", "dlx", "run", "x", "--"]);
 var GLOBAL_FLAGS = /* @__PURE__ */ new Set(["-g", "--global", "--location=global"]);
 var MAX_PS_PROMPT = 64;
 var isSpaceCode = (code2) => code2 === 32 || code2 >= 9 && code2 <= 13 || code2 === 160;
-var isAsciiLetter2 = (code2) => code2 >= 65 && code2 <= 90 || code2 >= 97 && code2 <= 122;
-var isAsciiWordStart = (code2) => isAsciiLetter2(code2) || code2 === 95;
+var isAsciiLetter3 = (code2) => code2 >= 65 && code2 <= 90 || code2 >= 97 && code2 <= 122;
+var isAsciiWordStart = (code2) => isAsciiLetter3(code2) || code2 === 95;
 var isAsciiNameChar = (code2) => isAsciiWordStart(code2) || code2 >= 48 && code2 <= 57;
 function isLetter(char) {
   const code2 = char.charCodeAt(0);
-  if (code2 < 128) return isAsciiLetter2(code2);
+  if (code2 < 128) return isAsciiLetter3(code2);
   return new RegExp("\\p{L}", "u").test(char);
 }
 function firstNonSpace(line, from = 0) {
@@ -33078,10 +33672,10 @@ function identEnd(text, start) {
   while (i < text.length && isIdentChar(text.charCodeAt(i))) i++;
   return i;
 }
-var isBlank = (c) => c === " " || c === "	";
+var isBlank2 = (c) => c === " " || c === "	";
 function skipBlanks(text, start) {
   let i = start;
-  while (i < text.length && isBlank(text.charAt(i))) i++;
+  while (i < text.length && isBlank2(text.charAt(i))) i++;
   return i;
 }
 function closeTriple(line, from, quote) {
@@ -33111,8 +33705,8 @@ function scanCode(line, from) {
 }
 var isStatementEnd = (code2) => code2 === 59 || code2 === 35 || code2 === 34 || code2 === 39;
 function startsStatement(line) {
-  if (line.startsWith("import") && isBlank(line.charAt(6))) return true;
-  return line.startsWith("from") && isBlank(line.charAt(4));
+  if (line.startsWith("import") && isBlank2(line.charAt(6))) return true;
+  return line.startsWith("from") && isBlank2(line.charAt(4));
 }
 function fromItem(piece) {
   const nameEnd = identEnd(piece, 0);
@@ -33200,7 +33794,7 @@ function pythonImportAliases(text) {
       const module = body.slice(moduleAt, moduleEnd);
       const importAt = skipBlanks(body, moduleEnd);
       const listAt = importAt + 6;
-      if (module !== "" && importAt > moduleEnd && body.startsWith("import", importAt) && isBlank(body.charAt(listAt))) {
+      if (module !== "" && importAt > moduleEnd && body.startsWith("import", importAt) && isBlank2(body.charAt(listAt))) {
         const rest = skipBlanks(body, listAt);
         if (body.charAt(rest) === "(") {
           state.group = { module, pending: [] };
@@ -34322,7 +34916,7 @@ function shannonEntropy(text) {
   return bits;
 }
 var isKeyChar = (c) => c !== void 0 && (isUpper2(c) || isLower2(c) || isDigit2(c) || c === "_" || c === "." || c === "-");
-var isBlank2 = (c) => c === " " || c === "	";
+var isBlank3 = (c) => c === " " || c === "	";
 var isQuote2 = (c) => c === '"' || c === "'";
 var isLineBreak = (c) => c === "\n" || c === "\r";
 var BARE_STOPS = /* @__PURE__ */ new Set([" ", "	", ",", ";", "#", "}", '"', "'"]);
@@ -34356,7 +34950,7 @@ function readValue(text, from) {
 function skipBlanks2(text, from) {
   let i = from;
   const limit = Math.min(text.length, from + MAX_GAP_CHARS);
-  while (i < limit && isBlank2(text[i])) i++;
+  while (i < limit && isBlank3(text[i])) i++;
   return i;
 }
 var isKeyCode = (c) => c >= 97 && c <= 122 || c >= 65 && c <= 90 || c >= 48 && c <= 57 || c === 95 || c === 46 || c === 45;
@@ -35361,10 +35955,10 @@ var GENERATED_DIRS = /* @__PURE__ */ new Set([
   ".tmp"
 ]);
 var isSpaceCode3 = (code2) => code2 === 32 || code2 >= 9 && code2 <= 13 || code2 === 160;
-var isAsciiLetter3 = (code2) => code2 >= 65 && code2 <= 90 || code2 >= 97 && code2 <= 122;
+var isAsciiLetter4 = (code2) => code2 >= 65 && code2 <= 90 || code2 >= 97 && code2 <= 122;
 var isDigit3 = (code2) => code2 >= 48 && code2 <= 57;
 function isPathChar(code2) {
-  return isAsciiLetter3(code2) || isDigit3(code2) || code2 === 46 || code2 === 95 || code2 === 45 || code2 === 43 || code2 === 47;
+  return isAsciiLetter4(code2) || isDigit3(code2) || code2 === 46 || code2 === 95 || code2 === 45 || code2 === 43 || code2 === 47;
 }
 function allChars(text, extra) {
   for (let i = 0; i < text.length; i++) {
@@ -35399,7 +35993,7 @@ function hasCueWord2(text) {
   };
   for (let i = 0; i < text.length; i++) {
     const code2 = text.charCodeAt(i);
-    const inWord = isAsciiLetter3(code2) || code2 === 39 || code2 === 8217 || code2 === 46 && start !== -1;
+    const inWord = isAsciiLetter4(code2) || code2 === 39 || code2 === 8217 || code2 === 46 && start !== -1;
     if (inWord && start === -1) start = i;
     if (!inWord && start !== -1 && flush(i)) return true;
   }
@@ -35421,11 +36015,11 @@ function splitWords2(text) {
 }
 function isAssignment2(word) {
   const first = word.charCodeAt(0);
-  if (!(isAsciiLetter3(first) || first === 95)) return false;
+  if (!(isAsciiLetter4(first) || first === 95)) return false;
   let i = 1;
   while (i < word.length) {
     const code2 = word.charCodeAt(i);
-    if (!(isAsciiLetter3(code2) || isDigit3(code2) || code2 === 95)) break;
+    if (!(isAsciiLetter4(code2) || isDigit3(code2) || code2 === 95)) break;
     i++;
   }
   return i < word.length && word[i] === "=";
@@ -38798,7 +39392,7 @@ var ARGUMENT_CHARS = 200;
 var MAX_TRIM = 64;
 var CLOSERS2 = { ")": "(", "]": "[", "}": "{" };
 var isIdentifierChar = (code2) => code2 >= 48 && code2 <= 57 || code2 >= 65 && code2 <= 90 || code2 >= 97 && code2 <= 122 || code2 === 95 || code2 === 36;
-var isBlank3 = (code2) => code2 === 32 || code2 === 9 || code2 === 10 || code2 === 13;
+var isBlank4 = (code2) => code2 === 32 || code2 === 9 || code2 === 10 || code2 === 13;
 function wordBefore(body, at, word) {
   const start = at - word.length;
   if (start < 0 || !body.startsWith(word, start)) return false;
@@ -38836,9 +39430,9 @@ function argumentText(body, start, end) {
 }
 function subjectOf(body, start, end) {
   let from = start;
-  while (from < end && from - start < MAX_TRIM && isBlank3(body.charCodeAt(from))) from++;
+  while (from < end && from - start < MAX_TRIM && isBlank4(body.charCodeAt(from))) from++;
   let to = end;
-  while (to > from && end - to < MAX_TRIM && isBlank3(body.charCodeAt(to - 1))) to--;
+  while (to > from && end - to < MAX_TRIM && isBlank4(body.charCodeAt(to - 1))) to--;
   return {
     head: body.slice(from, Math.min(to, from + SUBJECT_HEAD_CHARS)).trim(),
     tail: body.slice(Math.max(from, to - SUBJECT_TAIL_CHARS), to).trim()
@@ -39978,7 +40572,7 @@ var DETAILS2 = {
   "ignore-filter": "A test script now makes the run skip the test files matching a pattern, so those tests do not run.",
   "hook-removed": "A script that ran before or after the tests was removed, so its checks no longer run with them."
 };
-var isBlank4 = (c) => c === " " || c === "	";
+var isBlank5 = (c) => c === " " || c === "	";
 function readString(text, start) {
   let value = "";
   let i = start + 1;
@@ -40000,7 +40594,7 @@ function readString(text, start) {
 function parseScriptLine(text) {
   let i = 0;
   const skip = () => {
-    while (isBlank4(text[i])) i++;
+    while (isBlank5(text[i])) i++;
   };
   skip();
   if (text[i] !== '"') return null;
@@ -40092,7 +40686,7 @@ function scanKinds(value) {
         endCommand(";");
         operator = ";";
       }
-    } else if (isBlank4(c) || c === "(" || c === ")") {
+    } else if (isBlank5(c) || c === "(" || c === ")") {
       endWord();
     } else {
       word += c;
@@ -42508,7 +43102,7 @@ var STOP_LIST = /* @__PURE__ */ new Set([
 ]);
 var isDigit5 = (c) => c >= "0" && c <= "9";
 var isWordChar = (c) => c >= "0" && c <= "9" || c >= "A" && c <= "Z" || c >= "a" && c <= "z" || c === "_";
-var isBlank5 = (c) => c === " " || c === "	";
+var isBlank6 = (c) => c === " " || c === "	";
 function digitsEnd2(text, start) {
   let i = start;
   while (i < text.length && isDigit5(text.charAt(i))) i++;
@@ -42566,26 +43160,26 @@ var keyOf3 = (literal2) => `${literal2.kind === "string" ? "s" : "n"}${literal2.
 var isOperatorChar = (c) => c === "=" || c === "!" || c === "<" || c === ">";
 function operatorBefore(text, at) {
   let end = at;
-  while (end > 0 && isBlank5(text.charAt(end - 1))) end--;
+  while (end > 0 && isBlank6(text.charAt(end - 1))) end--;
   let start = end;
   while (start > 0 && isOperatorChar(text.charAt(start - 1))) start--;
   return text.slice(start, end);
 }
 function operatorAfter(text, at) {
   let start = at;
-  while (start < text.length && isBlank5(text.charAt(start))) start++;
+  while (start < text.length && isBlank6(text.charAt(start))) start++;
   let end = start;
   while (end < text.length && isOperatorChar(text.charAt(end))) end++;
   return text.slice(start, end);
 }
 var EQUALITY = /* @__PURE__ */ new Set(["===", "!==", "==", "!="]);
 function isCaseLabel(trimmed, offset, literal2) {
-  if (!trimmed.startsWith("case") || !isBlank5(trimmed.charAt(4))) return false;
+  if (!trimmed.startsWith("case") || !isBlank6(trimmed.charAt(4))) return false;
   let i = 4;
-  while (isBlank5(trimmed.charAt(i))) i++;
+  while (isBlank6(trimmed.charAt(i))) i++;
   if (literal2.start - offset !== i) return false;
   let j = literal2.end - offset;
-  while (isBlank5(trimmed.charAt(j))) j++;
+  while (isBlank6(trimmed.charAt(j))) j++;
   return trimmed.charAt(j) === ":";
 }
 var CLOSERS3 = { "(": ")", "[": "]", "{": "}" };
@@ -42609,7 +43203,7 @@ function inGroups(text, literals) {
     while (j < text.length && isWordChar(text.charAt(j))) j++;
     if (text.slice(i, j) === "in") {
       let k = j;
-      while (isBlank5(text.charAt(k))) k++;
+      while (isBlank6(text.charAt(k))) k++;
       const closer = CLOSERS3[text.charAt(k)];
       if (closer !== void 0) {
         const close = text.indexOf(closer, k + 1);
@@ -42743,14 +43337,14 @@ var PYLINT_WORD = ["py", "lint:"].join("");
 var DISABLE_WORD = ["dis", "able"].join("");
 var PYRIGHT_WORD = ["py", "right:"].join("");
 var MAX_LINE2 = 400;
-var isBlank6 = (c) => c === " " || c === "	";
+var isBlank7 = (c) => c === " " || c === "	";
 var isWordChar2 = (c) => c >= "0" && c <= "9" || c >= "A" && c <= "Z" || c >= "a" && c <= "z" || c === "_";
 var isTokenChar = (c) => isWordChar2(c) || c === "@" || c === "-";
 var endsWord = (text, at) => at >= text.length || !isWordChar2(text.charAt(at));
 var normalize2 = (text) => text.replace(/\s+/g, " ").trim();
 function skipBlanks4(text, from) {
   let i = from;
-  while (i < text.length && isBlank6(text.charAt(i))) i++;
+  while (i < text.length && isBlank7(text.charAt(i))) i++;
   return i;
 }
 function jsMarker(text) {
@@ -42848,12 +43442,12 @@ function detectTI16(diff) {
 
 // ../core/src/signals/alwaysTrue.ts
 var MAX_ALWAYS_TRUE_NAMES = 50;
-var isBlank7 = (c) => c === " " || c === "	";
+var isBlank8 = (c) => c === " " || c === "	";
 var isWordChar3 = (c) => c >= "0" && c <= "9" || c >= "A" && c <= "Z" || c >= "a" && c <= "z" || c === "_" || c === "$";
 var isWordStart = (c) => isWordChar3(c) && !(c >= "0" && c <= "9");
 function skipBlanks5(text, from) {
   let i = from;
-  while (i < text.length && isBlank7(text.charAt(i))) i++;
+  while (i < text.length && isBlank8(text.charAt(i))) i++;
   return i;
 }
 function wordEnd2(text, from) {
@@ -42927,7 +43521,7 @@ function readLine(text, from, state, found) {
       i++;
       continue;
     }
-    if (isBlank7(c)) {
+    if (isBlank8(c)) {
       i++;
       continue;
     }
@@ -43112,7 +43706,7 @@ function afterKeyword(text, word) {
 }
 function defName(text) {
   const end = afterKeyword(text, "def");
-  if (end === -1 || end >= text.length || !isBlank7(text.charAt(end))) return null;
+  if (end === -1 || end >= text.length || !isBlank8(text.charAt(end))) return null;
   const start = skipBlanks5(text, end);
   const nameEnd = wordEnd2(text, start);
   if (nameEnd === start || !isWordStart(text.charAt(start))) return null;
@@ -43187,7 +43781,7 @@ function alwaysTrueHelperLines(file) {
   for (const entry of lines) {
     const text = entry.text;
     const assertEnd = afterKeyword(text, "assert");
-    if (assertEnd !== -1 && assertEnd < text.length && isBlank7(text.charAt(assertEnd))) {
+    if (assertEnd !== -1 && assertEnd < text.length && isBlank8(text.charAt(assertEnd))) {
       const closed2 = helperCall(text, assertEnd, helpers);
       if (closed2 !== -1 && endsCondition(text.slice(closed2))) out.push(entry.line);
       continue;
@@ -43294,7 +43888,7 @@ function secondArgument(text, open3) {
 }
 function pyEquality(text) {
   const start = skipBlanks5(text, 0);
-  if (text.startsWith("assert", start) && isBlank7(text.charAt(start + 6))) {
+  if (text.startsWith("assert", start) && isBlank8(text.charAt(start + 6))) {
     const equals = topLevelEquals(text, start + 6);
     if (equals === -1) return null;
     return { wildcard: PY_WILDCARDS.has(operandFrom(text, equals + 2, false)) };
