@@ -6,7 +6,7 @@ import { dirname, join, resolve } from "node:path";
 import type { Report } from "@pharn-ci/core";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { expectValidReport } from "../../core/test/schema.js";
-import { withoutFix } from "../../core/test/v090-codes.js";
+import { withoutFix } from "../../core/test/without-fix.js";
 import { runGitBatch } from "../../node-io/src/io.js";
 import { requiredDeps, type StreamedFake } from "../../node-io/test/required-deps.js";
 import { harness } from "./harness.js";
@@ -17,7 +17,7 @@ import { harness } from "./harness.js";
 // coverage file are read from it) and a gitBatch that reads that repository and records every call. PR-number mode is
 // built as packages/action/test/ac-secrets-action.test.ts builds it.
 
-type Run = (deps: never) => Promise<unknown>;
+type Run = typeof import("../src/run.js").run;
 type Call = { args: string[]; input: string };
 
 const FIXTURES = new URL("../../../fixtures/", import.meta.url);
