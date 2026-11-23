@@ -6,7 +6,8 @@ import { expectValidReport } from "./schema.js";
 // policy precedence exists, so nothing the build adds may run while the file loads. The layers are built the way the
 // adapters build them, and applyPolicy's effective settings are passed to check() as the adapters pass them.
 
-type Ignored = { setting: string; layer: string; reason: string };
+// CORE-123 (R5.6): an app policy's looser record keeps the layer it beat; a policy file's record has none.
+type Ignored = { setting: string; layer?: string; reason: string };
 type Application = { inputs: { testIntegrityMode?: unknown }; ignored: Ignored[] };
 type Report = { testIntegrity: { mode: string; source: string }; messages: { code: string; level: string }[] };
 
@@ -96,7 +97,7 @@ describe("applyPolicy and check(): the test-integrity mode", () => {
         file("off"),
         "warn",
         "default",
-        [{ setting: "test_integrity.mode", layer: "policy-file", reason: "looser" }],
+        [{ setting: "test_integrity.mode", reason: "looser" }],
       ],
       [
         "file off under input warn",
@@ -105,7 +106,7 @@ describe("applyPolicy and check(): the test-integrity mode", () => {
         file("off"),
         "warn",
         "input",
-        [{ setting: "test_integrity.mode", layer: "policy-file", reason: "looser" }],
+        [{ setting: "test_integrity.mode", reason: "looser" }],
       ],
     ];
     for (const [name, config, input, policy, mode, source, ignored] of cases) {

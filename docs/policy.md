@@ -52,8 +52,10 @@ paths and every other key it knows), and one `POLICY_KEYS_UNKNOWN` warning names
 paths such as `policy.test_integrity.signals.TI18` or `policy.setup.expect[new-tool]`, sorted, each cut to 64
 characters, and a count of the rest. A skipped key is not enforced until the pin is updated. A key it knows with a value
 it cannot use (a threshold that is a string, a mode it has no name for) still makes the response invalid: that is a
-`POLICY_UNAVAILABLE` warning, or an error under `policy: required`. `updatedAt` may carry `Z` or a numeric offset
-(`+00:00`). A `file:` policy is not lenient: an unknown key there fails the step, as before.
+`POLICY_UNAVAILABLE` warning, or an error under `policy: required`. The envelope's `version`, `policy`, `quarantine`,
+`settings.uploadJunit` and `settings.messageMaxBytes` are required; `etag`, `updatedAt` and `settings.redactMessages`
+are not read, so they are optional and whatever they hold is skipped (versions up to 0.11 still require them, so the
+app keeps sending them). A `file:` policy is not lenient: an unknown key there fails the step, as before.
 
 **`policy: file:<path>`.** A policy document read from the workspace (in the CLI, `--policy-file <path>`). The pull
 request carries the file, so it can only tighten: a higher threshold, `setup.require: true`, a stricter mode, more
@@ -86,7 +88,7 @@ agent settings, MCP, workflow and CODEOWNERS files an agent pull request touches
 - **P06**, required hook missing: a settings directory has no command hook for a `setup.required_hooks` event whose matcher covers the required one, or `disableAllHooks` is on (`POLICY_P06`, `error`).
 - **P07**, agent instruction files disagree: instruction files in one directory name different package managers or JavaScript test runners (`POLICY_P07`, `warn`; `setup.consistency` sets its severity). See [Policy mode](#policy-mode).
 - **P08**, forbidden file tracked: a tracked file matches a `setup.forbidden_files` pattern (`POLICY_P08`, `error`).
-- **P09**, the pull request loosens the policy it is graded by: it edits the policy file, the config or a workflow that sets a value looser than the policy, or an agent settings or MCP file the policy checks (`POLICY_P09`; `error` when the file fails P02 to P06 or could not be checked, `warn` when it only warns or supplies a required deny rule or hook, `info` when it complies, and `warn` when the files were not read).
+- **P09**, the pull request loosens the policy it is graded by: it edits the policy file, the config while it sets a value looser than the policy, a workflow while a workflow input is looser than the policy, or an agent settings or MCP file the policy checks (`POLICY_P09`; `error` when the file fails P02 to P06 or could not be checked, `warn` when it only warns, and `warn` when the files were not read; an edited file that complies or supplies a required deny rule or hook is no finding).
 - **P10**, policy unavailable: the policy could not be read (`POLICY_UNAVAILABLE`). It fails the check only under the workflow input `policy: required`: a policy that could not be read cannot ask for that. The policy's own `policy.required` (app policy only) makes agent settings files that could not be read a `POLICY_SETTINGS_INVALID` error instead of a warning.
 - **P12**, agent PR needs a human approval: validated and not applied. `agents.require_human_approval` and `policy.rules.P12` are accepted and change nothing; no P12 finding is produced.
 - **P11**, agent PR changes a protected path: an agent pull request changes a path that `agents.protected_paths` lists (`POLICY_P11`, `error`).

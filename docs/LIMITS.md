@@ -1649,8 +1649,8 @@ applied once per run. What it does not do:
   cannot see a pull request that edits the workflow to `policy: never`, removes the pharn-ci step or changes
   `app-url`: the Action then does not run or does not ask for the policy, so nothing is checked against it. TI11 and
   `CONFIG_CHANGED_IN_DIFF` flag such a workflow edit. Class 4 is judged when the files were read: a block when the
-  edited file fails P02 to P06 or could not be checked, a warn when it only warns or supplies a required deny rule or
-  hook, info when it complies; it stays a warn (direction not judged) when they were not read.
+  edited file fails P02 to P06 or could not be checked, a warn when it only warns, and no entry when it complies or
+  supplies a required deny rule or hook; it stays a warn (direction not judged) when they were not read.
 
 ### What P01 misses
 
@@ -1849,7 +1849,7 @@ run. What it does not do:
   sent as they are. The cap is the smaller of 2048 bytes and the org's `settings.messageMaxBytes` from the same run's
   policy response, used only when that response was a `200` that validated whole (never under `policy: never` or a
   `file:` policy, never from a refused or missing response); the app can lower the cap, never raise it.
-- **`settings.redactMessages` is validated and not applied.** The Action never turns redaction off.
+- **`settings.redactMessages` is not read.** It is optional and skipped; the Action never turns redaction off.
   `settings.uploadJunit: false` keeps the JUnit results out of the upload; the response's `quarantine` list is applied
   to the JUnit results (see Flaky tests and JUnit results).
 - **The JUnit results are rebuilt, not sent.** With JUnit results, the archive also holds `junit/results.xml`, rebuilt

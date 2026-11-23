@@ -4,7 +4,7 @@ import { expectValidReport } from "../../core/test/schema.js";
 import { withoutFix } from "../../core/test/v090-codes.js";
 import { harness, PR_CONTEXT, WORKSPACE } from "./harness.js";
 
-// run(), fetchPolicy() and the fixtures under fixtures/policy-api/ are loaded inside each test body: the AC tests are
+// run(), fetchAppPolicy() and the fixtures under fixtures/policy-api/ are loaded inside each test body: the AC tests are
 // written before the org policy fetch exists, so nothing the build adds may run while the file loads. The Action runs
 // against the in-memory harness plus injected policy deps: a fake fetch that records every call and answers from
 // recorded responses, a fake getIDToken and setSecret, the OIDC-env flag, a recorded sleep and a fixed clock. No real
@@ -176,12 +176,14 @@ function reportOf(r: PolicyRun): Report {
 const withCode = (report: Report, code: string) => report.messages.filter((m) => m.code === code);
 const policyCodes = (report: Report) => report.messages.filter((m) => m.code.startsWith("POLICY_"));
 
-/** fetchPolicy() called directly, with the deps a policy run gives run(). */
+/** The policy fetchAppPolicy() returns, called directly with the deps a policy run gives run(). CORE-123: fetchPolicy,
+ * the wrapper that returned only this policy, was removed as unused. */
 async function fetchDirect(mode: "auto" | "required", answers: readonly Answer[]) {
-  const { fetchPolicy } = await import("../src/policy-fetch.js");
+  const { fetchAppPolicy } = await import("../src/policy-fetch.js");
   const h = harness({ context: prContext() as never });
   policyDeps(h, answers);
-  return (await fetchPolicy(h.deps as never, { mode, origin: new URL("https://pharn.dev"), repository: REPO })) as {
+  const options = { mode, origin: new URL("https://pharn.dev"), repository: REPO };
+  return (await fetchAppPolicy(h.deps as never, options)).policy as {
     source: string;
     version: number | null;
     fetchedAt?: string;
@@ -323,8 +325,8 @@ describe("the org policy fetch outcomes", () => {
 
     const ignored = withCode(report, "POLICY_OVERRIDE_IGNORED");
     expect(ignored).toHaveLength(1);
-    expect(ignored[0]?.text).toContain("coverage.threshold (input) 70 → 85");
-    expect(ignored[0]?.text).toContain("coverage.exclude (input)");
+    // CORE-123: the settings and no layer (they were "coverage.threshold (input) 70 → 85" and "coverage.exclude (input)").
+    expect(ignored[0]?.text).toContain("applies: coverage.exclude, coverage.threshold 70 → 85.");
     expect(ignored[0]?.text).not.toContain("src/**");
 
     const policy = await fetchDirect("auto", [respond(200, apiFixture("envelope-valid.json"))]);

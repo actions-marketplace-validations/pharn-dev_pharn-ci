@@ -69,6 +69,7 @@ describe("resolveInputs: .pharn/ci.yml may only tighten the threshold and setup.
   });
 });
 
+// CORE-123 (R5.6): the record keeps the layer an app policy beat (P09 reads it); the message names no layer.
 describe("applyPolicy: the layer an app policy beat is the one whose value was in force", () => {
   const app = (document: Record<string, unknown>): ResolvedPolicy =>
     ({
@@ -117,7 +118,8 @@ describe("applyPolicy: the layer an app policy beat is the one whose value was i
       ]);
       const texts = overrideTexts(application, policy);
       expect(texts, name).toHaveLength(1);
-      expect(texts[0], name).toContain(`coverage.threshold (${layer}) ${given} → 90`);
+      expect(texts[0], name).toContain(`coverage.threshold ${given} → 90`);
+      expect(texts[0], name).not.toMatch(/\((?:input|config|policy-file)\)/);
     }
   });
 

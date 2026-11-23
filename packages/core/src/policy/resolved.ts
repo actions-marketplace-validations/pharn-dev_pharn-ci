@@ -54,10 +54,17 @@ export interface ResolvedPolicy {
 export interface IgnoredSetting {
   /** The setting, for example `coverage.threshold` or `test_integrity.signals.TI01`. */
   setting: string;
-  /** The layer whose value was not applied (`policy-file` for a value the policy file carried). */
-  layer: "input" | "config" | "policy-file";
+  /**
+   * `looser`: a value looser than the policy's (a workflow input or `.pharn/ci.yml` value an app policy beat, or a
+   * policy file's value looser than what the run already gives); `not-allowed`: a key a policy file may not set.
+   */
   reason: "looser" | "not-allowed";
-  /** The ignored layer's number, only for `coverage.threshold`. */
+  /**
+   * The layer whose value an app policy beat, only on its `looser` records: P09 reads it (class 2 for `config`, class 3
+   * for `input`). No message names it (CORE-123).
+   */
+  layer?: "input" | "config";
+  /** The number that was not applied, only for `coverage.threshold`. */
   given?: number;
   /** The number that applies instead, only for `coverage.threshold`. */
   applied?: number;

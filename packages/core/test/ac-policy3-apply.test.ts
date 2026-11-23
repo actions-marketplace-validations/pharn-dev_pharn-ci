@@ -7,8 +7,16 @@ import { expectValidReport } from "./schema.js";
 // adapters build them: a PharnConfig, the raw inputs, and resolveInputs() over both. A policy is passed as a
 // ResolvedPolicy of source "app" (served) or "file" (the PR-carried file: document).
 
-type Layer = "input" | "config" | "policy-file";
-type Ignored = { setting: string; layer: Layer; reason: "looser" | "not-allowed"; given?: number; applied?: number };
+// CORE-123 (R5.6): POLICY_OVERRIDE_IGNORED names the setting and no layer. An app policy's looser record keeps the
+// layer it beat (input or config), which P09 reads; a policy file's record has none.
+type Ignored = {
+  setting: string;
+  layer?: "input" | "config";
+  reason: "looser" | "not-allowed";
+  given?: number;
+  applied?: number;
+};
+const LAYER_WORD = /\((?:input|config|policy-file)\)/;
 type Inputs = {
   threshold: number | null;
   exclude: string[];
@@ -90,7 +98,7 @@ describe("applyPolicy: the coverage and setup keys", () => {
           app({ coverage: { threshold: 80 } }),
           80,
           [{ setting: "coverage.threshold", layer: "input", reason: "looser", given: 70, applied: 80 }],
-          "coverage.threshold (input) 70 → 80",
+          "coverage.threshold 70 → 80",
         ],
         [
           "app 80 over config 70, no input",
@@ -99,7 +107,7 @@ describe("applyPolicy: the coverage and setup keys", () => {
           app({ coverage: { threshold: 80 } }),
           80,
           [{ setting: "coverage.threshold", layer: "config", reason: "looser", given: 70, applied: 80 }],
-          "coverage.threshold (config) 70 → 80",
+          "coverage.threshold 70 → 80",
         ],
         ["app 60 under input 70", {}, { threshold: "70" }, app({ coverage: { threshold: 60 } }), 70, []],
         ["app 80, nothing given", {}, {}, app({ coverage: { threshold: 80 } }), 80, []],
@@ -110,8 +118,8 @@ describe("applyPolicy: the coverage and setup keys", () => {
           { threshold: "70" },
           file({ coverage: { threshold: 60 } }),
           70,
-          [{ setting: "coverage.threshold", layer: "policy-file", reason: "looser", given: 60, applied: 70 }],
-          "coverage.threshold (policy-file) 60 → 70",
+          [{ setting: "coverage.threshold", reason: "looser", given: 60, applied: 70 }],
+          "coverage.threshold 60 → 70",
         ],
       ];
     for (const [name, config, raw, policy, threshold, ignored, text] of cases) {
@@ -124,6 +132,7 @@ describe("applyPolicy: the coverage and setup keys", () => {
       if (text !== undefined) {
         expect(messages[0]?.level, name).toBe("warn");
         expect(messages[0]?.text, name).toContain(text);
+        expect(messages[0]?.text, name).not.toMatch(LAYER_WORD);
       }
     }
   });
@@ -166,7 +175,7 @@ describe("applyPolicy: the coverage and setup keys", () => {
         {},
         file({ coverage: { exclude: ["src/**"] } }),
         "today",
-        [{ setting: "coverage.exclude", layer: "policy-file", reason: "not-allowed" }],
+        [{ setting: "coverage.exclude", reason: "not-allowed" }],
       ],
       ["file []", config, {}, file({ coverage: { exclude: [] } }), "today", []],
     ];
@@ -215,7 +224,7 @@ describe("applyPolicy: the coverage and setup keys", () => {
         { coverageRoot: "other" },
         file({ coverage: { root: "pkg" } }),
         "today",
-        [{ setting: "coverage.root", layer: "policy-file", reason: "not-allowed" }],
+        [{ setting: "coverage.root", reason: "not-allowed" }],
       ],
     ];
     for (const [name, cfg, raw, policy, root, ignored] of cases) {
@@ -259,7 +268,7 @@ describe("applyPolicy: the coverage and setup keys", () => {
         {},
         { requireAgentSetup: true },
         file({ setup: { require: false } }),
-        [{ setting: "setup.require", layer: "policy-file", reason: "looser" }],
+        [{ setting: "setup.require", reason: "looser" }],
       ],
     ];
     for (const [name, cfg, raw, policy, ignored] of requireCases) {

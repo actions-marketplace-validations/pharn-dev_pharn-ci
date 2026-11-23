@@ -574,10 +574,10 @@ export function check(input: CheckInput): Report {
     ...(input.policyIgnored ?? []),
     ...injectionSettings.ignored,
     ...(overridden?.lowered ?? []).map(
-      (id): IgnoredSetting => ({ setting: `test_integrity.signals.${id}`, layer: "policy-file", reason: "looser" }),
+      (id): IgnoredSetting => ({ setting: `test_integrity.signals.${id}`, reason: "looser" }),
     ),
     ...(policyEvaluation?.lowered ?? []).map(
-      (id): IgnoredSetting => ({ setting: `policy.rules.${id}`, layer: "policy-file", reason: "looser" }),
+      (id): IgnoredSetting => ({ setting: `policy.rules.${id}`, reason: "looser" }),
     ),
     ...(policyEvaluation?.ignored ?? []),
   ];

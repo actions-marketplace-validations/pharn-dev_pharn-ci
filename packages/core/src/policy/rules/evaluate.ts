@@ -22,8 +22,6 @@ import type { PolicyEvaluation, PolicyRuleInput, PolicyViolation, RuleFinding } 
 
 /** The most violations of one rule id the report keeps; the rest are counted. */
 export const MAX_RULE_VIOLATIONS = 50;
-/** The P08 cap, which item 22 named first; kept as a name for `MAX_RULE_VIOLATIONS`, which applies to every rule. */
-export const MAX_P08_VIOLATIONS = MAX_RULE_VIOLATIONS;
 
 const SETTINGS_READERS = ["P02", "P03", "P04", "P05", "P06"] as const satisfies readonly SettingsReader[];
 const SETTINGS_RULES: readonly string[] = SETTINGS_READERS;
@@ -79,7 +77,6 @@ export function evaluatePolicyRules(input: PolicyRuleInput): PolicyEvaluation {
   const settingsFindings: RuleFinding[] = [];
   let settings: PolicySettingsOutcome | undefined;
   let view: SettingsView | null = null;
-  const supplying = new Set<string>();
   const sources = input.settingsSources;
 
   if (inForce && sources !== undefined) {
@@ -116,18 +113,10 @@ export function evaluatePolicyRules(input: PolicyRuleInput): PolicyEvaluation {
       const model = readSettingsModel(sources, document);
       const over = compareUnits(model, setup, { p02: active.P02, p03: active.P03, p05: active.P05 }) > COMPARE_BUDGET;
       if (active.P02 && !over) settingsFindings.push(...detectP02(model, setup?.forbidden_permissions ?? []));
-      if (active.P03 && !over) {
-        const p03 = detectP03(model, setup?.required_permissions_deny ?? []);
-        settingsFindings.push(...p03.findings);
-        for (const path of p03.supplying) supplying.add(path);
-      }
+      if (active.P03 && !over) settingsFindings.push(...detectP03(model, setup?.required_permissions_deny ?? []));
       if (active.P04) settingsFindings.push(...detectP04(model, setup?.allowed_mcp_servers ?? []));
       if (active.P05 && !over) settingsFindings.push(...detectP05(model, setup?.forbidden_mcp_servers ?? []));
-      if (active.P06) {
-        const p06 = detectP06(model, setup?.required_hooks ?? []);
-        settingsFindings.push(...p06.findings);
-        for (const path of p06.supplying) supplying.add(path);
-      }
+      if (active.P06) settingsFindings.push(...detectP06(model, setup?.required_hooks ?? []));
       const readers = new Set<SettingsReader>(SETTINGS_READERS.filter((id) => active[id]));
       const problems = reportedProblems(model.problems, setup, readers);
       if (over) problems.unshift({ path: null, line: null, reason: "compare-budget", level: "error" });
@@ -135,7 +124,7 @@ export function evaluatePolicyRules(input: PolicyRuleInput): PolicyEvaluation {
       const uncheckable = new Set<string>();
       for (const problem of problems)
         if (problem.path !== null && problem.level === "error") uncheckable.add(problem.path);
-      view = { failing: new Map(), uncheckable, supplying };
+      view = { failing: new Map(), uncheckable };
     }
   }
 
