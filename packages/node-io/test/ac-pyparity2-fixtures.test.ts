@@ -2,8 +2,10 @@ import { spawnSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { Report, TestSourceFile as SourceFile } from "@pharn-ci/core";
 import { describe, expect, it } from "vitest";
 import { expectValidReport } from "../../core/test/schema.js";
+import type { TextCheckInput } from "../../core/test/text-coverage.js";
 
 // indexPythonTestSources and check() are loaded inside the test body: the AC test is written before the pytest parity
 // fixtures exist, so nothing the build adds may run while the file loads. The cases are listed from the fixture
@@ -36,14 +38,6 @@ function requirePython(): void {
   }
 }
 
-interface SourceFile {
-  path: string;
-  text: string;
-}
-interface Report {
-  testIntegrity: { signals: { id: string; severity: string; path: string }[] };
-}
-
 const byPath = (a: SourceFile, b: SourceFile) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
 
 /** The `<logical path>.txt` files under one side of a case, as test-source files sorted by logical path. */
@@ -74,7 +68,7 @@ function isPython(id: string, paths: string[]): boolean {
 function casesOf(id: string): { name: string; diff: string; dir: string | null }[] {
   const root = `${FIXTURES}test-integrity/${id}/`;
   return readdirSync(root, { withFileTypes: true })
-    .flatMap((entry) => {
+    .flatMap((entry): { name: string; diff: string; dir: string | null }[] => {
       if (entry.isFile() && entry.name.endsWith(".diff")) {
         return [
           { name: entry.name.slice(0, -".diff".length), diff: readFileSync(`${root}${entry.name}`, "utf8"), dir: null },
@@ -96,8 +90,11 @@ function casesOf(id: string): { name: string; diff: string; dir: string | null }
 
 async function runCase(id: string, c: { name: string; diff: string; dir: string | null }): Promise<Report> {
   const { check } = await import("../../core/test/text-coverage.js");
-  const coverage = { text: readFileSync(`${FIXTURES}test-files-deleted/coverage.info`, "utf8"), format: "lcov" };
-  let input: Record<string, unknown>;
+  const coverage = {
+    text: readFileSync(`${FIXTURES}test-files-deleted/coverage.info`, "utf8"),
+    format: "lcov" as const,
+  };
+  let input: Pick<TextCheckInput, "diff" | "repoFiles" | "testSources" | "pythonTestIndex">;
   if (c.dir === null) {
     const files = `${FIXTURES}test-integrity/${id}/${c.name}.files.txt`;
     const repoFiles = readFileSync(existsSync(files) ? files : `${FIXTURES}test-files-deleted/files.txt`, "utf8")
@@ -114,9 +111,7 @@ async function runCase(id: string, c: { name: string; diff: string; dir: string 
       testSources,
     };
     if (INDEXED.has(id)) {
-      const io = (await import("../src/index.js")) as unknown as {
-        indexPythonTestSources(sources: unknown): Promise<{ available: boolean } | undefined>;
-      };
+      const io = await import("../src/index.js");
       const pythonTestIndex = await io.indexPythonTestSources(testSources);
       expect(pythonTestIndex?.available, `${id}/${c.name}: the Python index ran`).toBe(true);
       input.pythonTestIndex = pythonTestIndex;
@@ -129,9 +124,9 @@ async function runCase(id: string, c: { name: string; diff: string; dir: string 
     threshold: 80,
     testIntegrityMode: { input: "block" },
     ...input,
-  } as unknown as Parameters<typeof check>[0]);
+  });
   expectValidReport(report);
-  return report as unknown as Report;
+  return report;
 }
 
 describe("pytest parity: every Python fixture case of the parity signals", () => {
