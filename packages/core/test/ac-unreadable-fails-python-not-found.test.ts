@@ -8,16 +8,6 @@ import { expectValidReport } from "./schema.js";
 const CODE = "TEST_INTEGRITY_INDEX_UNAVAILABLE";
 const PATH = "tests/test_c.py";
 
-interface Message {
-  code: string;
-  level: string;
-  text: string;
-}
-interface Report {
-  verdict: string;
-  messages: Message[];
-}
-
 const PY_BASE =
   "from cart import total\n\n\ndef test_adds():\n    assert total([2, 3]) == 5\n\n\ndef test_empty():\n    assert total([]) == 0\n";
 const PY_HEAD = "from cart import total\n\n\ndef test_adds():\n    assert total([2, 3]) == 5\n";
@@ -50,10 +40,10 @@ describe("CORE-69: no python3 while a Python test file is modified", () => {
         base: { files: [{ path: PATH, text: PY_BASE }], dropped: [] },
         head: { files: [{ path: PATH, text: PY_HEAD }], dropped: [] },
       },
-      pythonTestIndex: { available: false, reason: "python-not-found", detail: "python3: command not found" },
-    } as unknown as Parameters<typeof check>[0]);
+      pythonTestIndex: { available: false, reason: "python-not-found" },
+    });
     expectValidReport(report);
-    const r = report as unknown as Report;
+    const r = report;
 
     const messages = r.messages.filter((m) => m.code === CODE);
     expect(messages, `one ${CODE} message`).toHaveLength(1);
