@@ -39,10 +39,12 @@ import {
   loadConfigInUse,
   OBJECT_ID,
   type PathStat,
+  type RunRevisions,
   readCoverageFiles,
   readDiscoveredCoverage,
   readJunitFiles,
   readPolicyFileAt,
+  runRevisions,
 } from "@pharn-ci/node-io";
 import { applyAcceptLabel } from "./accept-label.js";
 import { gatherAgentPrFacts } from "./agent-pr.js";
@@ -332,7 +334,7 @@ async function runUnsafe(deps: ActionDeps): Promise<Report> {
         : "parsed" in earlyDiff.diff
           ? earlyDiff.diff.parsed
           : parseUnifiedDiff(earlyDiff.diff.text),
-    base: earlyDiff?.localBase,
+    revisions: earlyDiff?.revisions,
   });
 
   // An empty input is not given: the config, then the default, applies.
@@ -411,12 +413,13 @@ async function runUnsafe(deps: ActionDeps): Promise<Report> {
   }
 
   const repoFiles = await trackedFiles(target, deps);
-  const { diff, localBase, checkout } = earlyDiff ?? (await getDiff(baseRefInput, deps, target, configInput));
+  const { diff, revisions, checkout } = earlyDiff ?? (await getDiff(baseRefInput, deps, target, configInput));
+  const localBase = revisions?.base;
   // The sources the checks read from committed git objects, decided as in the CLI (CORE-136). In PR-number mode the
   // checkout is not the PR, so nothing at its HEAD is read (not even the file sizes); nothing read is logged.
   const gathered = await gatherSources(deps, {
     diff,
-    base: localBase,
+    revisions,
     checkout,
     repoFiles,
     testIntegrityMode,
@@ -470,22 +473,22 @@ async function runUnsafe(deps: ActionDeps): Promise<Report> {
     ...gathered,
     exclude,
     requireAgentSetup,
-    ...(expectAgentSetup === undefined ? {} : { expectAgentSetup }),
-    ...(testIntegrityMode === undefined ? {} : { testIntegrityMode }),
-    ...(coverageRoot === undefined ? {} : { coverageRoot }),
-    ...(configInput === "" ? {} : { configPath: configInput }),
-    ...(configSource === undefined ? {} : { configSource }),
-    ...(headConfigExclude === undefined ? {} : { headConfigExclude }),
-    ...(policy === undefined ? {} : { policy }),
-    ...(application === undefined || application.ignored.length === 0 ? {} : { policyIgnored: application.ignored }),
-    ...(application?.signalOverrides === undefined ? {} : { signalOverrides: application.signalOverrides }),
+    expectAgentSetup,
+    testIntegrityMode,
+    coverageRoot,
+    configPath: configInput || undefined,
+    configSource,
+    headConfigExclude,
+    policy,
+    policyIgnored: application?.ignored,
+    signalOverrides: application?.signalOverrides,
     agentPrFacts,
-    ...(policyFileBase === undefined ? {} : { policyFileBase }),
-    ...(junit === undefined ? {} : { junit }),
+    policyFileBase,
+    junit,
     // Only the app's own answer carries a quarantine list; a pull request has no way to add one.
-    ...(junit === undefined || quarantine === undefined ? {} : { quarantine }),
-    ...(dependencySettings === undefined ? {} : { dependencySettings }),
-    ...(dependencyLookups === undefined ? {} : { dependencyLookups }),
+    quarantine,
+    dependencySettings,
+    dependencyLookups,
   };
   const runMetaBase = runMeta(deps.context, { baseRef: baseRefInput, ...(target === undefined ? {} : { target }) });
   if (runMetaBase === undefined) deps.info("run metadata is incomplete, so report.json carries no meta");
@@ -496,7 +499,7 @@ async function runUnsafe(deps: ActionDeps): Promise<Report> {
   const mergeBase =
     runMetaBase === undefined || localBase === undefined ? null : await forkPoint(localBase, runMetaBase.headSha, deps);
   const meta = runMetaBase === undefined || mergeBase === null ? runMetaBase : { ...runMetaBase, mergeBase };
-  const checked = check(meta === undefined ? checkInput : { ...checkInput, meta });
+  const checked = check({ ...checkInput, meta });
   // The backstop of the escape path: the first read of the parser sits outside the `try` of its parse, so a load failure
   // normally throws out of check() by itself. Wherever that read ends up, a failed load must fail the step before
   // anything is written, never be refused by the test index as an ordinary parser throw (docs/THREAT-MODEL.md, G1).
@@ -696,8 +699,8 @@ async function gatherDependencyLookups(
 /**
  * Diff of the change under test: base...HEAD from local git; the GitHub compare API is used only for a base that does
  * not resolve locally (a shallow checkout) or in PR-number mode. A base that resolves but whose local diff fails fails
- * the step. `localBase` is the revision the local git diff was taken against; set only when the diff was parsed from
- * local git. `checkout` says whether the checkout's HEAD is the head under review (see `HeadCheckout`): it is whenever
+ * the step. `revisions` are the revision the local git diff was taken against and HEAD, resolved once for the run; set
+ * only when the diff was parsed from local git. `checkout` says whether the checkout's HEAD is the head under review (see `HeadCheckout`): it is whenever
  * the base resolved in the checkout or there is no base; it may not be with a compare-API diff (or a failed compare) or a
  * `pull_request_target` checkout of the base; it is not in PR-number mode.
  */
@@ -706,7 +709,7 @@ async function getDiff(
   deps: ActionDeps,
   target?: PrNumberTarget,
   configInput = "",
-): Promise<{ diff: CheckInput["diff"]; localBase?: string; checkout: HeadCheckout }> {
+): Promise<{ diff: CheckInput["diff"]; revisions?: RunRevisions; checkout: HeadCheckout }> {
   // A leading "-" would reach git as an option (e.g. --output=<file>), not a revision.
   if (baseRefInput.startsWith("-")) throw new Error(`base-ref "${baseRefInput}" must not start with "-"`);
   // PR-number mode: the checkout is not the PR, so only the GitHub API can give the diff.
@@ -747,8 +750,9 @@ async function getDiff(
     }
   }
 
-  const localBase = await resolveLocal(base, deps);
-  if (localBase) {
+  const revisions = await resolveLocal(base, deps);
+  if (revisions !== null) {
+    const localBase = revisions.base;
     let parsed: DiffFile[];
     try {
       // The config in use decides which file's text the reader keeps, so a custom `config` input works as it does for check().
@@ -766,7 +770,7 @@ async function getDiff(
     // A base that is HEAD or a descendant of it (base-ref: HEAD, or ${{ github.sha }}) gives an empty diff, which would
     // pass as NO_COVERABLE_CHANGES and hide every change from the diff-based checks (review finding 13). Only an empty
     // diff can mean that, so git is asked only then.
-    if (parsed.length === 0 && (await headIsInBase(deps, localBase))) {
+    if (parsed.length === 0 && (await headIsInBase(revisions))) {
       const named = baseRefInput ? `base-ref "${baseRefInput}"` : `the base ${base}`;
       return {
         diff: {
@@ -778,7 +782,7 @@ async function getDiff(
         checkout: "head",
       };
     }
-    return { diff: { parsed }, localBase, checkout: "head" };
+    return { diff: { parsed }, revisions, checkout: "head" };
   }
   // Reached only for a base that does not resolve locally (a shallow checkout).
   try {
@@ -836,17 +840,22 @@ async function forkPoint(base: string, head: string, deps: ActionDeps): Promise<
   }
 }
 
-async function resolveLocal(base: string, deps: ActionDeps): Promise<string | null> {
+/**
+ * The run's revisions for the first candidate ref of `base` that resolves in the checkout, or null. Its `rev-parse`
+ * answer is kept, so the run does not ask git for the base again.
+ */
+async function resolveLocal(base: string, deps: ActionDeps): Promise<RunRevisions | null> {
   // A full commit SHA (SHA-1 or SHA-256) names one commit; anything else may be a branch the checkout has only as
   // origin/<name>.
   const candidates = COMMIT_SHA.test(base) ? [base] : [`origin/${base}`, base];
   for (const ref of candidates) {
+    let printed: string;
     try {
-      await deps.git(["rev-parse", "--verify", "--quiet", "--end-of-options", `${ref}^{commit}`]);
-      return ref;
+      printed = await deps.git(["rev-parse", "--verify", "--quiet", "--end-of-options", `${ref}^{commit}`]);
     } catch {
-      // try the next candidate
+      continue; // try the next candidate
     }
+    return runRevisions(deps, ref, printed);
   }
   return null;
 }

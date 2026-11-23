@@ -32,6 +32,7 @@ import {
   readCoverageFiles,
   readDiscoveredCoverage,
   readPolicyFile,
+  runRevisions,
 } from "@pharn-ci/node-io";
 import { readJunit, readQuarantineFile, runTestCommand } from "./testCommand.js";
 
@@ -290,6 +291,8 @@ async function runCheck(values: Values, deps: CliDeps): Promise<number> {
   // applies, as in the action.
   const base = values.base ?? "origin/main";
   const diffArgs = gitDiffArgs(base);
+  // The base, HEAD and their merge base are resolved once, on first use, for every reader of this run.
+  const revisions = runRevisions(deps, base);
   // Absolute: core makes it repo-relative against repoRoot, or finds it outside the repo.
   const configPath = values.config === undefined ? undefined : deps.resolvePath(deps.cwd, values.config);
   let diffFiles: DiffFile[];
@@ -302,7 +305,7 @@ async function runCheck(values: Values, deps: CliDeps): Promise<number> {
   // and hide every change from the diff-based checks (review finding 13). Only an empty diff can mean that, so git is
   // asked only then. The diff is of commits only (base...HEAD), never of the working tree, as in the action.
   let diff: CheckInput["diff"] = { parsed: diffFiles };
-  if (diffFiles.length === 0 && (await headIsInBase(deps, base))) {
+  if (diffFiles.length === 0 && (await headIsInBase(revisions))) {
     const named = values.base === undefined ? `the base "${base}"` : `--base "${base}"`;
     diff = {
       unavailable:
@@ -321,7 +324,7 @@ async function runCheck(values: Values, deps: CliDeps): Promise<number> {
     repoRoot,
     // Only a base the caller names decides the copy; without --base the working tree's config is read, as before.
     diff: values.base === undefined || "unavailable" in diff ? null : diffFiles,
-    base,
+    revisions,
   });
   // With no coverage path set anywhere, the report is looked for at the discovery candidates.
   const resolved = resolveInputs(config, raw, FLAG_ERRORS, { discoverCoverage: true });
@@ -392,7 +395,7 @@ async function runCheck(values: Values, deps: CliDeps): Promise<number> {
   // the head under review, so the files at HEAD are read whether or not the diff is available; nothing read is printed.
   const gathered = await gatherSources(deps, {
     diff,
-    base,
+    revisions,
     checkout: "head",
     repoFiles,
     testIntegrityMode,
@@ -417,21 +420,22 @@ async function runCheck(values: Values, deps: CliDeps): Promise<number> {
     threshold,
     repoFiles,
     ...gathered,
-    ...(dependencySettings === undefined ? {} : { dependencySettings }),
+    dependencySettings,
     exclude,
     requireAgentSetup,
-    ...(expectAgentSetup === undefined ? {} : { expectAgentSetup }),
-    ...(testIntegrityMode === undefined ? {} : { testIntegrityMode }),
-    ...(coverageRoot === undefined ? {} : { coverageRoot }),
+    expectAgentSetup,
+    testIntegrityMode,
+    coverageRoot,
     // Absolute: core makes it repo-relative against repoRoot, or finds it outside the repo.
-    ...(configPath === undefined ? {} : { configPath }),
-    ...(configSource === undefined ? {} : { configSource }),
-    ...(headConfigExclude === undefined ? {} : { headConfigExclude }),
-    ...(policy === undefined ? {} : { policy }),
-    ...(application === undefined || application.ignored.length === 0 ? {} : { policyIgnored: application.ignored }),
-    ...(application?.signalOverrides === undefined ? {} : { signalOverrides: application.signalOverrides }),
-    ...(junit === undefined ? {} : { junit }),
-    ...(junit === undefined || quarantine === undefined ? {} : { quarantine }),
+    configPath,
+    configSource,
+    headConfigExclude,
+    policy,
+    policyIgnored: application?.ignored,
+    signalOverrides: application?.signalOverrides,
+    junit,
+    // A quarantine list applies only to JUnit results.
+    quarantine,
   };
   const report = check(input);
 
