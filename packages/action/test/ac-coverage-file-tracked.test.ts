@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { expectValidReport } from "../../core/test/schema.js";
+import { requiredDeps } from "../../node-io/test/required-deps.js";
 
 // check(), run() and the fixtures are loaded inside each test body: the AC tests are written before the tracked
 // coverage file warning and fixtures/gate-tamper/ exist, so nothing that depends on them may run while the file loads.
@@ -21,7 +22,7 @@ type Report = { verdict: string; messages: Message[] };
 const withCode = (report: Report, code: string) => report.messages.filter((message) => message.code === code);
 
 async function runCheck(file: string | undefined, tracked: string): Promise<Report> {
-  const { check } = await import("../../core/src/check.js");
+  const { check } = await import("../../core/test/text-coverage.js");
   const input = {
     version: "0.1.0",
     coverage: {
@@ -53,6 +54,7 @@ async function runAction(inputs: Record<string, string>) {
   const diff = fixture("gate-tamper/untouched.diff");
   const tracked = lines("gate-tamper/files-with-coverage.txt");
   const deps = {
+    ...requiredDeps(() => deps),
     getInput: (name: string) => inputs[name] ?? INPUT_DEFAULTS[name] ?? "",
     context: {
       eventName: "pull_request",

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { expectValidReport } from "../../core/test/schema.js";
+import { requiredDeps } from "../../node-io/test/required-deps.js";
 
 // E3 item 24a part B (P11), AC-18. main() and check() are loaded inside the test body: the AC test is written before
 // the build adds rule P11, so nothing the build adds may run while this file loads. The CLI reads a real temporary
@@ -52,7 +53,7 @@ const p11 = (report: Report) => (report.policy?.violations ?? []).filter((v) => 
 describe("the CLI never sets the agent flag", { timeout: 60_000 }, () => {
   it("AC-18: check --policy-file with protected paths, an agent label and login gives no P11 violation, no POLICY_P11 or incomplete message and no isAgentPr, while the same policy blocks an agent PR in check()", async () => {
     // Control: the policy protects src/a.ts for an agent PR.
-    const { check } = await import("@pharn-ci/core");
+    const { check } = await import("../../core/test/text-coverage.js");
     const control = check({
       version: "0.1.0",
       coverage: { text: read("fixtures/golden/coverage.info"), format: "lcov" },
@@ -80,6 +81,7 @@ describe("the CLI never sets the agent flag", { timeout: 60_000 }, () => {
       const err: string[] = [];
       const tracked = ["AGENTS.md", POLICY_PATH, "src/a.ts"];
       const deps = {
+        ...requiredDeps(() => deps),
         cwd: dir,
         git: async (args: string[]) => {
           if (args.includes("ls-files"))

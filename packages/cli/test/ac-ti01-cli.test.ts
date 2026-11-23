@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
+import { requiredDeps } from "../../node-io/test/required-deps.js";
 
 // main(), readDiffChunks() and check() are loaded inside each test body: the AC tests are written before TI01 exists
 // and fixtures/test-integrity/TI01/ is written by the build, so nothing that depends on them may run while the file
@@ -18,6 +19,7 @@ function fakeRepo(diff: string) {
   const err: string[] = [];
   const contents = new Map([[resolve(REPO_ROOT, "coverage/lcov.info"), fixture("test-files-deleted/coverage.info")]]);
   const deps = {
+    ...requiredDeps(() => deps),
     cwd: REPO_ROOT,
     git: async (args: string[]) => {
       if (args.includes("ls-files")) {
@@ -63,7 +65,8 @@ describe("TI01 through the CLI and the streaming diff reader", () => {
   });
 
   it("AC-10: the streamed diff and the whole text give the same testIntegrity block and messages", async () => {
-    const { readDiffChunks, check } = await import("@pharn-ci/core");
+    const { readDiffChunks } = await import("@pharn-ci/core");
+    const { check } = await import("../../core/test/text-coverage.js");
     const text = fixture("test-integrity/TI01/block-code-stays.diff");
     const base = {
       version: "0.1.0",
