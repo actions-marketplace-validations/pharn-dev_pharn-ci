@@ -11,6 +11,20 @@ Releases are cut by a maintainer; see [`docs/RELEASING.md`](./docs/RELEASING.md)
 
 ### Changed
 
+- P07 and the stale-instruction check (SI01 to SI03) read instruction files with one set of line helpers (CORE-142),
+  so the two no longer differ on the same line. The stale check now reads PowerShell, `pwsh`, `ps1`, `cmd` and `bat`
+  fences and a PowerShell `PS …> ` prompt in a console block, as P07 did, and no longer takes "no" out of "Noël" as a
+  negation (a word may hold any letter, not only ASCII). P07 now reads a span after a word such as `docs/not.md`,
+  which it read as the negation "not"; a word may hold a dot after its first letter, as in the stale check.
+- TI09 reads the pytest tables of `pyproject.toml` with the TOML reader of dependency safety (CORE-142), so a table
+  reads the same in every TOML spelling, as CORE-114 made it for dependencies. A `[tool.pytest.ini_options]` table
+  moved to dotted keys (`[tool]` then `pytest.ini_options.testpaths = …`) or an inline table, or written with a quoted
+  header part, was not seen at all, so narrowing `testpaths` that way passed; it is now read and judged. A file that is
+  not valid TOML anywhere is refused as `invalid-toml`, as pytest refuses it, where before only the pytest tables had
+  to parse, and a multi-line string value is compared whole, where only its first line was.
+- One extension-to-language mapper for the test-integrity signals (CORE-142). Every extension maps as before; a file
+  whose whole name is an extension (`tests/.ts`, `.py`) is now JS/TS or Python for the test pairing and the source-file
+  signals too, as the one-line test readers (TI03, TI04) already read it.
 - The CLI and the Action gather what the checks read with one shared function (CORE-136), so they no longer differ on
   the same repository. The Action now scans the agent config files for secrets (A7), and reads the agent instruction
   (P07) and settings files (P02 to P06), at `HEAD` also when there is no diff to measure because the checkout is still

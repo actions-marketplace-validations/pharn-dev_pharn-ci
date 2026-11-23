@@ -29674,7 +29674,8 @@ var TomlError = class extends Error {
 };
 var isBare = (c) => c >= "A" && c <= "Z" || c >= "a" && c <= "z" || c >= "0" && c <= "9" || c === "_" || c === "-";
 var newTable = (line) => ({ type: "table", entries: /* @__PURE__ */ new Map(), line });
-function parseTomlDocument(text) {
+function parseTomlDocument(text, origins) {
+  const record = (value2, kind) => origins?.set(value2, { kind });
   const src = text.charCodeAt(0) === 65279 ? text.slice(1) : text;
   const lineStarts2 = [0];
   for (let i = 0; i < src.length; i++) if (src[i] === "\n") lineStarts2.push(i + 1);
@@ -29841,6 +29842,12 @@ function parseTomlDocument(text) {
     target.entries.set(last, value2);
   };
   const value = (depth) => {
+    const start = pos;
+    const parsed = parseValue(depth);
+    origins?.set(parsed, { kind: "value", start, end: pos });
+    return parsed;
+  };
+  const parseValue = (depth) => {
     if (depth > MAX_DEPTH2) fail2();
     const line = lineAt(pos);
     const ch = src[pos];
@@ -29883,7 +29890,10 @@ function parseTomlDocument(text) {
           value(depth + 1),
           keyLine,
           (parent) => made.has(parent),
-          (child) => made.add(child)
+          (child) => {
+            made.add(child);
+            record(child, "dotted");
+          }
         );
         skipAll();
         if (src[pos] === ",") pos++;
@@ -29903,6 +29913,7 @@ function parseTomlDocument(text) {
       if (next === void 0) {
         next = newTable(line);
         origin.set(next, "implicit");
+        record(next, "implicit");
         table.entries.set(key, next);
       } else if (next.type === "array" && origin.get(next) === "array-table") {
         next = next.items[next.items.length - 1];
@@ -29917,24 +29928,28 @@ function parseTomlDocument(text) {
       if (list === void 0) {
         list = { type: "array", items: [], line };
         origin.set(list, "array-table");
+        record(list, "header");
         table.entries.set(last, list);
       } else if (list.type !== "array" || origin.get(list) !== "array-table") {
         fail2();
       }
       const element = newTable(line);
       origin.set(element, "defined");
+      record(element, "header");
       list.items.push(element);
       return element;
     }
     if (existing === void 0) {
       const created = newTable(line);
       origin.set(created, "defined");
+      record(created, "header");
       table.entries.set(last, created);
       return created;
     }
     if (existing.type !== "table" || origin.get(existing) !== "implicit") fail2();
     const defined = existing;
     origin.set(defined, "defined");
+    record(defined, "header");
     defined.line = line;
     return defined;
   };
@@ -29979,12 +29994,14 @@ function parseTomlDocument(text) {
           const from = origin.get(parent);
           if (from === "implicit") {
             origin.set(parent, "dotted");
+            record(parent, "dotted");
             dotted.push(parent);
           }
           return from === "implicit" || from === "dotted";
         },
         (child) => {
           origin.set(child, "dotted");
+          record(child, "dotted");
           dotted.push(child);
         }
       );
@@ -30973,6 +30990,197 @@ function binaryCoveredPaths(diff, coverage2) {
   return [...found].sort(byCodeUnit);
 }
 
+// ../core/src/setup/instructionLines.ts
+var SHELL_INFO = /* @__PURE__ */ new Set([
+  "",
+  "sh",
+  "bash",
+  "shell",
+  "zsh",
+  "fish",
+  "console",
+  "terminal",
+  "shell-session",
+  "shellsession",
+  "powershell",
+  "pwsh",
+  "ps1",
+  "cmd",
+  "bat"
+]);
+var SESSION_INFO = /* @__PURE__ */ new Set(["console", "terminal", "shell-session", "shellsession"]);
+var WRAPPER_WORDS = /* @__PURE__ */ new Set(["sudo", "time", "env"]);
+var MAX_PS_PROMPT = 64;
+var isSpaceCode = (code2) => code2 === 32 || code2 >= 9 && code2 <= 13 || code2 === 160;
+var isAsciiLetter3 = (code2) => code2 >= 65 && code2 <= 90 || code2 >= 97 && code2 <= 122;
+var isAsciiWordStart = (code2) => isAsciiLetter3(code2) || code2 === 95;
+var isAsciiNameChar = (code2) => isAsciiWordStart(code2) || code2 >= 48 && code2 <= 57;
+function isLetter(char) {
+  const code2 = char.charCodeAt(0);
+  if (code2 < 128) return isAsciiLetter3(code2);
+  return new RegExp("\\p{L}", "u").test(char);
+}
+function firstNonSpace(line, from = 0) {
+  let i = from;
+  while (i < line.length && (line.charCodeAt(i) === 32 || line.charCodeAt(i) === 9)) i++;
+  return i;
+}
+function normalizeWord(word) {
+  return word.split("\u2019").join("'").toLowerCase();
+}
+function hasCueWord(line, from, to, cueWords) {
+  let start = -1;
+  let i = from;
+  const flush = (end) => {
+    let word = normalizeWord(line.slice(start, end));
+    start = -1;
+    while (word.endsWith(".") || word.endsWith("'")) word = word.slice(0, -1);
+    return cueWords.has(word);
+  };
+  while (i < to) {
+    const char = String.fromCodePoint(line.codePointAt(i));
+    const inWord = char === "'" || char === "\u2019" || isLetter(char) || char === "." && start !== -1;
+    if (inWord && start === -1) start = i;
+    if (!inWord && start !== -1 && flush(i)) return true;
+    i += char.length;
+  }
+  return start !== -1 && flush(to);
+}
+function splitWords(text) {
+  const words = [];
+  let start = -1;
+  for (let i = 0; i < text.length; i++) {
+    const space = isSpaceCode(text.charCodeAt(i));
+    if (!space && start === -1) start = i;
+    if (space && start !== -1) {
+      words.push(text.slice(start, i));
+      start = -1;
+    }
+  }
+  if (start !== -1) words.push(text.slice(start));
+  return words;
+}
+function isAssignment(word) {
+  if (word.length === 0 || !isAsciiWordStart(word.charCodeAt(0))) return false;
+  let i = 1;
+  while (i < word.length && isAsciiNameChar(word.charCodeAt(i))) i++;
+  return i < word.length && word[i] === "=";
+}
+function commandSegments(text) {
+  const segments = [];
+  let from = 0;
+  let i = 0;
+  while (i < text.length) {
+    const char = text[i];
+    const next = text[i + 1];
+    if (char === "&" && next === "&" || char === "|" && next === "|") {
+      segments.push(text.slice(from, i));
+      i += 2;
+      from = i;
+    } else if (char === ";" || char === "|") {
+      segments.push(text.slice(from, i));
+      i += 1;
+      from = i;
+    } else {
+      i += 1;
+    }
+  }
+  segments.push(text.slice(from));
+  return segments;
+}
+function commandsOfLine(text) {
+  return commandSegments(text).map((segment) => {
+    let body = segment.trim();
+    if (body.startsWith("(")) body = body.slice(1);
+    if (body.endsWith(")")) body = body.slice(0, -1);
+    const words = splitWords(body);
+    let at = 0;
+    while (at < words.length) {
+      const word = words[at];
+      if (!isAssignment(word) && !WRAPPER_WORDS.has(word)) break;
+      at++;
+    }
+    return { words, at };
+  });
+}
+function backtickRuns(line) {
+  const runs = [];
+  let i = line.indexOf("`");
+  while (i !== -1) {
+    let end = i + 1;
+    while (end < line.length && line[end] === "`") end++;
+    runs.push([i, end - i]);
+    i = line.indexOf("`", end);
+  }
+  return runs;
+}
+function codeSpans(line) {
+  const runs = backtickRuns(line);
+  if (runs.length < 2) return [];
+  const partner = new Array(runs.length).fill(-1);
+  const nextOfLength = /* @__PURE__ */ new Map();
+  for (let i = runs.length - 1; i >= 0; i--) {
+    const length = runs[i][1];
+    partner[i] = nextOfLength.get(length) ?? -1;
+    nextOfLength.set(length, i);
+  }
+  const spans = [];
+  for (let i = 0; i < runs.length; ) {
+    const j = partner[i];
+    if (j === -1) {
+      i++;
+      continue;
+    }
+    const [openAt, length] = runs[i];
+    const [closeAt] = runs[j];
+    spans.push({ open: openAt, from: openAt + length, to: closeAt, close: closeAt + length });
+    i = j + 1;
+  }
+  return spans;
+}
+function withoutComments(line, state) {
+  let pos = 0;
+  if (state.open) {
+    const end = line.indexOf("-->");
+    if (end === -1) return null;
+    state.open = false;
+    pos = end + 3;
+  }
+  let out = "";
+  for (; ; ) {
+    const open3 = line.indexOf("<!--", pos);
+    if (open3 === -1) return out + line.slice(pos);
+    out += line.slice(pos, open3);
+    const close = line.indexOf("-->", open3 + 4);
+    if (close === -1) {
+      state.open = true;
+      return out;
+    }
+    out += " ";
+    pos = close + 3;
+  }
+}
+function shellLine(line, session) {
+  const start = firstNonSpace(line);
+  if (session) {
+    const rest2 = line.slice(start);
+    if (rest2.startsWith("$ ") || rest2.startsWith("% ") || rest2.startsWith("> ")) return rest2.slice(2);
+    if (rest2.startsWith("PS")) {
+      const limit = Math.min(rest2.length, 2 + MAX_PS_PROMPT + 1);
+      for (let i = 2; i < limit; i++) {
+        if (rest2[i] !== ">") continue;
+        return rest2[i + 1] === " " ? rest2.slice(i + 2) : null;
+      }
+    }
+    return null;
+  }
+  let rest = line.slice(start);
+  if (rest.startsWith("$ ") || rest.startsWith("% ") || rest.startsWith("> ")) rest = rest.slice(2);
+  const body = firstNonSpace(rest);
+  if (rest[body] === "#") return null;
+  return rest;
+}
+
 // ../core/src/setup/instructions.ts
 var INSTRUCTION_KINDS = [
   "claude-md",
@@ -31062,46 +31270,9 @@ var CUE_WORDS = /* @__PURE__ */ new Set([
 var AFTER_VERBS = /* @__PURE__ */ new Set(["is", "are", "was"]);
 var AFTER_NEGATIONS = /* @__PURE__ */ new Set(["not", "never", "deprecated", "forbidden", "unsupported"]);
 var AFTER_CONTRACTIONS = /* @__PURE__ */ new Set(["isn't", "aren't"]);
-var SHELL_INFO = /* @__PURE__ */ new Set([
-  "",
-  "sh",
-  "bash",
-  "shell",
-  "zsh",
-  "fish",
-  "console",
-  "terminal",
-  "shell-session",
-  "shellsession",
-  "powershell",
-  "pwsh",
-  "ps1",
-  "cmd",
-  "bat"
-]);
-var SESSION_INFO = /* @__PURE__ */ new Set(["console", "terminal", "shell-session", "shellsession"]);
-var WRAPPER_WORDS = /* @__PURE__ */ new Set(["sudo", "time", "env"]);
 var RUNNER_LAUNCHERS = /* @__PURE__ */ new Set(["npx", "bunx", "npm", "pnpm", "yarn", "bun"]);
 var RUNNER_SKIPPED = /* @__PURE__ */ new Set(["exec", "dlx", "run", "x", "--"]);
 var GLOBAL_FLAGS = /* @__PURE__ */ new Set(["-g", "--global", "--location=global"]);
-var MAX_PS_PROMPT = 64;
-var isSpaceCode = (code2) => code2 === 32 || code2 >= 9 && code2 <= 13 || code2 === 160;
-var isAsciiLetter3 = (code2) => code2 >= 65 && code2 <= 90 || code2 >= 97 && code2 <= 122;
-var isAsciiWordStart = (code2) => isAsciiLetter3(code2) || code2 === 95;
-var isAsciiNameChar = (code2) => isAsciiWordStart(code2) || code2 >= 48 && code2 <= 57;
-function isLetter(char) {
-  const code2 = char.charCodeAt(0);
-  if (code2 < 128) return isAsciiLetter3(code2);
-  return new RegExp("\\p{L}", "u").test(char);
-}
-function firstNonSpace(line, from = 0) {
-  let i = from;
-  while (i < line.length && (line.charCodeAt(i) === 32 || line.charCodeAt(i) === 9)) i++;
-  return i;
-}
-function normalizeWord(word) {
-  return word.split("\u2019").join("'").toLowerCase();
-}
 function wordsIn(line, from, to, limit) {
   const words = [];
   let start = -1;
@@ -31121,77 +31292,8 @@ function wordsIn(line, from, to, limit) {
   if (start !== -1 && words.length < limit) words.push(normalizeWord(line.slice(start, to)));
   return words;
 }
-function hasCueWord(line, from, to) {
-  let start = -1;
-  let i = from;
-  const flush = (end) => {
-    const word = normalizeWord(line.slice(start, end));
-    start = -1;
-    return CUE_WORDS.has(word);
-  };
-  while (i < to) {
-    const char = String.fromCodePoint(line.codePointAt(i));
-    const inWord = char === "'" || char === "\u2019" || isLetter(char);
-    if (inWord && start === -1) start = i;
-    if (!inWord && start !== -1 && flush(i)) return true;
-    i += char.length;
-  }
-  return start !== -1 && flush(to);
-}
-function splitWords(text) {
-  const words = [];
-  let start = -1;
-  for (let i = 0; i < text.length; i++) {
-    const space = isSpaceCode(text.charCodeAt(i));
-    if (!space && start === -1) start = i;
-    if (space && start !== -1) {
-      words.push(text.slice(start, i));
-      start = -1;
-    }
-  }
-  if (start !== -1) words.push(text.slice(start));
-  return words;
-}
-function isAssignment(word) {
-  if (word.length === 0 || !isAsciiWordStart(word.charCodeAt(0))) return false;
-  let i = 1;
-  while (i < word.length && isAsciiNameChar(word.charCodeAt(i))) i++;
-  return i < word.length && word[i] === "=";
-}
-function commandSegments(text) {
-  const segments = [];
-  let from = 0;
-  let i = 0;
-  while (i < text.length) {
-    const char = text[i];
-    const next = text[i + 1];
-    if (char === "&" && next === "&" || char === "|" && next === "|") {
-      segments.push(text.slice(from, i));
-      i += 2;
-      from = i;
-    } else if (char === ";" || char === "|") {
-      segments.push(text.slice(from, i));
-      i += 1;
-      from = i;
-    } else {
-      i += 1;
-    }
-  }
-  segments.push(text.slice(from));
-  return segments;
-}
 function declareCommand(commandLine, lineNumber, found) {
-  for (const segment of commandSegments(commandLine)) {
-    let text = segment.trim();
-    if (text.startsWith("(")) text = text.slice(1);
-    if (text.endsWith(")")) text = text.slice(0, -1);
-    const all = splitWords(text);
-    let at = 0;
-    while (at < all.length) {
-      const word = all[at];
-      if (!isAssignment(word) && !WRAPPER_WORDS.has(word)) break;
-      at++;
-    }
+  for (const { words: all, at } of commandsOfLine(commandLine)) {
     const first = all[at];
     if (first === void 0) continue;
     const manager = PACKAGE_MANAGERS.find((tool) => tool === first);
@@ -31214,37 +31316,6 @@ function declareCommand(commandLine, lineNumber, found) {
     }
   }
 }
-function shellLine(line, session) {
-  const start = firstNonSpace(line);
-  if (session) {
-    const rest2 = line.slice(start);
-    if (rest2.startsWith("$ ") || rest2.startsWith("% ") || rest2.startsWith("> ")) return rest2.slice(2);
-    if (rest2.startsWith("PS")) {
-      const limit = Math.min(rest2.length, 2 + MAX_PS_PROMPT + 1);
-      for (let i = 2; i < limit; i++) {
-        if (rest2[i] !== ">") continue;
-        return rest2[i + 1] === " " ? rest2.slice(i + 2) : null;
-      }
-    }
-    return null;
-  }
-  let rest = line.slice(start);
-  if (rest.startsWith("$ ") || rest.startsWith("% ") || rest.startsWith("> ")) rest = rest.slice(2);
-  const body = firstNonSpace(rest);
-  if (rest[body] === "#") return null;
-  return rest;
-}
-function backtickRuns(line) {
-  const runs = [];
-  let i = line.indexOf("`");
-  while (i !== -1) {
-    let end = i + 1;
-    while (end < line.length && line[end] === "`") end++;
-    runs.push([i, end - i]);
-    i = line.indexOf("`", end);
-  }
-  return runs;
-}
 function negatedAfter(line, from, to) {
   const [first, second] = wordsIn(line, from, to, 2);
   if (first === void 0) return false;
@@ -31252,31 +31323,11 @@ function negatedAfter(line, from, to) {
   return AFTER_VERBS.has(first) && second !== void 0 && AFTER_NEGATIONS.has(second);
 }
 function declareSpans(line, lineNumber, found) {
-  const runs = backtickRuns(line);
-  if (runs.length < 2) return;
-  const partner = new Array(runs.length).fill(-1);
-  const nextOfLength = /* @__PURE__ */ new Map();
-  for (let i = runs.length - 1; i >= 0; i--) {
-    const length = runs[i][1];
-    partner[i] = nextOfLength.get(length) ?? -1;
-    nextOfLength.set(length, i);
-  }
-  const spans = [];
-  for (let i = 0; i < runs.length; ) {
-    const j = partner[i];
-    if (j === -1) {
-      i++;
-      continue;
-    }
-    const [openAt, length] = runs[i];
-    const [closeAt] = runs[j];
-    spans.push({ from: openAt + length, to: closeAt, open: openAt, close: closeAt + length });
-    i = j + 1;
-  }
+  const spans = codeSpans(line);
   let gapStart = 0;
   spans.forEach((span2, index) => {
     const next = spans[index + 1];
-    const before = hasCueWord(line, gapStart, span2.open);
+    const before = hasCueWord(line, gapStart, span2.open, CUE_WORDS);
     const negated = before || negatedAfter(line, span2.close, next === void 0 ? line.length : next.open);
     gapStart = span2.close;
     if (!negated) declareCommand(line.slice(span2.from, span2.to).trim(), lineNumber, found);
@@ -31298,28 +31349,6 @@ function frontmatterScoped(lines, close) {
     if (nextLine.slice(firstNonSpace(nextLine)).startsWith("- ")) return true;
   }
   return false;
-}
-function withoutComments(line, state) {
-  let pos = 0;
-  if (state.open) {
-    const end = line.indexOf("-->");
-    if (end === -1) return null;
-    state.open = false;
-    pos = end + 3;
-  }
-  let out = "";
-  for (; ; ) {
-    const open3 = line.indexOf("<!--", pos);
-    if (open3 === -1) return out + line.slice(pos);
-    out += line.slice(pos, open3);
-    const close = line.indexOf("-->", open3 + 4);
-    if (close === -1) {
-      state.open = true;
-      return out;
-    }
-    out += " ";
-    pos = close + 3;
-  }
 }
 function instructionDeclarations(text) {
   const lines = (text.charCodeAt(0) === 65279 ? text.slice(1) : text).split("\n").map((line) => line.endsWith("\r") ? line.slice(0, -1) : line);
@@ -31384,7 +31413,7 @@ function instructionDeclarations(text) {
       }
     }
     if (char === "#") {
-      ignored = hasCueWord(line, at, line.length);
+      ignored = hasCueWord(line, at, line.length, CUE_WORDS);
       previousBlank = false;
       previousIndented = false;
       if (ignored) continue;
@@ -33838,6 +33867,18 @@ function mcpWidenings(path, base, head) {
   return MCP_WIDENINGS.filter((word) => found.has(word));
 }
 
+// ../core/src/sourceLanguage.ts
+var EXTENSION_LANGUAGE = new Map([
+  ...JS_TS_EXTENSIONS.map((extension) => [extension, jsTsFlavor(extension)]),
+  ["py", "py"]
+]);
+function sourceLanguage(path) {
+  const basename = path.slice(path.lastIndexOf("/") + 1);
+  const dot = basename.lastIndexOf(".");
+  if (dot === -1) return null;
+  return EXTENSION_LANGUAGE.get(basename.slice(dot + 1)) ?? null;
+}
+
 // ../core/src/signals/pythonAliases.ts
 var isIdentStart = (code2) => code2 >= 65 && code2 <= 90 || code2 >= 97 && code2 <= 122 || code2 === 95;
 var isIdentChar = (code2) => isIdentStart(code2) || code2 >= 48 && code2 <= 57;
@@ -34015,12 +34056,10 @@ function resolvePythonName(name, aliases) {
 }
 
 // ../core/src/signals/testLines.ts
-var JS_EXTENSIONS = JS_TS_EXTENSIONS.map((extension) => `.${extension}`);
 function testLanguage(path) {
   if (path.endsWith("_test.go")) return "go";
-  if (path.endsWith(".py")) return "python";
-  for (const extension of JS_EXTENSIONS) if (path.endsWith(extension)) return "jsts";
-  return null;
+  const language = sourceLanguage(path);
+  return language === null ? null : language === "py" ? "python" : "jsts";
 }
 var MAX_NAME = 120;
 var isSpace4 = (c) => c === " " || c === "	";
@@ -34249,17 +34288,12 @@ function isSnapshotFile(path) {
   if (basename.endsWith(".snap") || basename.endsWith(".ambr")) return true;
   return segments.slice(0, -1).includes("__snapshots__");
 }
-var JS_TS_EXTENSION_SET = new Set(JS_TS_EXTENSIONS);
 function isPackageJsonFile(path) {
   return path.slice(path.lastIndexOf("/") + 1) === "package.json";
 }
 function coverageSourceLanguage(path) {
-  const basename = path.slice(path.lastIndexOf("/") + 1);
-  const dot = basename.lastIndexOf(".");
-  if (dot <= 0) return null;
-  const extension = basename.slice(dot + 1);
-  if (extension === "py") return "python";
-  return JS_TS_EXTENSION_SET.has(extension) ? "jsts" : null;
+  const language = sourceLanguage(path);
+  return language === null ? null : language === "py" ? "python" : "jsts";
 }
 function keepSignalFileText(configPath, repoRoot) {
   const config = configRepoPath(configPath, repoRoot);
@@ -35830,19 +35864,6 @@ var MAX_PATH_TOKEN = 200;
 var MAX_COMMAND_NAME = 100;
 var MAX_MAKE_TARGETS = 10;
 var MAX_FRONTMATTER_LINE2 = 50;
-var SHELL_INFO2 = /* @__PURE__ */ new Set([
-  "",
-  "sh",
-  "bash",
-  "shell",
-  "zsh",
-  "fish",
-  "console",
-  "terminal",
-  "shell-session",
-  "shellsession"
-]);
-var SESSION_INFO2 = /* @__PURE__ */ new Set(["console", "terminal", "shell-session", "shellsession"]);
 var CUE_WORDS2 = /* @__PURE__ */ new Set([
   "not",
   "never",
@@ -35867,7 +35888,6 @@ var CUE_WORDS2 = /* @__PURE__ */ new Set([
   "examples",
   "e.g"
 ]);
-var WRAPPER_WORDS2 = /* @__PURE__ */ new Set(["sudo", "time", "env"]);
 var DIRECTORY_WORDS = /* @__PURE__ */ new Set(["cd", "pushd"]);
 var PNPM_BUILTINS = /* @__PURE__ */ new Set([
   "add",
@@ -36120,11 +36140,9 @@ var GENERATED_DIRS = /* @__PURE__ */ new Set([
   "tmp",
   ".tmp"
 ]);
-var isSpaceCode3 = (code2) => code2 === 32 || code2 >= 9 && code2 <= 13 || code2 === 160;
-var isAsciiLetter4 = (code2) => code2 >= 65 && code2 <= 90 || code2 >= 97 && code2 <= 122;
 var isDigit3 = (code2) => code2 >= 48 && code2 <= 57;
 function isPathChar(code2) {
-  return isAsciiLetter4(code2) || isDigit3(code2) || code2 === 46 || code2 === 95 || code2 === 45 || code2 === 43 || code2 === 47;
+  return isAsciiLetter3(code2) || isDigit3(code2) || code2 === 46 || code2 === 95 || code2 === 45 || code2 === 43 || code2 === 47;
 }
 function allChars(text, extra) {
   for (let i = 0; i < text.length; i++) {
@@ -36143,74 +36161,6 @@ function isSafeTargetName(name) {
 }
 function isSafePathToken(token) {
   return token.length > 0 && token.length <= MAX_PATH_TOKEN && allChars(token, false);
-}
-function firstNonSpace2(line, from = 0) {
-  let i = from;
-  while (i < line.length && (line.charCodeAt(i) === 32 || line.charCodeAt(i) === 9)) i++;
-  return i;
-}
-function hasCueWord2(text) {
-  let start = -1;
-  const flush = (end) => {
-    let word = text.slice(start, end).split("\u2019").join("'").toLowerCase();
-    start = -1;
-    while (word.endsWith(".") || word.endsWith("'")) word = word.slice(0, -1);
-    return CUE_WORDS2.has(word);
-  };
-  for (let i = 0; i < text.length; i++) {
-    const code2 = text.charCodeAt(i);
-    const inWord = isAsciiLetter4(code2) || code2 === 39 || code2 === 8217 || code2 === 46 && start !== -1;
-    if (inWord && start === -1) start = i;
-    if (!inWord && start !== -1 && flush(i)) return true;
-  }
-  return start !== -1 && flush(text.length);
-}
-function splitWords2(text) {
-  const words = [];
-  let start = -1;
-  for (let i = 0; i < text.length; i++) {
-    const space = isSpaceCode3(text.charCodeAt(i));
-    if (!space && start === -1) start = i;
-    if (space && start !== -1) {
-      words.push(text.slice(start, i));
-      start = -1;
-    }
-  }
-  if (start !== -1) words.push(text.slice(start));
-  return words;
-}
-function isAssignment2(word) {
-  const first = word.charCodeAt(0);
-  if (!(isAsciiLetter4(first) || first === 95)) return false;
-  let i = 1;
-  while (i < word.length) {
-    const code2 = word.charCodeAt(i);
-    if (!(isAsciiLetter4(code2) || isDigit3(code2) || code2 === 95)) break;
-    i++;
-  }
-  return i < word.length && word[i] === "=";
-}
-function commandSegments2(text) {
-  const segments = [];
-  let from = 0;
-  let i = 0;
-  while (i < text.length) {
-    const char = text[i];
-    const next = text[i + 1];
-    if (char === "&" && next === "&" || char === "|" && next === "|") {
-      segments.push(text.slice(from, i));
-      i += 2;
-      from = i;
-    } else if (char === ";" || char === "|") {
-      segments.push(text.slice(from, i));
-      i += 1;
-      from = i;
-    } else {
-      i += 1;
-    }
-  }
-  segments.push(text.slice(from));
-  return segments;
 }
 function scriptOf(manager, words, at) {
   let i = at + 1;
@@ -36251,17 +36201,7 @@ function makeTargetsOf(words, at) {
   return targets;
 }
 function commandsIn(text, line, out) {
-  for (const segment of commandSegments2(text)) {
-    let body = segment.trim();
-    if (body.startsWith("(")) body = body.slice(1);
-    if (body.endsWith(")")) body = body.slice(0, -1);
-    const words = splitWords2(body);
-    let at = 0;
-    while (at < words.length) {
-      const word = words[at];
-      if (!isAssignment2(word) && !WRAPPER_WORDS2.has(word)) break;
-      at++;
-    }
+  for (const { words, at } of commandsOfLine(text)) {
     const first = words[at];
     if (first === void 0) continue;
     if (DIRECTORY_WORDS.has(first)) return;
@@ -36273,63 +36213,6 @@ function commandsIn(text, line, out) {
       const name = scriptOf(first, words, at);
       if (name !== null) out.push({ manager: first, name, line });
     }
-  }
-}
-function backtickRuns2(line) {
-  const runs = [];
-  let i = line.indexOf("`");
-  while (i !== -1) {
-    let end = i + 1;
-    while (end < line.length && line[end] === "`") end++;
-    runs.push([i, end - i]);
-    i = line.indexOf("`", end);
-  }
-  return runs;
-}
-function codeSpans(line) {
-  const runs = backtickRuns2(line);
-  if (runs.length < 2) return [];
-  const partner = new Array(runs.length).fill(-1);
-  const nextOfLength = /* @__PURE__ */ new Map();
-  for (let i = runs.length - 1; i >= 0; i--) {
-    const length = runs[i][1];
-    partner[i] = nextOfLength.get(length) ?? -1;
-    nextOfLength.set(length, i);
-  }
-  const spans = [];
-  for (let i = 0; i < runs.length; ) {
-    const j = partner[i];
-    if (j === -1) {
-      i++;
-      continue;
-    }
-    const [openAt, length] = runs[i];
-    const [closeAt] = runs[j];
-    spans.push({ open: openAt, from: openAt + length, to: closeAt, close: closeAt + length });
-    i = j + 1;
-  }
-  return spans;
-}
-function withoutComments2(line, state) {
-  let pos = 0;
-  if (state.open) {
-    const end = line.indexOf("-->");
-    if (end === -1) return null;
-    state.open = false;
-    pos = end + 3;
-  }
-  let out = "";
-  for (; ; ) {
-    const open3 = line.indexOf("<!--", pos);
-    if (open3 === -1) return out + line.slice(pos);
-    out += line.slice(pos, open3);
-    const close = line.indexOf("-->", open3 + 4);
-    if (close === -1) {
-      state.open = true;
-      return out;
-    }
-    out += " ";
-    pos = close + 3;
   }
 }
 function isVersion(token) {
@@ -36399,19 +36282,19 @@ function linkTargets(text) {
       if (end === -1) break;
       target = text.slice(start, end).trim();
       let cut = 0;
-      while (cut < target.length && !isSpaceCode3(target.charCodeAt(cut))) cut++;
+      while (cut < target.length && !isSpaceCode(target.charCodeAt(cut))) cut++;
       target = target.slice(0, cut);
     }
     targets.push(target);
     from = end + 1;
   }
-  const lead = firstNonSpace2(text);
+  const lead = firstNonSpace(text);
   if (lead <= 3 && text[lead] === "[") {
     const close = text.indexOf("]:", lead + 1);
     if (close !== -1) {
       const rest = text.slice(close + 2).trim();
       let cut = 0;
-      while (cut < rest.length && !isSpaceCode3(rest.charCodeAt(cut))) cut++;
+      while (cut < rest.length && !isSpaceCode(rest.charCodeAt(cut))) cut++;
       let target = rest.slice(0, cut);
       if (target.startsWith("<") && target.endsWith(">")) target = target.slice(1, -1);
       if (target !== "") targets.push(target);
@@ -36434,9 +36317,9 @@ function importPaths(text, line, out) {
     const at = text.indexOf("@", from);
     if (at === -1) return;
     from = at + 1;
-    if (at > 0 && !isSpaceCode3(text.charCodeAt(at - 1))) continue;
+    if (at > 0 && !isSpaceCode(text.charCodeAt(at - 1))) continue;
     let end = at + 1;
-    while (end < text.length && !isSpaceCode3(text.charCodeAt(end))) end++;
+    while (end < text.length && !isSpaceCode(text.charCodeAt(end))) end++;
     let word = text.slice(at + 1, end);
     while (word.length > 0 && ".,;:!?)".includes(word[word.length - 1])) word = word.slice(0, -1);
     from = end;
@@ -36445,13 +36328,6 @@ function importPaths(text, line, out) {
     if (reference.extensionless && !reference.relative) continue;
     out.push(reference);
   }
-}
-function shellLine2(line, session) {
-  const rest = line.slice(firstNonSpace2(line));
-  if (rest.startsWith("$ ") || rest.startsWith("% ") || rest.startsWith("> ")) return rest.slice(2);
-  if (session) return null;
-  if (rest.startsWith("#")) return null;
-  return rest;
 }
 function scanInstructionTokens(text) {
   const source = text.length > MAX_SCAN_CHARS ? text.slice(0, MAX_SCAN_CHARS) : text;
@@ -36477,7 +36353,7 @@ function scanInstructionTokens(text) {
     const raw = lines[index];
     const lineNumber = index + 1;
     if (fence !== null) {
-      const at2 = firstNonSpace2(raw);
+      const at2 = firstNonSpace(raw);
       let run2 = 0;
       while (raw[at2 + run2] === fence.char) run2++;
       if (run2 >= fence.length && raw.slice(at2 + run2).trim() === "") {
@@ -36485,18 +36361,18 @@ function scanInstructionTokens(text) {
         previousBlank = false;
         previousIndented = false;
       } else if (fence.shell && !ignored) {
-        const command = shellLine2(raw, fence.session);
+        const command = shellLine(raw, fence.session);
         if (command !== null) commandsIn(command, lineNumber, commands);
       }
       continue;
     }
-    const line = withoutComments2(raw, comment);
+    const line = withoutComments(raw, comment);
     if (line === null) {
       previousBlank = false;
       previousIndented = false;
       continue;
     }
-    const at = firstNonSpace2(line);
+    const at = firstNonSpace(line);
     const char = line[at];
     if ((char === "`" || char === "~") && at < 4) {
       let run2 = 0;
@@ -36504,16 +36380,16 @@ function scanInstructionTokens(text) {
       if (run2 >= 3) {
         const info2 = line.slice(at + run2).trim();
         let end = 0;
-        while (end < info2.length && !isSpaceCode3(info2.charCodeAt(end)) && info2[end] !== "{") end++;
+        while (end < info2.length && !isSpaceCode(info2.charCodeAt(end)) && info2[end] !== "{") end++;
         const word = info2.slice(0, end).toLowerCase();
-        fence = { char, length: run2, shell: SHELL_INFO2.has(word), session: SESSION_INFO2.has(word) };
+        fence = { char, length: run2, shell: SHELL_INFO.has(word), session: SESSION_INFO.has(word) };
         previousBlank = false;
         previousIndented = false;
         continue;
       }
     }
     if (char === "#") {
-      ignored = hasCueWord2(line);
+      ignored = hasCueWord(line, 0, line.length, CUE_WORDS2);
       previousBlank = false;
       previousIndented = false;
       if (ignored) continue;
@@ -36531,12 +36407,12 @@ function scanInstructionTokens(text) {
       pos = span2.close;
     }
     outside += line.slice(pos);
-    if (hasCueWord2(outside)) continue;
+    if (hasCueWord(outside, 0, outside.length, CUE_WORDS2)) continue;
     for (const span2 of spans) {
       const content = line.slice(span2.from, span2.to).trim();
       if (content === "") continue;
       let space = false;
-      for (let i = 0; i < content.length && !space; i++) space = isSpaceCode3(content.charCodeAt(i));
+      for (let i = 0; i < content.length && !space; i++) space = isSpaceCode(content.charCodeAt(i));
       if (space) {
         commandsIn(content.startsWith("$ ") ? content.slice(2) : content, lineNumber, commands);
       } else {
@@ -37677,16 +37553,7 @@ function indexTestFileWithImports(path, text) {
 }
 
 // ../core/src/signals/testPairs.ts
-var EXTENSION_LANGUAGE = new Map([
-  ...JS_TS_EXTENSIONS.map((extension) => [extension, jsTsFlavor(extension)]),
-  ["py", "py"]
-]);
-function languageOf(path) {
-  const basename = path.slice(path.lastIndexOf("/") + 1);
-  const dot = basename.lastIndexOf(".");
-  if (dot <= 0) return null;
-  return EXTENSION_LANGUAGE.get(basename.slice(dot + 1)) ?? null;
-}
+var languageOf = sourceLanguage;
 function lookupOf(side) {
   const texts = /* @__PURE__ */ new Map();
   const dropped = /* @__PURE__ */ new Map();
@@ -37969,7 +37836,8 @@ function detectUnexercisedChanges(diff, touched, repoFiles, excluded, python = t
 // ../core/src/signals/findingCap.ts
 var MAX_FINDINGS_PER_FILE = 20;
 var RANK3 = { block: 0, warn: 1, info: 2 };
-function capFindings(signals, limit = MAX_FINDINGS_PER_FILE) {
+var bySeverity = (signal2) => RANK3[signal2.severity];
+function capFindings(signals, limit = MAX_FINDINGS_PER_FILE, rank = bySeverity) {
   const groups = /* @__PURE__ */ new Map();
   for (const signal2 of signals) {
     const key = `${signal2.id}\0${signal2.path}`;
@@ -37982,7 +37850,7 @@ function capFindings(signals, limit = MAX_FINDINGS_PER_FILE) {
   for (const group of groups.values()) {
     if (group.length <= limit) continue;
     const ranked = group.map((signal2, index) => ({ signal: signal2, index })).sort(
-      (a, b) => RANK3[a.signal.severity] - RANK3[b.signal.severity] || (a.signal.line ?? Number.POSITIVE_INFINITY) - (b.signal.line ?? Number.POSITIVE_INFINITY) || a.index - b.index
+      (a, b) => rank(a.signal) - rank(b.signal) || (a.signal.line ?? Number.POSITIVE_INFINITY) - (b.signal.line ?? Number.POSITIVE_INFINITY) || a.index - b.index
     );
     for (const { signal: signal2 } of ranked.slice(limit)) dropped.add(signal2);
     const first = group[0];
@@ -38920,7 +38788,6 @@ function detectTI02(match, mode) {
 }
 
 // ../core/src/signals/ti03.ts
-var MAX_PER_FILE = 20;
 var DETAILS = {
   existing: "An unconditional skip was added to a test that the diff shows existed before this change, so that test no longer runs.",
   conditional: "A conditional skip was added; the test is skipped only where its condition holds.",
@@ -39080,11 +38947,9 @@ function detectTI03(diff, mode, sources, pairs = []) {
     }
   }
   for (const { path, line, category } of pairs) note(path, line, category);
-  const rank = (category) => category === "existing" ? 0 : 1;
   const signals = [];
   for (const [path, lines] of byPath) {
-    const found = [...lines].map(([line, category]) => ({ line, category })).sort((a, b) => rank(a.category) - rank(b.category) || a.line - b.line);
-    for (const { line, category } of found.slice(0, MAX_PER_FILE)) {
+    for (const [line, category] of lines) {
       signals.push({
         id: "TI03",
         severity: category === "existing" ? mode : "warn",
@@ -39094,7 +38959,10 @@ function detectTI03(diff, mode, sources, pairs = []) {
       });
     }
   }
-  return signals.sort((a, b) => byCodeUnit(a.path, b.path) || (a.line ?? 0) - (b.line ?? 0));
+  const existingFirst = (signal2) => signal2.detail === DETAILS.existing ? 0 : 1;
+  return capFindings(signals, MAX_FINDINGS_PER_FILE, existingFirst).kept.sort(
+    (a, b) => byCodeUnit(a.path, b.path) || (a.line ?? 0) - (b.line ?? 0)
+  );
 }
 
 // ../core/src/signals/ti03Pairs.ts
@@ -39304,7 +39172,6 @@ function detectTI03Pairs(input) {
 }
 
 // ../core/src/signals/ti04.ts
-var MAX_PER_FILE2 = 20;
 var DETAIL = "A focused-run marker (`.only`, `fit` or `fdescribe`) was added, so the runner may skip the other tests of this file or of the whole run.";
 function detectTI04(diff, mode) {
   const signals = [];
@@ -39318,20 +39185,17 @@ function detectTI04(diff, mode) {
         if (parsed !== null && parsed.kind === "call" && parsed.token === "only") removed.add(parsed.name);
       }
     }
-    const lines = [];
     for (const hunk of file.hunks) {
       for (const entry of hunk.added) {
         const parsed = parseJsTestCall(entry.text);
         if (parsed === null || parsed.kind !== "call" || parsed.token !== "only") continue;
-        if (!removed.has(parsed.name)) lines.push(entry.line);
+        if (!removed.has(parsed.name)) {
+          signals.push({ id: "TI04", severity: mode, path: file.path, line: entry.line, detail: DETAIL });
+        }
       }
     }
-    lines.sort((a, b) => a - b);
-    for (const line of lines.slice(0, MAX_PER_FILE2)) {
-      signals.push({ id: "TI04", severity: mode, path: file.path, line, detail: DETAIL });
-    }
   }
-  return signals.sort((a, b) => byCodeUnit(a.path, b.path) || (a.line ?? 0) - (b.line ?? 0));
+  return capFindings(signals).kept.sort((a, b) => byCodeUnit(a.path, b.path) || (a.line ?? 0) - (b.line ?? 0));
 }
 
 // ../core/src/signals/ti05.ts
@@ -40678,7 +40542,6 @@ function readPackageScripts(text) {
 }
 
 // ../core/src/signals/ti10.ts
-var MAX_PER_FILE3 = 20;
 var DETAILS2 = {
   "or-true": "A test script now ignores the exit status of a command, so it passes even when the tests fail.",
   echo: "A test script now prints a message in place of running the tests, or after a failing run, so it can pass without the tests passing.",
@@ -40833,11 +40696,12 @@ function detectTI10(diff, options) {
       continue;
     }
     found.sort((a, b) => (a.line ?? 0) - (b.line ?? 0) || byCodeUnit(DETAILS2[a.kind], DETAILS2[b.kind]));
-    for (const { line, kind } of found.slice(0, MAX_PER_FILE3)) {
+    for (const { line, kind } of found) {
       signals.push({ id: "TI10", severity: options.mode, path: file.path, line, detail: DETAILS2[kind] });
     }
   }
-  return signals.sort(
+  const lineless = (signal2) => signal2.line === null ? 0 : 1;
+  return capFindings(signals, MAX_FINDINGS_PER_FILE, lineless).kept.sort(
     (a, b) => byCodeUnit(a.path, b.path) || (a.line ?? 0) - (b.line ?? 0) || byCodeUnit(a.detail, b.detail)
   );
 }
@@ -41065,9 +40929,9 @@ function detectTI08(diff) {
 }
 
 // ../core/src/testConfig/kinds.ts
-var JS_EXTENSIONS2 = /* @__PURE__ */ new Set(["ts", "mts", "cts", "js", "mjs", "cjs"]);
+var JS_EXTENSIONS = /* @__PURE__ */ new Set(["ts", "mts", "cts", "js", "mjs", "cjs"]);
 function hasJsName(basename, prefix) {
-  return basename.startsWith(`${prefix}.`) && JS_EXTENSIONS2.has(basename.slice(prefix.length + 1));
+  return basename.startsWith(`${prefix}.`) && JS_EXTENSIONS.has(basename.slice(prefix.length + 1));
 }
 function testConfigKind(path) {
   const basename = path.slice(path.lastIndexOf("/") + 1);
@@ -41377,11 +41241,9 @@ function readJs(path, text) {
 }
 
 // ../core/src/testConfig/readToml.ts
-var TABLE2 = /^\[\s*tool\s*\.\s*pytest\s*\.\s*ini_options\s*\]\s*(?:#.*)?$/;
-var NATIVE_TABLE = /^\[\s*tool\s*\.\s*pytest\s*\]\s*(?:#.*)?$/;
-var HEADER_LINE = /^\[\[?[A-Za-z0-9_.\s-]+\]\]?\s*(?:#.*)?$/;
-var KEY_LINE = /^([A-Za-z0-9_.-]+|"(?:[^"\\]|\\.)*"|'[^']*')\s*=([\s\S]*)$/;
 var NUMBER3 = /^[-+]?\d[\d_]*(?:\.\d[\d_]*)?(?:[eE][-+]?\d+)?$/;
+var INI_OPTIONS = ["tool", "pytest", "ini_options"];
+var NATIVE = ["tool", "pytest"];
 function stringEnd2(text, open3) {
   const quote = text[open3];
   for (let i = open3 + 1; i < text.length; i++) {
@@ -41389,27 +41251,6 @@ function stringEnd2(text, open3) {
     else if (text[i] === quote) return i;
   }
   return -1;
-}
-function closesMultiLine(line, from, delimiter) {
-  if (delimiter === "'''") return line.includes(delimiter, from);
-  for (let i = from; i < line.length; i++) {
-    if (line[i] === "\\") i++;
-    else if (line.startsWith(delimiter, i)) return true;
-  }
-  return false;
-}
-function stripTomlComment(line) {
-  for (let i = 0; i < line.length; i++) {
-    const ch = line[i];
-    if (ch === '"' || ch === "'") {
-      const end = stringEnd2(line, i);
-      if (end === -1) return line.trim();
-      i = end;
-    } else if (ch === "#") {
-      return line.slice(0, i).trim();
-    }
-  }
-  return line.trim();
 }
 function scalar(text) {
   if (text.startsWith('"') || text.startsWith("'")) {
@@ -41429,179 +41270,60 @@ function scalar(text) {
   if (NUMBER3.test(text)) return { type: "number", value: Number(text.replace(/_/g, "")) };
   return { type: "opaque", text: normalizeOpaque(text) };
 }
-function scanBrackets(text, from, depth) {
-  let open3 = depth;
-  for (let i = from; i < text.length; i++) {
+function withoutComments2(text) {
+  let out = "";
+  let from = 0;
+  for (let i = 0; i < text.length; i++) {
     const ch = text[i];
     if (ch === '"' || ch === "'") {
-      const end = stringEnd2(text, i);
-      if (end === -1) return null;
-      i = end;
-    } else if (ch === "[" || ch === "{") {
-      open3++;
-    } else if (ch === "]" || ch === "}") {
-      open3--;
-      if (open3 === 0) return { close: i, depth: 0 };
+      const delimiter = text.startsWith(ch.repeat(3), i) ? ch.repeat(3) : ch;
+      let j = i + delimiter.length;
+      while (j < text.length && !text.startsWith(delimiter, j)) j += ch === '"' && text[j] === "\\" ? 2 : 1;
+      i = j + delimiter.length - 1;
+    } else if (ch === "#") {
+      out += text.slice(from, i);
+      while (i < text.length && text[i] !== "\n") i++;
+      from = i;
     }
   }
-  return { close: -1, depth: open3 };
+  return out + text.slice(from);
 }
-function closeOf2(text, open3) {
-  return scanBrackets(text, open3, 0)?.close ?? -1;
+function configValue(value, origins, src, nested2) {
+  const origin = origins.get(value);
+  const raw = origin?.kind === "value" ? src.slice(origin.start, origin.end) : "";
+  if (value.type === "table" || value.type === "array" && nested2) {
+    return { type: "opaque", text: normalizeOpaque(withoutComments2(raw)) };
+  }
+  if (value.type === "array")
+    return { type: "array", items: value.items.map((item) => configValue(item, origins, src, true)) };
+  return scalar(raw.trim());
 }
-function arrayValue(text) {
-  const items = [];
-  let i = 1;
-  while (i < text.length) {
-    const ch = text[i];
-    if (ch === "]") break;
-    if (/\s/.test(ch) || ch === ",") {
-      i++;
-    } else if (ch === '"' || ch === "'") {
-      const end = stringEnd2(text, i);
-      if (end === -1) break;
-      items.push(scalar(text.slice(i, end + 1)));
-      i = end + 1;
-    } else if (ch === "[" || ch === "{") {
-      const end = closeOf2(text, i);
-      if (end === -1) break;
-      items.push({ type: "opaque", text: normalizeOpaque(text.slice(i, end + 1)) });
-      i = end + 1;
-    } else {
-      let end = i;
-      while (end < text.length && text[end] !== "," && text[end] !== "]") end++;
-      items.push(scalar(text.slice(i, end).trim()));
-      i = end;
-    }
+function collect(table, prefix, origins, src, into, skip) {
+  for (const [key, value] of table.entries) {
+    if (key === skip) continue;
+    const kind = origins.get(value)?.kind;
+    if (kind === "value") into.set(prefix + key, { value: configValue(value, origins, src, false), line: value.line });
+    else if (kind === "dotted" && value.type === "table") collect(value, `${prefix}${key}.`, origins, src, into, null);
   }
-  return { type: "array", items };
-}
-function breakAt(text, from) {
-  for (let i = from; i < text.length; i++) {
-    const code2 = text.charCodeAt(i);
-    if (code2 === 10 || code2 === 13) return i;
-  }
-  return -1;
-}
-var afterBreak = (text, at) => at + (text.charCodeAt(at) === 13 && text.charCodeAt(at + 1) === 10 ? 2 : 1);
-var Lines = class {
-  constructor(text, from, first) {
-    this.text = text;
-    this.first = first;
-    this.pos = from;
-    this.done = from > text.length;
-  }
-  text;
-  first;
-  pos;
-  done;
-  cache = [];
-  /** The line with index `i`, or undefined past the end of the text. */
-  at(i) {
-    const k = i - this.first;
-    while (this.cache.length <= k && !this.done) {
-      const end = breakAt(this.text, this.pos);
-      if (end === -1) {
-        this.cache.push(this.text.slice(this.pos));
-        this.done = true;
-      } else {
-        this.cache.push(this.text.slice(this.pos, end));
-        this.pos = afterBreak(this.text, end);
-      }
-    }
-    return this.cache[k];
-  }
-};
-function headerAt(text, needle, header2) {
-  let from = 0;
-  for (; ; ) {
-    const hit = text.indexOf(needle, from);
-    if (hit === -1) return null;
-    let start = hit;
-    while (start > 0 && text.charCodeAt(start - 1) !== 10 && text.charCodeAt(start - 1) !== 13) start--;
-    const end = breakAt(text, hit);
-    if (header2.test(text.slice(start, end === -1 ? text.length : end).trim())) {
-      let line = 0;
-      for (let i = 0; i < start; i++) {
-        const code2 = text.charCodeAt(i);
-        if (code2 === 10 || code2 === 13 && text.charCodeAt(i + 1) !== 10) line++;
-      }
-      return { line, next: end === -1 ? text.length + 1 : afterBreak(text, end) };
-    }
-    if (end === -1) return null;
-    from = end;
-  }
-}
-function readTable(lines, headerAt2) {
-  const entries = /* @__PURE__ */ new Map();
-  let i = headerAt2 + 1;
-  for (let raw = lines.at(i); raw !== void 0; raw = lines.at(i)) {
-    const line = stripTomlComment(raw);
-    if (line === "") {
-      i++;
-      continue;
-    }
-    if (line.startsWith("[")) break;
-    const match = KEY_LINE.exec(line);
-    if (match === null) return null;
-    const rawKey = match[1];
-    let key = rawKey.replace(/^'|'$/g, "");
-    if (rawKey.startsWith('"')) {
-      try {
-        key = JSON.parse(rawKey);
-      } catch {
-        return null;
-      }
-    }
-    const rest = match[2].trim();
-    const first = i;
-    const multi = rest.startsWith('"""') ? '"""' : rest.startsWith("'''") ? "'''" : null;
-    if (multi !== null) {
-      let closed = closesMultiLine(rest, 3, multi);
-      while (!closed) {
-        i++;
-        const more = lines.at(i);
-        if (more === void 0) return null;
-        closed = closesMultiLine(more, 0, multi);
-      }
-      entries.set(key, { value: { type: "opaque", text: normalizeOpaque(rest) }, line: first + 1 });
-      i++;
-      continue;
-    }
-    let value;
-    if (rest.startsWith("[")) {
-      const parts = [rest];
-      let scan = scanBrackets(rest, 0, 0);
-      while (scan !== null && scan.close === -1) {
-        i++;
-        const next = lines.at(i);
-        if (next === void 0 || HEADER_LINE.test(next.trim())) return null;
-        const added = stripTomlComment(next);
-        parts.push(added);
-        scan = scanBrackets(added, 0, scan.depth);
-      }
-      if (scan === null) return null;
-      value = arrayValue(parts.join(" "));
-    } else {
-      value = scalar(rest);
-    }
-    entries.set(key, { value, line: first + 1 });
-    i++;
-  }
-  return entries;
 }
 function readToml(text) {
   if (text.length > MAX_CONFIG_CHARS) return { ok: false, reason: "too-large" };
-  const starts = [headerAt(text, "ini_options", TABLE2), headerAt(text, "pytest", NATIVE_TABLE)];
-  if (starts[0] === null && starts[1] === null) return { ok: true, root: null };
+  const origins = /* @__PURE__ */ new Map();
+  const document2 = parseTomlDocument(text, origins);
+  if (document2 === null) return { ok: false, reason: "invalid-toml" };
+  const src = text.charCodeAt(0) === 65279 ? text.slice(1) : text;
   const entries = /* @__PURE__ */ new Map();
-  for (const start of starts) {
-    if (start === null) continue;
-    const table = readTable(new Lines(text, start.next, start.line + 1), start.line);
-    if (table === null) return { ok: false, reason: "invalid-toml" };
-    for (const [key, entry] of table) entries.set(key, entry);
+  let present = false;
+  for (const [path, skip] of [
+    [INI_OPTIONS, null],
+    [NATIVE, "ini_options"]
+  ]) {
+    const table = valueAt(document2.root, path);
+    if (table?.type !== "table" || origins.get(table)?.kind === "implicit") continue;
+    present = true;
+    collect(table, "", origins, src, entries, skip);
   }
-  return { ok: true, root: { type: "object", entries, open: false, extras: [] } };
+  return { ok: true, root: present ? { type: "object", entries, open: false, extras: [] } : null };
 }
 
 // ../core/src/testConfig/readYaml.ts
@@ -42944,7 +42666,6 @@ function detectTI12(touched, diff) {
 }
 
 // ../core/src/signals/ti13.ts
-var MAX_PER_FILE4 = 20;
 var DETAILS3 = {
   istanbul: "An Istanbul coverage hint was added, so the code it marks leaves the coverage this check grades.",
   v8: "A V8 coverage hint was added, so the code it marks leaves the coverage this check grades.",
@@ -43010,12 +42731,12 @@ function detectTI13(diff, mode) {
       else fresh.push(entry);
     }
     const newFile = file.status === "added";
-    for (const { line, family, lineLevel } of fresh.slice(0, MAX_PER_FILE4)) {
+    for (const { line, family, lineLevel } of fresh) {
       const severity2 = newFile && lineLevel ? "warn" : mode;
       signals.push({ id: "TI13", severity: severity2, path: file.path, line, detail: DETAILS3[family] });
     }
   }
-  return signals.sort(
+  return capFindings(signals, MAX_FINDINGS_PER_FILE, () => 0).kept.sort(
     (a, b) => byCodeUnit(a.path, b.path) || (a.line ?? 0) - (b.line ?? 0) || byCodeUnit(a.detail, b.detail)
   );
 }
@@ -45556,12 +45277,12 @@ function signalHint(id, label, blocks, detail) {
 var MAX_FINDINGS = 20;
 var OPEN_FINDINGS = 10;
 var SEVERITY_RANK2 = { block: 0, warn: 1, info: 2 };
-function bySeverity(signals) {
+function bySeverity2(signals) {
   const rank = (s) => SEVERITY_RANK2[s.severity] ?? 3;
   return signals.map((signal2, index) => ({ signal: signal2, index })).sort((a, b) => rank(a.signal) - rank(b.signal) || a.index - b.index).map(({ signal: signal2 }) => signal2);
 }
 function listedSignals(report) {
-  return bySeverity(report.testIntegrity.signals).slice(0, MAX_FINDINGS);
+  return bySeverity2(report.testIntegrity.signals).slice(0, MAX_FINDINGS);
 }
 var SIGNAL_MESSAGE_CODE = /^TEST_INTEGRITY_TI\d\d$/;
 var SEVERITY_ICON = { block: LEVEL_ICON.error, warn: LEVEL_ICON.warn, info: LEVEL_ICON.info };
@@ -45727,7 +45448,7 @@ function policyLines(report, maxRows) {
   if (violations.length === 0) {
     if (report.policy?.source !== "none") lines.push("No policy violations.", "");
   } else {
-    const listed2 = bySeverity(violations).slice(0, Math.min(MAX_POLICY_VIOLATIONS, maxRows));
+    const listed2 = bySeverity2(violations).slice(0, Math.min(MAX_POLICY_VIOLATIONS, maxRows));
     const violationLines = (violation) => {
       const icon = SEVERITY_ICON[violation.severity] ?? LEVEL_ICON.info;
       const id = inlineText(String(violation.id));
@@ -45820,7 +45541,7 @@ function injectionSignalsOf(report) {
   return Array.isArray(signals) ? signals : [];
 }
 function listedInjection(report) {
-  return bySeverity(injectionSignalsOf(report)).slice(0, MAX_FINDINGS);
+  return bySeverity2(injectionSignalsOf(report)).slice(0, MAX_FINDINGS);
 }
 var INJECTION_MESSAGE_CODE = /^INJECTION_PI\d\d$/;
 function injectionLines(report) {
@@ -45901,7 +45622,7 @@ function hasDependencySection(report) {
   return typeof deps.checked === "number" && deps.checked > 0 || dependencySignalsOf(report).length > 0 || report.messages.some((m) => m.code === "DEPENDENCY_CHECK_INCOMPLETE" || m.code === "DEPENDENCY_LOOKUP_UNAVAILABLE");
 }
 function listedDependencySignals(report, maxRows) {
-  return bySeverity(dependencySignalsOf(report)).slice(0, Math.min(MAX_DEPENDENCY_FINDINGS, Math.max(maxRows, 1)));
+  return bySeverity2(dependencySignalsOf(report)).slice(0, Math.min(MAX_DEPENDENCY_FINDINGS, Math.max(maxRows, 1)));
 }
 function dependencyLines(report, maxRows) {
   const label = acceptLabelOf(report);
