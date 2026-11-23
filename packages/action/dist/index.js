@@ -31316,108 +31316,6 @@ function isProsePath(path) {
   return extension === "" || PROSE_EXTENSIONS.has(extension) || isMarkdownPath(path);
 }
 
-// ../core/src/injection/policy.ts
-var INJECTION_SIGNAL_IDS = ["PI01", "PI02", "PI03", "PI04", "PI05"];
-var DEFAULT_INJECTION_SEVERITIES = {
-  PI01: "block",
-  PI02: "warn",
-  PI03: "warn",
-  PI04: "warn",
-  PI05: "warn"
-};
-var RANK = { off: 0, info: 1, warn: 2, block: 3 };
-function tidy(...lists) {
-  const out = /* @__PURE__ */ new Set();
-  for (const list of lists) {
-    if (!Array.isArray(list)) continue;
-    for (const value of list) if (typeof value === "string") out.add(value);
-  }
-  return [...out].sort(byCodeUnit);
-}
-function injectionSettingsOf(policy, base) {
-  const severities = { ...DEFAULT_INJECTION_SEVERITIES };
-  const settings2 = { exempt: [], phrases: [], severities, ignored: [] };
-  const document2 = policy?.document;
-  if (policy === void 0 || policy.source === "none" || document2 === null || document2 === void 0) return settings2;
-  const injection2 = document2.injection;
-  if (policy.source === "app") {
-    if (injection2 === void 0) return settings2;
-    const wanted2 = injection2.signals ?? {};
-    settings2.exempt = tidy(injection2.exempt);
-    settings2.phrases = tidy(injection2.phrases);
-    for (const id of INJECTION_SIGNAL_IDS) {
-      const value = Object.hasOwn(wanted2, id) ? wanted2[id] : void 0;
-      if (value !== void 0) severities[id] = value === "off" ? null : value;
-    }
-    return settings2;
-  }
-  const baseInjection = base?.kind === "document" ? base.document.injection : void 0;
-  settings2.phrases = tidy(injection2?.phrases, baseInjection?.phrases);
-  if (injection2?.exempt !== void 0 && injection2.exempt.length > 0) {
-    settings2.ignored.push({ setting: "injection.exempt", reason: "not-allowed" });
-  }
-  const wanted = injection2?.signals ?? {};
-  const baseWanted = baseInjection?.signals ?? {};
-  for (const id of INJECTION_SIGNAL_IDS) {
-    const fallback = DEFAULT_INJECTION_SEVERITIES[id];
-    const baseValue = Object.hasOwn(baseWanted, id) ? baseWanted[id] : void 0;
-    if (baseValue !== void 0 && RANK[baseValue] > RANK[fallback]) severities[id] = baseValue;
-    const value = Object.hasOwn(wanted, id) ? wanted[id] : void 0;
-    if (value === void 0) continue;
-    const current = severities[id];
-    if (RANK[value] > RANK[current]) severities[id] = value;
-    else if (RANK[value] < RANK[current]) {
-      settings2.ignored.push({ setting: `injection.signals.${id}`, reason: "looser" });
-    }
-  }
-  return settings2;
-}
-
-// ../core/src/injection/messages.ts
-var MAX_LOCATIONS = 5;
-var MAX_CUT_FILES = 5;
-var CODES = {
-  PI01: "INJECTION_PI01",
-  PI02: "INJECTION_PI02",
-  PI03: "INJECTION_PI03",
-  PI04: "INJECTION_PI04",
-  PI05: "INJECTION_PI05"
-};
-var SENTENCES = {
-  PI01: "This change adds invisible or bidirectional Unicode characters, which can hide text from a reviewer or reorder what an agent reads (PI01)",
-  PI02: "This change adds hidden Markdown text (an HTML comment, a link title or a reference definition) that addresses an agent (PI02)",
-  PI03: "This change adds known prompt-injection phrases (PI03)",
-  PI04: "This change adds a long base64 or hex blob to an agent instruction file, which an agent may decode and follow (PI04)",
-  PI05: "This change adds agent instruction files inside a vendored directory, where an agent may read them as instructions (PI05)"
-};
-function locations2(signals) {
-  const named = signals.slice(0, MAX_LOCATIONS).map((signal2) => signal2.line === null ? codeSpan(signal2.path) : `${codeSpan(signal2.path)} line ${signal2.line}`).join(", ");
-  const more = signals.length - MAX_LOCATIONS;
-  return more > 0 ? `${named} and ${more} more` : named;
-}
-function injectionMessages(signals, omitted, cut) {
-  const messages = [];
-  for (const id of INJECTION_SIGNAL_IDS) {
-    const own = signals.filter((signal2) => signal2.id === id);
-    if (own.length === 0) continue;
-    const level = own.some((s) => s.severity === "block") ? "error" : own.some((s) => s.severity === "warn") ? "warn" : "info";
-    const left = omitted.filter((entry) => entry.id === id).reduce((sum, entry) => sum + entry.count, 0);
-    const notListed = left > 0 ? ` ${left} more ${left === 1 ? "finding is" : "findings are"} not listed.` : "";
-    messages.push({ level, code: CODES[id], text: `${SENTENCES[id]}: ${locations2(own)}.${notListed}` });
-  }
-  if (cut.length > 0) {
-    const named = cut.slice(0, MAX_CUT_FILES).map(codeSpan).join(", ");
-    const more = cut.length - MAX_CUT_FILES;
-    const p = cut.some(isPriorityInjectionPath);
-    messages.push({
-      level: p ? "error" : "warn",
-      code: "INJECTION_TEXT_TRUNCATED",
-      text: `This change is too large to scan in full for hidden instructions: the content scan reads the first ${MAX_ADDED_TEXT_LINES} added lines of a file and ${MAX_ADDED_TEXT_CHARS} characters of added text per budget, so a finding past them is not seen in ${named}${more > 0 ? ` and ${more} more` : ""}. The cut files count against ${p && !cut.every(isPriorityInjectionPath) ? "both budgets" : `the budget for ${p ? "instruction and Markdown" : "other"} files`}.`
-    });
-  }
-  return messages;
-}
-
 // ../core/src/injection/phrases.ts
 var w = (...words) => words.join(" ");
 var INJECTION_PHRASES = [
@@ -31506,8 +31404,11 @@ function phraseMatcher(id, text, scope) {
 var BUILT_IN_MATCHERS = INJECTION_PHRASES.map(
   (phrase) => phraseMatcher(phrase.id, phrase.text, phrase.scope)
 );
-function policyPhraseMatchers(phrases) {
-  const texts = [...new Set(phrases.map(normalizeForPhrases).filter((text) => text !== ""))].sort(byCodeUnit).slice(0, MAX_POLICY_PHRASES);
+function policyPhraseMatchers(phrases, preferred = []) {
+  const all = [...new Set(phrases.map(normalizeForPhrases).filter((text) => text !== ""))].sort(byCodeUnit);
+  const first = new Set(preferred.map(normalizeForPhrases));
+  const ordered = [...all.filter((text) => first.has(text)), ...all.filter((text) => !first.has(text))];
+  const texts = ordered.slice(0, MAX_POLICY_PHRASES).sort(byCodeUnit);
   return texts.map((text, i) => phraseMatcher(`PX${String(i + 1).padStart(2, "0")}`, text, "any"));
 }
 function phraseOccurs(text, matcher) {
@@ -31532,6 +31433,115 @@ function firstPhrase(text, matchers, options) {
     if (phraseOccurs(text, matcher)) return matcher;
   }
   return null;
+}
+
+// ../core/src/injection/policy.ts
+var INJECTION_SIGNAL_IDS = ["PI01", "PI02", "PI03", "PI04", "PI05"];
+var DEFAULT_INJECTION_SEVERITIES = {
+  PI01: "block",
+  PI02: "warn",
+  PI03: "warn",
+  PI04: "warn",
+  PI05: "warn"
+};
+var RANK = { off: 0, info: 1, warn: 2, block: 3 };
+function tidy(...lists) {
+  const out = /* @__PURE__ */ new Set();
+  for (const list of lists) {
+    if (!Array.isArray(list)) continue;
+    for (const value of list) if (typeof value === "string") out.add(value);
+  }
+  return [...out].sort(byCodeUnit);
+}
+function injectionSettingsOf(policy, base) {
+  const severities = { ...DEFAULT_INJECTION_SEVERITIES };
+  const settings2 = { exempt: [], phrases: [], severities, ignored: [] };
+  const document2 = policy?.document;
+  if (policy === void 0 || policy.source === "none" || document2 === null || document2 === void 0) return settings2;
+  const injection2 = document2.injection;
+  if (policy.source === "app") {
+    if (injection2 === void 0) return settings2;
+    const wanted2 = injection2.signals ?? {};
+    settings2.exempt = tidy(injection2.exempt);
+    settings2.phrases = tidy(injection2.phrases);
+    for (const id of INJECTION_SIGNAL_IDS) {
+      const value = Object.hasOwn(wanted2, id) ? wanted2[id] : void 0;
+      if (value !== void 0) severities[id] = value === "off" ? null : value;
+    }
+    return settings2;
+  }
+  const baseInjection = base?.kind === "document" ? base.document.injection : void 0;
+  settings2.phrases = tidy(injection2?.phrases, baseInjection?.phrases);
+  if (settings2.phrases.length > MAX_POLICY_PHRASES) {
+    const basePhrases = tidy(baseInjection?.phrases, policy.copies?.base.injection?.phrases);
+    if (basePhrases.length > 0) settings2.basePhrases = basePhrases;
+  }
+  if (injection2?.exempt !== void 0 && injection2.exempt.length > 0) {
+    settings2.ignored.push({ setting: "injection.exempt", reason: "not-allowed" });
+  }
+  const wanted = injection2?.signals ?? {};
+  const baseWanted = baseInjection?.signals ?? {};
+  const headWanted = policy.copies === void 0 ? wanted : policy.copies.head.injection?.signals ?? {};
+  for (const id of INJECTION_SIGNAL_IDS) {
+    const fallback = DEFAULT_INJECTION_SEVERITIES[id];
+    const baseValue = Object.hasOwn(baseWanted, id) ? baseWanted[id] : void 0;
+    if (baseValue !== void 0 && RANK[baseValue] > RANK[fallback]) severities[id] = baseValue;
+    const value = Object.hasOwn(wanted, id) ? wanted[id] : void 0;
+    if (value === void 0) continue;
+    const current = severities[id];
+    if (RANK[value] > RANK[current]) severities[id] = value;
+    const headValue = Object.hasOwn(headWanted, id) ? headWanted[id] : void 0;
+    const below = policy.copies === void 0 ? value : headValue;
+    if (below !== void 0 && RANK[below] < RANK[policy.copies === void 0 ? current : fallback]) {
+      settings2.ignored.push({ setting: `injection.signals.${id}`, reason: "looser" });
+    }
+  }
+  return settings2;
+}
+
+// ../core/src/injection/messages.ts
+var MAX_LOCATIONS = 5;
+var MAX_CUT_FILES = 5;
+var CODES = {
+  PI01: "INJECTION_PI01",
+  PI02: "INJECTION_PI02",
+  PI03: "INJECTION_PI03",
+  PI04: "INJECTION_PI04",
+  PI05: "INJECTION_PI05"
+};
+var SENTENCES = {
+  PI01: "This change adds invisible or bidirectional Unicode characters, which can hide text from a reviewer or reorder what an agent reads (PI01)",
+  PI02: "This change adds hidden Markdown text (an HTML comment, a link title or a reference definition) that addresses an agent (PI02)",
+  PI03: "This change adds known prompt-injection phrases (PI03)",
+  PI04: "This change adds a long base64 or hex blob to an agent instruction file, which an agent may decode and follow (PI04)",
+  PI05: "This change adds agent instruction files inside a vendored directory, where an agent may read them as instructions (PI05)"
+};
+function locations2(signals) {
+  const named = signals.slice(0, MAX_LOCATIONS).map((signal2) => signal2.line === null ? codeSpan(signal2.path) : `${codeSpan(signal2.path)} line ${signal2.line}`).join(", ");
+  const more = signals.length - MAX_LOCATIONS;
+  return more > 0 ? `${named} and ${more} more` : named;
+}
+function injectionMessages(signals, omitted, cut) {
+  const messages = [];
+  for (const id of INJECTION_SIGNAL_IDS) {
+    const own = signals.filter((signal2) => signal2.id === id);
+    if (own.length === 0) continue;
+    const level = own.some((s) => s.severity === "block") ? "error" : own.some((s) => s.severity === "warn") ? "warn" : "info";
+    const left = omitted.filter((entry) => entry.id === id).reduce((sum, entry) => sum + entry.count, 0);
+    const notListed = left > 0 ? ` ${left} more ${left === 1 ? "finding is" : "findings are"} not listed.` : "";
+    messages.push({ level, code: CODES[id], text: `${SENTENCES[id]}: ${locations2(own)}.${notListed}` });
+  }
+  if (cut.length > 0) {
+    const named = cut.slice(0, MAX_CUT_FILES).map(codeSpan).join(", ");
+    const more = cut.length - MAX_CUT_FILES;
+    const p = cut.some(isPriorityInjectionPath);
+    messages.push({
+      level: p ? "error" : "warn",
+      code: "INJECTION_TEXT_TRUNCATED",
+      text: `This change is too large to scan in full for hidden instructions: the content scan reads the first ${MAX_ADDED_TEXT_LINES} added lines of a file and ${MAX_ADDED_TEXT_CHARS} characters of added text per budget, so a finding past them is not seen in ${named}${more > 0 ? ` and ${more} more` : ""}. The cut files count against ${p && !cut.every(isPriorityInjectionPath) ? "both budgets" : `the budget for ${p ? "instruction and Markdown" : "other"} files`}.`
+    });
+  }
+  return messages;
 }
 
 // ../core/src/injection/unicode.ts
@@ -31766,7 +31776,10 @@ function pathRules(extraExempt) {
 var ALL_SCOPES = ["any", "line-start", "hidden"];
 function scanInjection(diff, options = {}) {
   const rules = pathRules(options.exempt ?? []);
-  const matchers = [...BUILT_IN_MATCHERS, ...policyPhraseMatchers(options.phrases ?? [])];
+  const matchers = [
+    ...BUILT_IN_MATCHERS,
+    ...policyPhraseMatchers(options.phrases ?? [], options.preferredPhrases ?? [])
+  ];
   const findings = [];
   const cut = /* @__PURE__ */ new Set();
   for (const file of diff) {
@@ -31839,7 +31852,11 @@ function sortFindings(findings) {
   return findings.sort((a, b) => byCodeUnit(a.id, b.id) || byCodeUnit(a.path, b.path) || (a.line ?? 0) - (b.line ?? 0));
 }
 function detectInjection(diff, settings2) {
-  const scan = scanInjection(diff, { exempt: settings2.exempt, phrases: settings2.phrases });
+  const scan = scanInjection(diff, {
+    exempt: settings2.exempt,
+    phrases: settings2.phrases,
+    ...settings2.basePhrases === void 0 ? {} : { preferredPhrases: settings2.basePhrases }
+  });
   const kept = [];
   const omitted = /* @__PURE__ */ new Map();
   const perFile = /* @__PURE__ */ new Map();
@@ -31956,18 +31973,33 @@ function resolveSeverity(policy, id, fallback) {
     return value === "off" ? { severity: null, lowered: false } : { severity: value, lowered: false };
   }
   if (policy.source === "file") {
-    if (RANK2[value] > RANK2[fallback]) return { severity: value, lowered: false };
-    if (RANK2[value] < RANK2[fallback]) return { severity: fallback, lowered: true };
-    return { severity: fallback, lowered: false };
+    const lowered = ruleLowered(policy, id, fallback);
+    if (RANK2[value] > RANK2[fallback]) return { severity: value, lowered };
+    return { severity: fallback, lowered };
   }
   return { severity: fallback, lowered: false };
 }
+function ruleOf(document2, id) {
+  const rules = document2?.policy?.rules;
+  return rules !== void 0 && Object.hasOwn(rules, id) ? rules[id] : void 0;
+}
+function effectiveRank(floor, value) {
+  return Math.max(RANK2[floor], value === void 0 ? -1 : RANK2[value]);
+}
+function ruleLowered(policy, id, fallback) {
+  const head = ruleOf(policy.copies?.head ?? policy.document ?? void 0, id);
+  if (head !== void 0 && RANK2[head] < RANK2[fallback]) return true;
+  if (policy.copies === void 0) return false;
+  return effectiveRank(fallback, head) < effectiveRank(fallback, ruleOf(policy.copies.base, id));
+}
 function resolveKeyedSeverity(policy, id, keyed) {
-  const { featureValue, featureSetting, fallback } = keyed;
+  const { feature, featureSetting, fallback } = keyed;
   const rules = policy.document?.policy?.rules;
   const ruleValue = rules !== void 0 && Object.hasOwn(rules, id) ? rules[id] : void 0;
   const none = { severity: fallback, ignored: [], lowered: false };
   if (policy.document === null || policy.document === void 0) return none;
+  const featureValue = feature(policy.document);
+  const headFeatureValue = feature(policy.copies?.head ?? policy.document);
   if (policy.source === "app") {
     const set = [featureValue, ruleValue].filter((value) => value !== void 0);
     if (set.length === 0) return none;
@@ -31983,9 +32015,8 @@ function resolveKeyedSeverity(policy, id, keyed) {
     for (const value of [featureValue, ruleValue]) {
       if (value !== void 0 && RANK2[value] > RANK2[severity2]) severity2 = value;
     }
-    const ignored = featureValue !== void 0 && RANK2[featureValue] < RANK2[fallback] ? [{ setting: featureSetting, reason: "looser" }] : [];
-    const lowered = ruleValue !== void 0 && RANK2[ruleValue] < RANK2[fallback];
-    return { severity: severity2, ignored, lowered };
+    const ignored = headFeatureValue !== void 0 && RANK2[headFeatureValue] < RANK2[fallback] ? [{ setting: featureSetting, reason: "looser" }] : [];
+    return { severity: severity2, ignored, lowered: ruleValue !== void 0 && ruleLowered(policy, id, fallback) };
   }
   return none;
 }
@@ -32052,7 +32083,7 @@ function agentPolicyOf(policy, from) {
     return { ...empty, labels, extraLogins, listsIncomplete, policyFileEdited, maxFiles, maxChangedLines };
   }
   const resolved = resolveKeyedSeverity(policy, "P11", {
-    featureValue: head?.protected_paths_mode,
+    feature: (document2) => document2.agents?.protected_paths_mode,
     featureSetting: "agents.protected_paths_mode",
     fallback: "block"
   });
@@ -33137,7 +33168,7 @@ function consistencySeverity(policy) {
     return { severity: null, ignored: [], lowered: false };
   }
   return resolveKeyedSeverity(policy, "P07", {
-    featureValue: policy.document.setup?.consistency,
+    feature: (document2) => document2.setup?.consistency,
     featureSetting: "setup.consistency",
     fallback: "warn"
   });
@@ -37535,10 +37566,21 @@ function applySignalOverrides(signals, omitted, overrides, mode) {
     if (wanted !== void 0) {
       if (overrides.kind === "replace") {
         severity2 = wanted;
-      } else if (RANK4[wanted] > RANK4[severity2]) {
-        severity2 = wanted;
-      } else if (RANK4[wanted] < RANK4[severity2]) {
-        lowered.add(signal2.id);
+      } else {
+        if (RANK4[wanted] > RANK4[severity2]) severity2 = wanted;
+        const copies = overrides.copies;
+        if (copies === void 0) {
+          if (RANK4[wanted] < RANK4[signal2.severity]) lowered.add(signal2.id);
+        } else {
+          const head = copies.head;
+          const base = copies.base;
+          const headValue = Object.hasOwn(head, signal2.id) ? head[signal2.id] : void 0;
+          const baseValue = Object.hasOwn(base, signal2.id) ? base[signal2.id] : void 0;
+          const effective2 = (value) => Math.max(RANK4[signal2.severity], value === void 0 ? -1 : RANK4[value]);
+          if (headValue !== void 0 && RANK4[headValue] < RANK4[signal2.severity] || effective2(headValue) < effective2(baseValue)) {
+            lowered.add(signal2.id);
+          }
+        }
       }
     }
     if (mode === "warn" && severity2 === "block") severity2 = "warn";
@@ -45006,26 +45048,252 @@ function parseJunitSources(sources) {
   };
 }
 
+// ../core/src/policy/unite.ts
+var SEVERITY_RANK2 = { off: 0, info: 1, warn: 2, block: 3 };
+var MODE_RANK = { off: 0, warn: 1, block: 2 };
+var PROTECTED_MODE_RANK = { warn: 0, block: 1 };
+function strictest(rank, ...values) {
+  let top;
+  for (const value of values) if (value !== void 0 && (top === void 0 || rank[value] > rank[top])) top = value;
+  return top;
+}
+function belowBase(rank, floor, head, base) {
+  if (base === void 0) return false;
+  const effective2 = (value) => Math.max(rank[floor], value === void 0 ? -1 : rank[value]);
+  return effective2(head) < effective2(base);
+}
+function larger(a, b) {
+  return a === void 0 ? b : b === void 0 ? a : Math.max(a, b);
+}
+function smaller(a, b) {
+  return a === void 0 ? b : b === void 0 ? a : Math.min(a, b);
+}
+function missingFromHead(head, base, key) {
+  const present = new Set((head ?? []).map(key));
+  const out = [];
+  for (const entry of base ?? []) {
+    const id = key(entry);
+    if (present.has(id)) continue;
+    present.add(id);
+    out.push(entry);
+  }
+  return out;
+}
+function union(head, base, key = String) {
+  if (head === void 0 && base === void 0) return void 0;
+  return [...head ?? [], ...missingFromHead(head, base, key)];
+}
+function eitherTrue(head, base) {
+  return head === true || base === true ? true : head;
+}
+function eitherFalse(head, base) {
+  return head === false || base === false ? false : head;
+}
+var hookKey = (hook2) => JSON.stringify([hook2.event, hook2.matcher ?? null]);
+function put(object, key, value) {
+  if (value !== void 0) object[key] = value;
+}
+function strictestRecord(rank, head, base) {
+  if (head === void 0 && base === void 0) return void 0;
+  const out = {};
+  const ids = /* @__PURE__ */ new Set([...Object.keys(head ?? {}), ...Object.keys(base ?? {})]);
+  for (const id of ids) {
+    const mine = head !== void 0 && Object.hasOwn(head, id) ? head[id] : void 0;
+    const theirs = base !== void 0 && Object.hasOwn(base, id) ? base[id] : void 0;
+    const value = strictest(rank, mine, theirs);
+    if (value !== void 0) out[id] = value;
+  }
+  return out;
+}
+function uniteDocuments(head, base, ignored) {
+  const looser = (setting) => ignored.push({ setting, reason: "looser" });
+  const united = { version: head.version };
+  {
+    const out = {};
+    const threshold = larger(head.coverage?.threshold, base.coverage?.threshold);
+    put(out, "threshold", threshold);
+    put(out, "exclude", head.coverage?.exclude);
+    if (head.coverage !== void 0 && Object.hasOwn(head.coverage, "root"))
+      out.root = head.coverage.root;
+    const baseThreshold = base.coverage?.threshold;
+    if (baseThreshold !== void 0 && (head.coverage?.threshold ?? -Infinity) < baseThreshold) {
+      looser("coverage.threshold");
+    }
+    if (head.coverage !== void 0 || Object.keys(out).length > 0) united.coverage = out;
+  }
+  {
+    const h = head.setup;
+    const b = base.setup;
+    const out = {};
+    put(out, "require", eitherTrue(h?.require, b?.require));
+    if (b?.require === true && h?.require !== true) looser("setup.require");
+    put(out, "expect", union(h?.expect, b?.expect));
+    if (missingFromHead(h?.expect, b?.expect, String).length > 0) looser("setup.expect");
+    put(out, "consistency", strictest(SEVERITY_RANK2, h?.consistency, b?.consistency));
+    if (belowBase(SEVERITY_RANK2, "warn", h?.consistency, b?.consistency)) looser("setup.consistency");
+    for (const key of [
+      "forbidden_permissions",
+      "required_permissions_deny",
+      "forbidden_mcp_servers",
+      "forbidden_files"
+    ]) {
+      put(out, key, union(h?.[key], b?.[key]));
+      if (missingFromHead(h?.[key], b?.[key], String).length > 0) looser(`setup.${key}`);
+    }
+    put(out, "required_hooks", union(h?.required_hooks, b?.required_hooks, hookKey));
+    if (missingFromHead(h?.required_hooks, b?.required_hooks, hookKey).length > 0) looser("setup.required_hooks");
+    const headList = h?.allowed_mcp_servers ?? [];
+    const baseList = b?.allowed_mcp_servers ?? [];
+    if (h?.allowed_mcp_servers !== void 0 || b?.allowed_mcp_servers !== void 0) {
+      let allowed;
+      if (headList.length > 0 && baseList.length > 0) {
+        const shared = headList.filter((server) => baseList.includes(server));
+        allowed = shared.length > 0 ? [...new Set(shared)] : [...baseList];
+      } else if (baseList.length > 0) {
+        allowed = [...baseList];
+      } else {
+        allowed = [...headList];
+      }
+      out.allowed_mcp_servers = allowed;
+      if (baseList.length > 0 && (headList.length === 0 || headList.some((server) => !baseList.includes(server)))) {
+        looser("setup.allowed_mcp_servers");
+      }
+    }
+    if (h !== void 0 || Object.keys(out).length > 0) united.setup = out;
+  }
+  {
+    const h = head.test_integrity;
+    const b = base.test_integrity;
+    const out = {};
+    put(out, "mode", strictest(MODE_RANK, h?.mode, b?.mode));
+    const modeDropped = h?.mode !== void 0 ? b?.mode !== void 0 && MODE_RANK[h.mode] < MODE_RANK[b.mode] : belowBase(MODE_RANK, "warn", void 0, b?.mode);
+    if (modeDropped) looser("test_integrity.mode");
+    put(out, "signals", strictestRecord(SEVERITY_RANK2, h?.signals, b?.signals));
+    put(out, "accept_label", h?.accept_label);
+    if (h !== void 0 || Object.keys(out).length > 0) united.test_integrity = out;
+  }
+  {
+    const out = {};
+    put(out, "quarantine", eitherFalse(head.flaky?.quarantine, base.flaky?.quarantine));
+    if (base.flaky?.quarantine === false && head.flaky?.quarantine !== false) looser("flaky.quarantine");
+    if (head.flaky !== void 0 || Object.keys(out).length > 0) united.flaky = out;
+  }
+  {
+    const out = {};
+    put(out, "required", head.policy?.required);
+    put(out, "rules", strictestRecord(SEVERITY_RANK2, head.policy?.rules, base.policy?.rules));
+    if (head.policy !== void 0 || Object.keys(out).length > 0) united.policy = out;
+  }
+  {
+    const h = head.agents;
+    const b = base.agents;
+    const out = {};
+    for (const key of ["labels", "extra_logins", "protected_paths"]) {
+      put(out, key, union(h?.[key], b?.[key]));
+      if (missingFromHead(h?.[key], b?.[key], String).length > 0) looser(`agents.${key}`);
+    }
+    put(out, "protected_paths_mode", strictest(PROTECTED_MODE_RANK, h?.protected_paths_mode, b?.protected_paths_mode));
+    if (b?.protected_paths_mode === "block" && h?.protected_paths_mode !== "block") {
+      looser("agents.protected_paths_mode");
+    }
+    put(out, "require_human_approval", eitherTrue(h?.require_human_approval, b?.require_human_approval));
+    if (b?.require_human_approval === true && h?.require_human_approval !== true) {
+      looser("agents.require_human_approval");
+    }
+    for (const key of ["max_files", "max_changed_lines"]) {
+      put(out, key, smaller(h?.[key], b?.[key]));
+      const cap = b?.[key];
+      if (cap !== void 0 && (h?.[key] ?? Infinity) > cap) looser(`agents.${key}`);
+    }
+    if (h !== void 0 || Object.keys(out).length > 0) united.agents = out;
+  }
+  {
+    const h = head.dependencies;
+    const b = base.dependencies;
+    const out = {};
+    put(out, "lookup", eitherTrue(h?.lookup, b?.lookup));
+    if (b?.lookup === true && h?.lookup !== true) looser("dependencies.lookup");
+    put(out, "registries", h?.registries);
+    put(out, "min_age_days", larger(h?.min_age_days, b?.min_age_days));
+    put(out, "min_weekly_downloads", larger(h?.min_weekly_downloads, b?.min_weekly_downloads));
+    put(out, "allowed_hosts", h?.allowed_hosts);
+    for (const [key, fallback] of [
+      ["min_age_days", DEFAULT_MIN_AGE_DAYS],
+      ["min_weekly_downloads", DEFAULT_MIN_WEEKLY_DOWNLOADS]
+    ]) {
+      const given = b?.[key];
+      if (given !== void 0 && Math.max(fallback, h?.[key] ?? -Infinity) < Math.max(fallback, given)) {
+        looser(`dependencies.${key}`);
+      }
+    }
+    if (h !== void 0 || Object.keys(out).length > 0) united.dependencies = out;
+  }
+  {
+    const h = head.injection;
+    const b = base.injection;
+    const out = {};
+    put(out, "exempt", h?.exempt);
+    put(out, "phrases", union(h?.phrases, b?.phrases));
+    if (missingFromHead(h?.phrases, b?.phrases, String).length > 0) looser("injection.phrases");
+    put(out, "signals", strictestRecord(SEVERITY_RANK2, h?.signals, b?.signals));
+    for (const id of Object.keys(DEFAULT_INJECTION_SEVERITIES)) {
+      const baseValue = b?.signals !== void 0 && Object.hasOwn(b.signals, id) ? b.signals[id] : void 0;
+      const headValue = h?.signals !== void 0 && Object.hasOwn(h.signals, id) ? h.signals[id] : void 0;
+      if (belowBase(SEVERITY_RANK2, DEFAULT_INJECTION_SEVERITIES[id], headValue, baseValue)) {
+        looser(`injection.signals.${id}`);
+      }
+    }
+    if (h !== void 0 || Object.keys(out).length > 0) united.injection = out;
+  }
+  return united;
+}
+function uniteFilePolicy(policy, base) {
+  if (policy.source !== "file" || policy.document === null || base === void 0 || base.kind !== "document") {
+    return { policy, ignored: [] };
+  }
+  const ignored = [];
+  const document2 = uniteDocuments(policy.document, base.document, ignored);
+  const seen = /* @__PURE__ */ new Set();
+  const records = ignored.filter((record) => {
+    if (seen.has(record.setting)) return false;
+    seen.add(record.setting);
+    return true;
+  }).sort((a, b) => byCodeUnit(a.setting, b.setting));
+  return { policy: { ...policy, document: document2, copies: { head: policy.document, base: base.document } }, ignored: records };
+}
+
 // ../core/src/policy/apply.ts
 var STRICTNESS2 = { off: 0, warn: 1, block: 2 };
 function normalizedRoot(root) {
   return parseCoverageRoot(root, "the org policy's coverage.root");
 }
-function applyPolicy(layers, policy) {
-  const document2 = policy.document;
-  if (policy.source === "none" || document2 === null) return { inputs: layers.resolved, ignored: [] };
-  const app = policy.source === "app";
+function applyPolicy(layers, policy, base) {
+  const united = uniteFilePolicy(policy, base);
+  const applied = united.policy;
+  const document2 = applied.document;
+  if (applied.source === "none" || document2 === null) return { inputs: layers.resolved, ignored: [], policy: applied };
+  const app = applied.source === "app";
+  const head = applied.copies?.head ?? document2;
   const ignored = [];
   const inputs = { ...layers.resolved };
-  applyCoverage(layers, document2, app, inputs, ignored);
-  applySetup(layers, document2, app, inputs, ignored);
-  const modeSettings = applyMode(layers, document2, app, ignored);
+  applyCoverage(layers, document2, head, app, inputs, ignored);
+  applySetup(layers, document2, head, app, inputs, ignored);
+  const modeSettings = applyMode(layers, document2, head, app, ignored);
   if (modeSettings !== void 0) inputs.testIntegrityMode = modeSettings;
   applyDependencies(layers, document2, app, inputs, ignored);
   const integrity = document2.test_integrity;
-  const result = { inputs, ignored: [] };
+  const result = { inputs, ignored: [], policy: applied };
   if (integrity?.signals !== void 0 && Object.keys(integrity.signals).length > 0) {
-    result.signalOverrides = { kind: app ? "replace" : "raise", severities: { ...integrity.signals } };
+    result.signalOverrides = {
+      kind: app ? "replace" : "raise",
+      severities: { ...integrity.signals },
+      ...applied.copies === void 0 ? {} : {
+        copies: {
+          head: { ...applied.copies.head.test_integrity?.signals },
+          base: { ...applied.copies.base.test_integrity?.signals }
+        }
+      }
+    };
   }
   if (integrity?.accept_label !== void 0) {
     if (app) result.acceptLabel = integrity.accept_label;
@@ -45034,6 +45302,7 @@ function applyPolicy(layers, policy) {
   if (!app && document2.policy?.required !== void 0) {
     ignored.push({ setting: "policy.required", reason: "not-allowed" });
   }
+  ignored.push(...united.ignored);
   const seen = /* @__PURE__ */ new Set();
   result.ignored = ignored.filter((record) => {
     const key = `${record.setting}\0${record.layer ?? ""}`;
@@ -45043,28 +45312,32 @@ function applyPolicy(layers, policy) {
   }).sort((a, b) => byCodeUnit(a.setting, b.setting) || byCodeUnit(a.layer ?? "", b.layer ?? ""));
   return result;
 }
-function applyCoverage(layers, document2, app, inputs, ignored) {
+function applyCoverage(layers, document2, headDocument, app, inputs, ignored) {
   const { config, raw, resolved } = layers;
   const coverage2 = document2.coverage;
   if (coverage2 === void 0) return;
   if (coverage2.threshold !== void 0) {
     const theirs = coverage2.threshold;
     const inForce = resolved.threshold;
-    if (inForce === null) {
-      inputs.threshold = theirs;
-    } else {
-      if (app ? inForce < theirs : theirs < inForce) {
+    const applied = inForce === null ? theirs : Math.max(theirs, inForce);
+    if (app) {
+      if (inForce !== null && inForce < theirs) {
         const inputInForce = raw.threshold !== void 0 && !(Number(raw.threshold.trim()) < inForce);
         ignored.push({
           setting: "coverage.threshold",
           reason: "looser",
-          ...app ? { layer: inputInForce ? "input" : "config" } : {},
-          given: Math.min(theirs, inForce),
-          applied: Math.max(theirs, inForce)
+          layer: inputInForce ? "input" : "config",
+          given: inForce,
+          applied
         });
       }
-      inputs.threshold = Math.max(theirs, inForce);
+    } else {
+      const headValue = headDocument.coverage?.threshold;
+      if (headValue !== void 0 && headValue < applied) {
+        ignored.push({ setting: "coverage.threshold", reason: "looser", given: headValue, applied });
+      }
     }
+    inputs.threshold = applied;
   }
   if (coverage2.exclude !== void 0) {
     if (app) {
@@ -45097,7 +45370,7 @@ function applyCoverage(layers, document2, app, inputs, ignored) {
     }
   }
 }
-function applySetup(layers, document2, app, inputs, ignored) {
+function applySetup(layers, document2, headDocument, app, inputs, ignored) {
   const { config, raw, resolved } = layers;
   const setup2 = document2.setup;
   if (setup2 === void 0) return;
@@ -45108,13 +45381,14 @@ function applySetup(layers, document2, app, inputs, ignored) {
         ignored.push({ setting: "setup.require", reason: "looser", layer });
       }
       inputs.requireAgentSetup = true;
-    } else if (!app && resolved.requireAgentSetup) {
-      ignored.push({ setting: "setup.require", reason: "looser" });
     }
   }
+  if (!app && headDocument.setup?.require === false && resolved.requireAgentSetup) {
+    ignored.push({ setting: "setup.require", reason: "looser" });
+  }
   if (setup2.expect !== void 0) {
-    const union = [.../* @__PURE__ */ new Set([...resolved.expectAgentSetup ?? [], ...setup2.expect])];
-    if (union.length > 0) inputs.expectAgentSetup = union;
+    const union2 = [.../* @__PURE__ */ new Set([...resolved.expectAgentSetup ?? [], ...setup2.expect])];
+    if (union2.length > 0) inputs.expectAgentSetup = union2;
   }
 }
 function applyDependencies(layers, document2, app, inputs, ignored) {
@@ -45147,7 +45421,7 @@ function applyDependencies(layers, document2, app, inputs, ignored) {
     }
   };
 }
-function applyMode(layers, document2, app, ignored) {
+function applyMode(layers, document2, headDocument, app, ignored) {
   const given = layers.resolved.testIntegrityMode;
   const mode = document2.test_integrity?.mode;
   if (mode === void 0) return given;
@@ -45161,7 +45435,8 @@ function applyMode(layers, document2, app, ignored) {
   } else {
     const inForce = given?.input ?? "warn";
     const today = given?.config !== void 0 && STRICTNESS2[given.config] > STRICTNESS2[inForce] ? given.config : inForce;
-    if (STRICTNESS2[mode] < STRICTNESS2[today]) {
+    const headMode = headDocument.test_integrity?.mode;
+    if (headMode !== void 0 && STRICTNESS2[headMode] < STRICTNESS2[today]) {
       ignored.push({ setting: "test_integrity.mode", reason: "looser" });
     }
   }
@@ -45240,9 +45515,9 @@ function signalHint(id, label, blocks, detail) {
 }
 var MAX_FINDINGS = 20;
 var OPEN_FINDINGS = 10;
-var SEVERITY_RANK2 = { block: 0, warn: 1, info: 2 };
+var SEVERITY_RANK3 = { block: 0, warn: 1, info: 2 };
 function bySeverity2(signals) {
-  const rank = (s) => SEVERITY_RANK2[s.severity] ?? 3;
+  const rank = (s) => SEVERITY_RANK3[s.severity] ?? 3;
   return signals.map((signal2, index) => ({ signal: signal2, index })).sort((a, b) => rank(a.signal) - rank(b.signal) || a.index - b.index).map(({ signal: signal2 }) => signal2);
 }
 function listedSignals(report) {
@@ -46501,27 +46776,27 @@ function utf8Bytes(text) {
   }
   return out.subarray(0, n);
 }
-function put(block, offset, text) {
+function put2(block, offset, text) {
   for (let i = 0; i < text.length; i++) block[offset + i] = text.charCodeAt(i);
 }
 var octal = (value, digits) => value.toString(8).padStart(digits, "0");
 function header(name, size) {
   const block = new Uint8Array(BLOCK);
-  put(block, 0, name);
-  put(block, 100, "0000644\0");
-  put(block, 108, "0000000\0");
-  put(block, 116, "0000000\0");
-  put(block, 124, `${octal(size, 11)}\0`);
-  put(block, 136, "00000000000\0");
-  put(block, 148, "        ");
-  put(block, 156, "0");
-  put(block, 257, "ustar\0");
-  put(block, 263, "00");
-  put(block, 329, "0000000\0");
-  put(block, 337, "0000000\0");
+  put2(block, 0, name);
+  put2(block, 100, "0000644\0");
+  put2(block, 108, "0000000\0");
+  put2(block, 116, "0000000\0");
+  put2(block, 124, `${octal(size, 11)}\0`);
+  put2(block, 136, "00000000000\0");
+  put2(block, 148, "        ");
+  put2(block, 156, "0");
+  put2(block, 257, "ustar\0");
+  put2(block, 263, "00");
+  put2(block, 329, "0000000\0");
+  put2(block, 337, "0000000\0");
   let sum = 0;
   for (const byte of block) sum += byte;
-  put(block, 148, `${octal(sum, 6)}\0 `);
+  put2(block, 148, `${octal(sum, 6)}\0 `);
   return block;
 }
 function buildUploadTar(entries) {
@@ -48014,8 +48289,6 @@ async function gatherSources(deps, options) {
   if (staleInstructionSources !== void 0) out.staleInstructionSources = staleInstructionSources;
   const dependencySources = await gatherDependencySources(deps, options);
   if (dependencySources !== void 0) out.dependencySources = dependencySources;
-  const policyFileBase = await gatherPolicyFileBase(deps, options);
-  if (policyFileBase !== void 0) out.policyFileBase = policyFileBase;
   return out;
 }
 async function headIsInBase(revisions) {
@@ -49398,7 +49671,12 @@ async function runUnsafe(deps) {
   );
   if (!resolved.ok) throw resolved.errors[0];
   const { policy, uploadMessageMaxBytes, quarantine, uploadJunit } = await obtainPolicy(deps, policyChoice, appOrigin);
-  const application = policy === void 0 ? void 0 : applyPolicy({ config, raw: rawInputs, resolved: resolved.inputs }, policy);
+  const policyFileBase = await gatherPolicyFileBase(
+    deps,
+    earlyDiff === void 0 ? { policy, diff: { unavailable: "pr-number mode" }, checkout: "pr-number", revisions: void 0 } : { policy, diff: earlyDiff.diff, checkout: earlyDiff.checkout, revisions: earlyDiff.revisions }
+  );
+  const application = policy === void 0 ? void 0 : applyPolicy({ config, raw: rawInputs, resolved: resolved.inputs }, policy, policyFileBase);
+  const appliedPolicy = application?.policy ?? policy;
   const effective2 = application?.inputs ?? resolved.inputs;
   const {
     coverageFile,
@@ -49448,7 +49726,7 @@ async function runUnsafe(deps) {
     repoFiles,
     testIntegrityMode,
     dependencySettings,
-    policy,
+    policy: appliedPolicy,
     log: (line) => deps.info(line),
     warn: (line) => deps.warning(line)
   });
@@ -49482,7 +49760,8 @@ async function runUnsafe(deps) {
     configPath: configInput || void 0,
     configSource,
     headConfigExclude,
-    policy,
+    policy: appliedPolicy,
+    policyFileBase,
     policyIgnored: application?.ignored,
     signalOverrides: application?.signalOverrides,
     agentPrFacts,
