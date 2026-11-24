@@ -2,13 +2,15 @@ import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSy
 import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import type { Report, ResolvedPolicy } from "@pharn-ci/core";
 import { describe, expect, it } from "vitest";
+import type { PolicyDocument } from "../../core/src/policy/types.js";
 import { expectValidReport } from "../../core/test/schema.js";
 import { harness, PR_CONTEXT } from "./harness.js";
 
-// applyPolicy(), fetchPolicy(), readPolicyFile(), run() and the fixtures under fixtures/policy-api/ are loaded inside
+// applyPolicy(), fetchAppPolicy(), readPolicyFile(), run() and the fixtures under fixtures/policy-api/ are loaded inside
 // the test body: the AC test is written before the org policy exists, so nothing the build adds may run while the
-// file loads. fetchPolicy() and run() get a fake fetch serving one envelope; readPolicyFile() reads a real temporary
+// file loads. fetchAppPolicy() and run() get a fake fetch serving one envelope; readPolicyFile() reads a real temporary
 // file.
 
 const ROOT = new URL("../../../", import.meta.url);
@@ -21,10 +23,6 @@ const TEXT = {
   coverageRoot: "coverage root",
   noCoverageFile: "no coverage file",
 };
-
-type Ignored = { setting: string; layer: string; reason: string };
-type Application = { inputs: Record<string, unknown>; ignored: Ignored[]; acceptLabel?: string };
-type Message = { level: string; code: string; text: string };
 
 /** Keys this item carries for later items and never applies. */
 const CARRIED = {
@@ -41,8 +39,21 @@ const CARRIED = {
 };
 const REQUIRED = { version: 1, policy: { required: true } };
 
-const app = (document: unknown) => ({ source: "app", version: 3, fetchedAt: NOW.toISOString(), document });
-const file = (document: unknown) => ({ source: "file", version: null, path: "policy/org.json", document });
+type Ok<T> = Extract<T, { ok: true }>;
+
+// The documents are raw JSON objects handed straight to applyPolicy, so each is cast to the validated document type.
+const app = (document: unknown): ResolvedPolicy => ({
+  source: "app",
+  version: 3,
+  fetchedAt: NOW.toISOString(),
+  document: document as PolicyDocument,
+});
+const file = (document: unknown): ResolvedPolicy => ({
+  source: "file",
+  version: null,
+  path: "policy/org.json",
+  document: document as PolicyDocument,
+});
 
 async function realReadFile(path: string): Promise<string | null> {
   try {
@@ -86,25 +97,24 @@ async function actionReport(policy: string, envelope: string) {
   await run(h.deps);
   const text = h.written[h.outputs["report-path"] ?? ""];
   if (text === undefined) throw new Error(`${policy}: no report was written; failed: ${JSON.stringify(h.failed)}`);
-  const report = JSON.parse(text) as { messages: Message[] };
+  const report = JSON.parse(text) as Report;
   expectValidReport(report);
   return { report, calls };
 }
 
 describe("policy keys this item does not apply", () => {
   it("AC-24: policy.required from a file is not allowed and from the app changes nothing; agents, dependencies, flaky and setup.forbidden_files are carried, not applied; applyPolicy is pure", async () => {
-    const core = (await import("@pharn-ci/core")) as unknown as {
-      resolveInputs: (config: unknown, raw: unknown, text: unknown) => { ok: boolean; inputs: Record<string, unknown> };
-      applyPolicy: (layers: unknown, policy: unknown) => Application;
-    };
+    const core = await import("@pharn-ci/core");
     const raw = { coverageFile: "coverage/lcov.info", threshold: "70", testIntegrity: "warn", exclude: ["src/**"] };
     const config = { coverage: { exclude: ["docs/**"] }, setup: { require: false } };
-    const resolved = core.resolveInputs(config, raw, TEXT);
+    // Typed as the ok result, which the next line asserts it is.
+    const resolved = core.resolveInputs(config, raw, TEXT) as Ok<ReturnType<typeof core.resolveInputs>>;
     expect(resolved.ok).toBe(true);
     const layers = { config, raw, resolved: resolved.inputs };
 
+    // CORE-123: a policy file's record carries no layer (it was "policy-file"); only an app policy's looser record has one.
     const fileRequired = core.applyPolicy(layers, file(REQUIRED));
-    expect(fileRequired.ignored).toEqual([{ setting: "policy.required", layer: "policy-file", reason: "not-allowed" }]);
+    expect(fileRequired.ignored).toEqual([{ setting: "policy.required", reason: "not-allowed" }]);
     expect(fileRequired.inputs).toEqual(resolved.inputs);
 
     const appRequired = core.applyPolicy(layers, app(REQUIRED));
@@ -129,7 +139,7 @@ describe("policy keys this item does not apply", () => {
       const first = core.applyPolicy(layers, policy);
       const isApp = policy.source === "app";
       expect(first.ignored, policy.source).toEqual(
-        isApp ? [] : [{ setting: "dependencies.registries", layer: "policy-file", reason: "not-allowed" }],
+        isApp ? [] : [{ setting: "dependencies.registries", reason: "not-allowed" }],
       );
       expect(first.inputs, policy.source).toEqual({
         ...resolved.inputs,
@@ -146,17 +156,19 @@ describe("policy keys this item does not apply", () => {
       // Pure: the same arguments give deep-equal results, and the arguments are not changed.
       expect(core.applyPolicy(layers, policy), policy.source).toEqual(first);
     }
-    expect(layers.resolved).toEqual(core.resolveInputs(config, raw, TEXT).inputs);
+    expect(layers.resolved).toEqual((core.resolveInputs(config, raw, TEXT) as typeof resolved).inputs);
 
     // The carried keys stay in the document the fetch and the file reader return.
-    const { fetchPolicy } = await import("../src/policy-fetch.js");
+    const { fetchAppPolicy } = await import("../src/policy-fetch.js");
     const h = harness({ context: prContext() as never });
     withPolicyDeps(h, envelopeFor(CARRIED));
-    const fetched = (await fetchPolicy(h.deps as never, {
-      mode: "auto",
-      origin: new URL("https://pharn.dev"),
-      repository: "acme/widgets",
-    })) as { source: string; document: unknown };
+    const fetched = (
+      await fetchAppPolicy(h.deps as never, {
+        mode: "auto",
+        origin: new URL("https://pharn.dev"),
+        repository: "acme/widgets",
+      })
+    ).policy as { source: string; document: unknown };
     expect(fetched.source).toBe("app");
     expect(fetched.document).toEqual(CARRIED);
 
@@ -164,10 +176,7 @@ describe("policy keys this item does not apply", () => {
     try {
       mkdirSync(join(dir, "policy"));
       writeFileSync(join(dir, "policy/org.json"), JSON.stringify(CARRIED));
-      const nodeIo = (await import("../../node-io/src/index.js")) as unknown as {
-        readPolicyFile: (deps: unknown, options: { root: string; path: string; label: string }) => Promise<unknown>;
-        lstatPath: unknown;
-      };
+      const nodeIo = await import("../../node-io/src/index.js");
       const fromFile = (await nodeIo.readPolicyFile(
         { readFile: realReadFile, resolvePath: resolve, lstat: nodeIo.lstatPath },
         { root: dir, path: "policy/org.json", label: "the policy input" },

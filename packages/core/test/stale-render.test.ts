@@ -1,17 +1,18 @@
 import { describe, expect, it } from "vitest";
-import { buildReport, type Report, renderMarkdown, scanAgentSetup, staleInstructionMessages } from "../src/index.js";
-import type { ReportStaleInstruction } from "../src/report.js";
+import { type Report, renderMarkdown, scanAgentSetup } from "../src/index.js";
+import { buildReport } from "../src/report.js";
+import { type StaleFinding, staleInstructionMessages } from "../src/setup/stale.js";
 
 // Stale instructions (Horizon 2 item H3): the "📄 Instructions" section of the PR comment.
 
-const STALE: ReportStaleInstruction[] = [
+const STALE: StaleFinding[] = [
   { id: "SI01", path: "CLAUDE.md", line: 4, kind: "command", token: "pnpm run format" },
   { id: "SI02", path: "CLAUDE.md", line: 11, kind: "path", token: "scripts/changelog.sh" },
   { id: "SI03", path: "CLAUDE.md", line: 15, kind: "file" },
-  { id: "SI04", path: "AGENTS.md", line: 1, kind: "path", token: "src/index.ts" },
 ];
+// CORE-144: the SI04 entry (and its line and hint below) left with SI04, which is no longer emitted.
 
-function reportWith(stale: ReportStaleInstruction[]): Report {
+function reportWith(stale: StaleFinding[]): Report {
   return buildReport({
     version: "0.7.0",
     diffCoverage: null,
@@ -24,7 +25,7 @@ function reportWith(stale: ReportStaleInstruction[]): Report {
 }
 
 describe("the Instructions section", () => {
-  it("lists each finding with its id, location and fixed words, warnings first, then one hint per id; the messages section leaves the stale messages out", () => {
+  it("lists each finding with its id, location and fixed words, then one hint per id; the messages section leaves the stale messages out", () => {
     const markdown = renderMarkdown(reportWith(STALE));
     const section = markdown.slice(markdown.indexOf("### 📄 Instructions"), markdown.indexOf("### 💬 Messages"));
     expect(section.split("\n")).toEqual([
@@ -33,11 +34,11 @@ describe("the Instructions section", () => {
       "- ⚠️ **SI01** `CLAUDE.md:4` — command `pnpm run format` is not defined in the root package.json or Makefile",
       "- ⚠️ **SI02** `CLAUDE.md:11` — path `scripts/changelog.sh` is not in the repository",
       "- ⚠️ **SI03** `CLAUDE.md:15` — file to read is not in the repository",
-      "- ℹ️ **SI04** `AGENTS.md:1` — last changed more than 90 days ago, and names `src/index.ts`, which this change edits",
-      "- SI01 hint: Make the command match a script in the root package.json or a target in the root Makefile, or remove it from the instruction file.",
-      "- SI02 hint: Point the instruction at the path where the file now lives, or remove the line.",
-      "- SI03 hint: Point the link or `@` import at a file that exists, or remove it.",
-      "- SI04 hint: Read the instruction file next to the files this change edits, and update it where it no longer matches.",
+      // CORE-140: the hints are each code's fix.hint. CORE-14 follow-up: SI01's names the root package.json and
+      // Makefile again; SI02 and SI03 share one.
+      "- SI01 hint: Update this agent instruction so the command names a script in the root package.json or a target in the root Makefile, or remove it.",
+      "- SI02 hint: Update this agent instruction so it names a script, path or file that exists.",
+      "- SI03 hint: Update this agent instruction so it names a script, path or file that exists.",
       "",
       "",
     ]);
@@ -54,7 +55,7 @@ describe("the Instructions section", () => {
   });
 
   it("folds findings past the first 10 and counts those past 20; a hand-built report's malformed entries and markdown in a token are neutralized", () => {
-    const many: ReportStaleInstruction[] = Array.from({ length: 23 }, (_, i) => ({
+    const many: StaleFinding[] = Array.from({ length: 23 }, (_, i) => ({
       id: "SI02",
       path: "CLAUDE.md",
       line: i + 1,
@@ -66,6 +67,7 @@ describe("the Instructions section", () => {
     expect(markdown).toContain("- _…and 3 more in report.json._");
 
     const report = reportWith(STALE);
+    // Invalid on purpose: an unknown id, an unknown kind and a number as a path must not break the rendering.
     const hostile = {
       ...report,
       setupHealth: {

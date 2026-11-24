@@ -3,8 +3,10 @@ import type { RawInputs, ResolvedInputs } from "../inputs.js";
 import type { TestIntegrityMode } from "../report.js";
 import type { TestIntegrityModeSettings } from "../testIntegrityMode.js";
 import { byCodeUnit } from "../text.js";
+import type { PolicyFileBase } from "./agents.js";
 import type { IgnoredSetting, ResolvedPolicy, SignalOverrides } from "./resolved.js";
 import type { PolicyDocument } from "./types.js";
+import { uniteFilePolicy } from "./unite.js";
 
 /**
  * The layers a policy is applied to, as the adapters build them: the parsed `.pharn/ci.yml`, the raw inputs as the
@@ -26,14 +28,16 @@ export interface PolicyApplication {
   signalOverrides?: SignalOverrides;
   /** The accept label an app policy sets; never set from a policy file. */
   acceptLabel?: string;
+  /**
+   * The policy the run uses from here on, for `gatherSources` and `check()`: for a `file:` policy whose merge-base copy
+   * was read as a document, the united policy (`uniteFilePolicy`); the input policy, unchanged, for every other.
+   * `applyPolicy` always sets it; it is optional only so that a caller that builds the type by hand (a run with no
+   * policy) need not.
+   */
+  policy?: ResolvedPolicy;
 }
 
 const STRICTNESS: Readonly<Record<TestIntegrityMode, number>> = { off: 0, warn: 1, block: 2 };
-
-/** A root as a comparable string: the repo root (undefined, null or `.`) is `.`. */
-function rootKey(root: string | null | undefined): string {
-  return root === undefined || root === null ? "." : root;
-}
 
 /**
  * The app policy's `coverage.root`, normalized. `validatePolicy` has already held it to the ROOT grammar, which is
@@ -49,7 +53,7 @@ function normalizedRoot(root: string): string {
  *
  * - An app policy is authoritative for `coverage.exclude` (it replaces every lower layer's), `coverage.root` and
  *   `test_integrity.accept_label`, and raises `coverage.threshold`, `setup.require` and the mode above whatever a lower
- *   layer gave. A lower layer's value it beat is recorded as `looser`.
+ *   layer gave. A lower layer's value it beat is recorded as `looser`, with that layer for P09.
  * - A policy file is carried by the pull request, so it can only tighten: a higher threshold, `setup.require: true`, a
  *   stricter mode, more `setup.expect` and higher signal severities. Exclusions, a root, an accept label and
  *   `policy.required` are `not-allowed`; a lower value than the layers already give is `looser`. Both are recorded and
@@ -57,49 +61,73 @@ function normalizedRoot(root: string): string {
  * - `setup.expect` is the union of every layer. `dependencies` goes into the dependency settings layers (see
  *   `applyDependencies`; an app policy's `allowed_hosts` replaces the input's, a file's is `not-allowed`). Every other
  *   key is carried in the document, not applied.
+ *
+ * With `base`, the merge-base copy of a `file:` policy as the caller read it, the head copy is first united with it
+ * (`uniteFilePolicy`) and the united document is what is applied and what `PolicyApplication.policy` carries, so a pull
+ * request that edits the file cannot loosen any setting the file may carry. The records of a head value that is looser
+ * than the layers or the default are made from the head copy; the united document adds a `looser` record for each
+ * setting whose head value is looser than the base's. Without a document `base`, an app policy or no policy, nothing is
+ * united and the result is the one `applyPolicy(layers, policy)` gives.
  */
-export function applyPolicy(layers: PolicyLayers, policy: ResolvedPolicy): PolicyApplication {
-  const document = policy.document;
-  if (policy.source === "none" || document === null) return { inputs: layers.resolved, ignored: [] };
-  const app = policy.source === "app";
-  const policyLayer = "policy-file" as const;
+export function applyPolicy(layers: PolicyLayers, policy: ResolvedPolicy, base?: PolicyFileBase): PolicyApplication {
+  const united = uniteFilePolicy(policy, base);
+  const applied = united.policy;
+  const document = applied.document;
+  if (applied.source === "none" || document === null) return { inputs: layers.resolved, ignored: [], policy: applied };
+  const app = applied.source === "app";
+  // What the head copy carries: the records of a value looser than the layers or the default read it, not the united one.
+  const head = applied.copies?.head ?? document;
   const ignored: IgnoredSetting[] = [];
   const inputs: ResolvedInputs = { ...layers.resolved };
 
-  applyCoverage(layers, document, app, inputs, ignored);
-  applySetup(layers, document, app, inputs, ignored);
-  const modeSettings = applyMode(layers, document, app, ignored);
+  applyCoverage(layers, document, head, app, inputs, ignored);
+  applySetup(layers, document, head, app, inputs, ignored);
+  const modeSettings = applyMode(layers, document, head, app, ignored);
   if (modeSettings !== undefined) inputs.testIntegrityMode = modeSettings;
   applyDependencies(layers, document, app, inputs, ignored);
 
   const integrity = document.test_integrity;
-  const result: PolicyApplication = { inputs, ignored: [] };
+  const result: PolicyApplication = { inputs, ignored: [], policy: applied };
   if (integrity?.signals !== undefined && Object.keys(integrity.signals).length > 0) {
-    result.signalOverrides = { kind: app ? "replace" : "raise", severities: { ...integrity.signals } };
+    result.signalOverrides = {
+      kind: app ? "replace" : "raise",
+      severities: { ...integrity.signals },
+      ...(applied.copies === undefined
+        ? {}
+        : {
+            copies: {
+              head: { ...applied.copies.head.test_integrity?.signals },
+              base: { ...applied.copies.base.test_integrity?.signals },
+            },
+          }),
+    };
   }
   if (integrity?.accept_label !== undefined) {
     if (app) result.acceptLabel = integrity.accept_label;
-    else ignored.push({ setting: "test_integrity.accept_label", layer: policyLayer, reason: "not-allowed" });
+    else ignored.push({ setting: "test_integrity.accept_label", reason: "not-allowed" });
   }
   if (!app && document.policy?.required !== undefined) {
-    ignored.push({ setting: "policy.required", layer: policyLayer, reason: "not-allowed" });
+    ignored.push({ setting: "policy.required", reason: "not-allowed" });
   }
 
+  // The head-vs-base records come last, so a record with numbers (a threshold) wins over the united one without.
+  ignored.push(...united.ignored);
   const seen = new Set<string>();
   result.ignored = ignored
     .filter((record) => {
-      const key = `${record.setting}\u0000${record.layer}`;
+      const key = `${record.setting}\u0000${record.layer ?? ""}`;
       if (seen.has(key)) return false;
       seen.add(key);
       return true;
     })
-    .sort((a, b) => byCodeUnit(a.setting, b.setting) || byCodeUnit(a.layer, b.layer));
+    .sort((a, b) => byCodeUnit(a.setting, b.setting) || byCodeUnit(a.layer ?? "", b.layer ?? ""));
   return result;
 }
 
 function applyCoverage(
   layers: PolicyLayers,
   document: PolicyDocument,
+  headDocument: PolicyDocument,
   app: boolean,
   inputs: ResolvedInputs,
   ignored: IgnoredSetting[],
@@ -108,73 +136,68 @@ function applyCoverage(
   const coverage = document.coverage;
   if (coverage === undefined) return;
 
-  // Threshold: the largest of the policy's and the value in force (the larger of the input and the config).
+  // Threshold: the largest of the policy's and the value in force (the larger of the input and the config). An app
+  // policy records the layer value it beat. A file records the head copy's value whenever it is below the threshold
+  // that applies, whether the layers or the copy at the base commit (united into `theirs`) raised it, with both numbers.
   if (coverage.threshold !== undefined) {
     const theirs = coverage.threshold;
     const inForce = resolved.threshold;
-    if (inForce === null) {
-      inputs.threshold = theirs;
-    } else {
-      if (app && inForce < theirs) {
-        // The layer whose value was in force: the input's, unless the config's was larger (a tie names the input).
-        const inputValue = raw.threshold === undefined ? undefined : Number(raw.threshold.trim());
-        const inputInForce = inputValue !== undefined && !(inputValue < inForce);
+    const applied = inForce === null ? theirs : Math.max(theirs, inForce);
+    if (app) {
+      if (inForce !== null && inForce < theirs) {
+        // The layer an app policy beat: the input's, unless the config's was larger (a tie names the input).
+        const inputInForce = raw.threshold !== undefined && !(Number(raw.threshold.trim()) < inForce);
         ignored.push({
           setting: "coverage.threshold",
+          reason: "looser",
           layer: inputInForce ? "input" : "config",
-          reason: "looser",
           given: inForce,
-          applied: theirs,
-        });
-      } else if (!app && theirs < inForce) {
-        ignored.push({
-          setting: "coverage.threshold",
-          layer: "policy-file",
-          reason: "looser",
-          given: theirs,
-          applied: inForce,
+          applied,
         });
       }
-      inputs.threshold = Math.max(theirs, inForce);
+    } else {
+      const headValue = headDocument.coverage?.threshold;
+      if (headValue !== undefined && headValue < applied) {
+        ignored.push({ setting: "coverage.threshold", reason: "looser", given: headValue, applied });
+      }
     }
+    inputs.threshold = applied;
   }
 
   // Exclusions: the app's list replaces every lower layer's; a file can add none.
   if (coverage.exclude !== undefined) {
     if (app) {
       const theirs = coverage.exclude;
+      // The config's patterns come first in `resolved.exclude`, then the input's.
       const configCount = (config.coverage?.exclude ?? []).length;
-      const fromConfig = resolved.exclude.slice(0, configCount);
-      const fromInput = resolved.exclude.slice(configCount);
-      for (const [layer, patterns] of [
-        ["config", fromConfig],
-        ["input", fromInput],
-      ] as const) {
+      for (const layer of ["config", "input"] as const) {
+        const patterns =
+          layer === "config" ? resolved.exclude.slice(0, configCount) : resolved.exclude.slice(configCount);
         if (patterns.some((pattern) => !theirs.includes(pattern))) {
-          ignored.push({ setting: "coverage.exclude", layer, reason: "looser" });
+          ignored.push({ setting: "coverage.exclude", reason: "looser", layer });
         }
       }
       inputs.exclude = [...theirs];
     } else if (coverage.exclude.length > 0) {
-      ignored.push({ setting: "coverage.exclude", layer: "policy-file", reason: "not-allowed" });
+      ignored.push({ setting: "coverage.exclude", reason: "not-allowed" });
     }
   }
 
-  // Root: authoritative from the app (null is the repository root); never applied from a file.
+  // Root: authoritative from the app (null is the repository root); never applied from a file. `resolved.coverageRoot`
+  // is the input's root, else the config's, and undefined when neither gave one.
   if (coverage.root !== undefined) {
     if (app) {
       const theirs = coverage.root === null ? "." : normalizedRoot(coverage.root);
-      const inputGiven = raw.coverageRoot !== undefined;
-      const configGiven = config.coverage?.root !== undefined;
-      if (inputGiven || configGiven) {
-        const today = inputGiven ? rootKey(resolved.coverageRoot) : rootKey(config.coverage?.root);
-        if (today !== theirs) {
-          ignored.push({ setting: "coverage.root", layer: inputGiven ? "input" : "config", reason: "looser" });
-        }
+      if (resolved.coverageRoot !== undefined && resolved.coverageRoot !== theirs) {
+        ignored.push({
+          setting: "coverage.root",
+          reason: "looser",
+          layer: raw.coverageRoot !== undefined ? "input" : "config",
+        });
       }
       inputs.coverageRoot = theirs === "." ? undefined : theirs;
     } else {
-      ignored.push({ setting: "coverage.root", layer: "policy-file", reason: "not-allowed" });
+      ignored.push({ setting: "coverage.root", reason: "not-allowed" });
     }
   }
 }
@@ -182,6 +205,7 @@ function applyCoverage(
 function applySetup(
   layers: PolicyLayers,
   document: PolicyDocument,
+  headDocument: PolicyDocument,
   app: boolean,
   inputs: ResolvedInputs,
   ignored: IgnoredSetting[],
@@ -195,15 +219,17 @@ function applySetup(
     if (setup.require) {
       // Only a false in force is beaten: when either layer says true, the requirement was already on. The input's
       // false is named first, as it was when both say false.
-      if (app && !resolved.requireAgentSetup) {
-        const layer =
-          raw.requireAgentSetup === false ? "input" : config.setup?.require === false ? "config" : undefined;
-        if (layer !== undefined) ignored.push({ setting: "setup.require", layer, reason: "looser" });
+      const layer = raw.requireAgentSetup === false ? "input" : config.setup?.require === false ? "config" : undefined;
+      if (app && !resolved.requireAgentSetup && layer !== undefined) {
+        ignored.push({ setting: "setup.require", reason: "looser", layer });
       }
       inputs.requireAgentSetup = true;
-    } else if (!app && resolved.requireAgentSetup) {
-      ignored.push({ setting: "setup.require", layer: "policy-file", reason: "looser" });
     }
+  }
+  // A file's `false` over a requirement the layers give is `looser`, whether or not the merge-base copy's `true` made the
+  // united value true: the record reads the head copy.
+  if (!app && headDocument.setup?.require === false && resolved.requireAgentSetup) {
+    ignored.push({ setting: "setup.require", reason: "looser" });
   }
 
   // setup.expect: the union of every layer, the lower ones first, each once; absent when empty.
@@ -218,7 +244,7 @@ function applySetup(
  * policy with the key requires the check, so a `never` input is beaten and recorded `looser`. A policy file may only
  * tighten: its `registries` would narrow what is looked up, and its `allowed_hosts` would loosen D05, so both are
  * `not-allowed`. An app policy's `allowed_hosts` replaces the input's list (see `resolveDependencySettings`); each input
- * host it does not name is one `looser` record, `dependencies.allowed_hosts` of layer `input`.
+ * host it does not name makes one `looser` record, `dependencies.allowed_hosts`.
  */
 function applyDependencies(
   layers: PolicyLayers,
@@ -230,20 +256,20 @@ function applyDependencies(
   const deps = document.dependencies;
   if (deps === undefined) return;
   const given = layers.resolved.dependencies;
-  if (app && given?.input === "never") ignored.push({ setting: "dependencies", layer: "input", reason: "looser" });
+  if (app && given?.input === "never") ignored.push({ setting: "dependencies", reason: "looser", layer: "input" });
   if (!app && deps.registries !== undefined) {
-    ignored.push({ setting: "dependencies.registries", layer: "policy-file", reason: "not-allowed" });
+    ignored.push({ setting: "dependencies.registries", reason: "not-allowed" });
   }
   // Allowed registry hosts: an app policy's list replaces the input's (an input host it leaves out is `looser`, named by
-  // setting and layer only, never by host); a policy file may allow no host, so a non-empty list is `not-allowed`.
+  // setting only, never by host); a policy file may allow no host, so a non-empty list is `not-allowed`.
   if (deps.allowed_hosts !== undefined) {
     if (app) {
       const named = deps.allowed_hosts.map((host) => host.toLowerCase());
       if ((given?.allowedHosts ?? []).some((host) => !named.includes(host))) {
-        ignored.push({ setting: "dependencies.allowed_hosts", layer: "input", reason: "looser" });
+        ignored.push({ setting: "dependencies.allowed_hosts", reason: "looser", layer: "input" });
       }
     } else if (deps.allowed_hosts.length > 0) {
-      ignored.push({ setting: "dependencies.allowed_hosts", layer: "policy-file", reason: "not-allowed" });
+      ignored.push({ setting: "dependencies.allowed_hosts", reason: "not-allowed" });
     }
   }
   inputs.dependencies = {
@@ -260,12 +286,13 @@ function applyDependencies(
 }
 
 /**
- * The mode settings with the policy's mode added, and the records of the layers it beat. Undefined when the policy
+ * The mode settings with the policy's mode added, and a record when it beat a looser mode. Undefined when the policy
  * names no mode: the settings are then the resolved ones, untouched.
  */
 function applyMode(
   layers: PolicyLayers,
   document: PolicyDocument,
+  headDocument: PolicyDocument,
   app: boolean,
   ignored: IgnoredSetting[],
 ): TestIntegrityModeSettings | undefined {
@@ -273,12 +300,10 @@ function applyMode(
   const mode = document.test_integrity?.mode;
   if (mode === undefined) return given;
   if (app) {
-    for (const [layer, value] of [
-      ["config", given?.config],
-      ["input", given?.input],
-    ] as const) {
+    for (const layer of ["config", "input"] as const) {
+      const value = given?.[layer];
       if (value !== undefined && STRICTNESS[value] < STRICTNESS[mode]) {
-        ignored.push({ setting: "test_integrity.mode", layer, reason: "looser" });
+        ignored.push({ setting: "test_integrity.mode", reason: "looser", layer });
       }
     }
   } else {
@@ -287,8 +312,10 @@ function applyMode(
     const inForce = given?.input ?? "warn";
     const today =
       given?.config !== undefined && STRICTNESS[given.config] > STRICTNESS[inForce] ? given.config : inForce;
-    if (STRICTNESS[mode] < STRICTNESS[today]) {
-      ignored.push({ setting: "test_integrity.mode", layer: "policy-file", reason: "looser" });
+    // The head copy's mode: the united one may be the merge base's, which is never looser than the layers.
+    const headMode = headDocument.test_integrity?.mode;
+    if (headMode !== undefined && STRICTNESS[headMode] < STRICTNESS[today]) {
+      ignored.push({ setting: "test_integrity.mode", reason: "looser" });
     }
   }
   return { ...given, policy: { mode, kind: app ? "app" : "file" } };

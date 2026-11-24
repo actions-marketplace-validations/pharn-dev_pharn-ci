@@ -1,6 +1,7 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import type { TestSourceFile as SourceFile } from "../src/testSources.js";
 import { FIXTURES, fixture } from "./helpers.js";
 import { expectValidReport } from "./schema.js";
 
@@ -11,18 +12,6 @@ import { expectValidReport } from "./schema.js";
 const REPO_ROOT = "/home/runner/work/demo/demo";
 const CASE = "deselect-setting";
 const PATH = "vitest.config.ts";
-
-interface SourceFile {
-  path: string;
-  text: string;
-}
-interface Signal {
-  id: string;
-  severity: string;
-  path: string;
-  line: number | null;
-  detail: string;
-}
 
 const byPath = (a: SourceFile, b: SourceFile) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
 
@@ -51,7 +40,7 @@ describe("Skylos nine: TI09 catches deselect-setting", () => {
     expect(base[0]?.text.split("\n")[4]).toContain('include: ["src/**/*.test.ts"]');
     expect(head[0]?.text.split("\n")[4]).toContain('include: ["src/**/*.fast.test.ts"]');
 
-    const { check } = await import("@pharn-ci/core");
+    const { check } = await import("./text-coverage.js");
     const report = check({
       version: "0.1.0",
       coverage: { text: fixture("test-files-deleted/coverage.info"), format: "lcov" },
@@ -61,9 +50,9 @@ describe("Skylos nine: TI09 catches deselect-setting", () => {
       repoFiles: fixture(`skylos-nine/${CASE}/files.txt`).trim().split("\n"),
       testIntegrityMode: { input: "block" },
       testSources: { base: { files: base, dropped: [] }, head: { files: head, dropped: [] } },
-    } as unknown as Parameters<typeof check>[0]);
+    });
     expectValidReport(report);
-    const signals = (report.testIntegrity.signals as unknown as Signal[]).filter((s) => String(s.id) === "TI09");
+    const signals = report.testIntegrity.signals.filter((s) => String(s.id) === "TI09");
     const narrowed = signals.find((s) => s.path === PATH && s.detail.includes("test.include narrowed"));
     expect(narrowed, "a TI09 for vitest.config.ts naming test.include narrowed").toBeDefined();
     expect(narrowed?.severity).toBe("block");

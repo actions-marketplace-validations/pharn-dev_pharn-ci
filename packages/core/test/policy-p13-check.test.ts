@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { check, type Report, renderMarkdown, type TestSources } from "../src/index.js";
+import type { AgentPrFacts } from "../src/agents.js";
+import { type Report, renderMarkdown, type TestSources } from "../src/index.js";
 import { fixture } from "./helpers.js";
 import { expectValidReport } from "./schema.js";
+import { check, type TextCheckInput } from "./text-coverage.js";
 
 // Org-policy rule P13 through check(): the report validates against schema/report.v2.json, the POLICY_P13 message and
 // the Policy section carry fixed words and paths only, and the sentinel strings planted in the fixtures never reach the
@@ -9,10 +11,10 @@ import { expectValidReport } from "./schema.js";
 
 const p13 = (name: string) => fixture(`policy-rules/p13/${name}`);
 const human = (message: string) => ({ authorLogin: "octocat", committerLogin: "octocat", message });
-const AGENT_FACTS = {
+const AGENT_FACTS: AgentPrFacts = {
   pr: { author: { login: "claude[bot]", type: "Bot" }, labels: [], commits: [human("Widen the agent\n")] },
 };
-const HUMAN_FACTS = {
+const HUMAN_FACTS: AgentPrFacts = {
   pr: { author: { login: "octocat", type: "User" }, labels: [], commits: [human("Widen the agent\n")] },
 };
 const PATHS = [".claude/settings.json", ".mcp.json", ".github/workflows/ci.yml", ".github/CODEOWNERS"];
@@ -37,7 +39,7 @@ const SOURCES: TestSources = {
   },
 };
 
-function run(over: Record<string, unknown>): Report {
+function run(over: Partial<TextCheckInput>): Report {
   const report = check({
     version: "0.1.0",
     coverage: { text: fixture("golden/coverage.info"), format: "lcov" },
@@ -56,7 +58,7 @@ function run(over: Record<string, unknown>): Report {
     agentPrFacts: AGENT_FACTS,
     selfModificationSources: SOURCES,
     ...over,
-  } as never);
+  });
   expectValidReport(report);
   return report;
 }
@@ -85,7 +87,8 @@ describe("org policy rule P13 through check()", () => {
     expect(messages[0]?.text).toContain("It counts as an agent PR by: a bot author; a known agent as author.");
     expect(report.verdict).toBe("fail");
     const markdown = renderMarkdown(report);
-    expect(markdown).toContain("An agent PR may not widen its own or another agent's powers.");
+    // CORE-140: the hint is the code's fix.hint.
+    expect(markdown).toContain("  - Hint: Revert the edit that widens what an agent may do.");
     for (const text of [JSON.stringify(report), markdown]) {
       expect(text).not.toContain("SENTINEL");
       expect(text).not.toContain("acme");

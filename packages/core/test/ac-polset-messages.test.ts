@@ -1,31 +1,33 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import type { ResolvedPolicy } from "../src/policy/resolved.js";
+import type { PolicyDocument } from "../src/policy/types.js";
+import type { Message, Report, ReportPolicyViolation as Violation } from "../src/report.js";
 import { fixture } from "./helpers.js";
 import { expectValidReport } from "./schema.js";
-import { withoutFix } from "./v090-codes.js";
+import { withoutFix } from "./without-fix.js";
 
 // E3 item 23 (policy settings), AC-17. check(), evaluatePolicyRules() and renderMarkdown() are loaded inside the test
 // body: the AC test is written before the build adds the settings rules, so nothing the build adds may run while this
 // file loads.
 
-type Violation = { id: string; severity: string; path: string | null; line: number | null; detail: string };
-type Message = { level: string; code: string; text: string };
-type Report = { verdict: string; messages: Message[]; policy?: { violations: Violation[] } };
-interface Core {
-  check(input: unknown): Report;
-  evaluatePolicyRules(input: unknown): { violations: Violation[]; omitted: Record<string, number>; lowered: string[] };
-  renderMarkdown(report: unknown): string;
-}
-
 const REPO_ROOT = "/home/runner/work/demo/demo";
-const FILE = (document: unknown) => ({ source: "file", version: null, path: "policy/org.json", document });
+const FILE = (document: PolicyDocument): ResolvedPolicy => ({
+  source: "file",
+  version: null,
+  path: "policy/org.json",
+  document,
+});
 const sourcesOf = (files: Record<string, string>) => ({
   files: Object.entries(files).map(([path, text]) => ({ path, text })),
   dropped: [],
 });
 
-async function run(document: unknown, files: Record<string, string>): Promise<Report> {
-  const core = (await import("@pharn-ci/core")) as unknown as Core;
+async function run(document: PolicyDocument, files: Record<string, string>): Promise<Report> {
+  const core = {
+    ...(await import("@pharn-ci/core")),
+    check: (await import("./text-coverage.js")).check,
+  };
   const report = core.check({
     version: "0.1.0",
     coverage: { text: fixture("golden/coverage.info"), format: "lcov" },
@@ -60,22 +62,25 @@ const SETTINGS_HEAD = "P02–P06 could not fully use these agent settings files:
 const SETTINGS_TAIL =
   ". Claude Code skips an unparseable file or entry; pharn-ci never guesses what it meant, and a file it could not read counts against the policy.";
 
+// CORE-140: the comment's hint is each code's fix.hint, the one advice text of the code.
+// CORE-14 follow-up: P02 to P06 each have their own hint again, with the setting or key to change.
 const HINTS: Record<string, string> = {
   POLICY_P02:
-    "Narrow or remove the allow rule (or the defaultMode or additionalDirectories key) in the settings file, or ask the policy owner to change setup.forbidden_permissions.",
+    "Ask a maintainer to narrow or remove the allow rule (or the `defaultMode` or `additionalDirectories` key) that the settings file sets against the org policy's `setup.forbidden_permissions`.",
   POLICY_P03:
-    "Add a deny rule equal to or broader than the required one to the .claude/settings.json of each directory named.",
-  POLICY_P04: "Remove the server, or ask the policy owner to add it to setup.allowed_mcp_servers.",
-  POLICY_P05: "Remove the server from the MCP file.",
+    "Ask a maintainer to add a deny rule equal to or broader than the required one to the `.claude/settings.json` of each directory named.",
+  POLICY_P04:
+    "Ask a maintainer to remove the MCP server that the org policy's `setup.allowed_mcp_servers` does not list, or the `enableAllProjectMcpServers` setting.",
+  POLICY_P05: "Ask a maintainer to remove the MCP server the org policy forbids from the file that names it.",
   POLICY_P06:
-    "Add a command hook for the event whose matcher covers the required one (`*` or the same tool names), without an if condition.",
+    "Ask a maintainer to add the required command hook, with a matcher that covers the required one (`*` or the same tool names) and no `if` condition, or remove `disableAllHooks`.",
   POLICY_SETTINGS_INVALID:
-    "Keep agent settings files valid JSON and regular files under 512 KiB, and run on a checkout of the pull request head, so the org policy can check them.",
+    "Check that the agent settings files the report names are valid JSON and regular files under 512 KiB, on a checkout of the pull request head.",
 };
 
 describe("the P02–P06 and POLICY_SETTINGS_INVALID messages", { timeout: 60_000 }, () => {
   it("AC-17: each template with singular and plural, {locs} capped at 20 with the cap's omissions counted, 50 violations kept per rule, the strongest level, 20 problems then and N more, and the six hints", async () => {
-    const forbid = { version: 1, setup: { forbidden_permissions: ["Bash(curl:*)"] } };
+    const forbid: PolicyDocument = { version: 1, setup: { forbidden_permissions: ["Bash(curl:*)"] } };
 
     // P02: allow entries start on line 4.
     expect(
@@ -120,7 +125,7 @@ describe("the P02–P06 and POLICY_SETTINGS_INVALID messages", { timeout: 60_000
 
     // P04 and P05: servers start on line 3.
     const P04_TAIL = " not on the org policy's allowlist, or enableAllProjectMcpServers set while the policy has one.";
-    const allowed = { version: 1, setup: { allowed_mcp_servers: ["github"] } };
+    const allowed: PolicyDocument = { version: 1, setup: { allowed_mcp_servers: ["github"] } };
     expect(messageOf(await run(allowed, { ".mcp.json": mcpFile(["notes"]) }), "POLICY_P04")).toEqual({
       level: "error",
       code: "POLICY_P04",
@@ -129,7 +134,7 @@ describe("the P02–P06 and POLICY_SETTINGS_INVALID messages", { timeout: 60_000
     expect(messageOf(await run(allowed, { ".mcp.json": mcpFile(["notes", "tasks"]) }), "POLICY_P04").text).toBe(
       `P04 MCP server not allowlisted: 2 MCP servers at ${M} line 3, ${M} line 4${P04_TAIL}`,
     );
-    const forbiddenMcp = { version: 1, setup: { forbidden_mcp_servers: ["evil*"] } };
+    const forbiddenMcp: PolicyDocument = { version: 1, setup: { forbidden_mcp_servers: ["evil*"] } };
     expect(messageOf(await run(forbiddenMcp, { ".mcp.json": mcpFile(["evil"]) }), "POLICY_P05")).toEqual({
       level: "error",
       code: "POLICY_P05",
@@ -170,7 +175,11 @@ describe("the P02–P06 and POLICY_SETTINGS_INVALID messages", { timeout: 60_000
     expect(messageOf(big, "POLICY_P02").text).toBe(
       `P02 forbidden permission allowed: 60 findings at ${locs} and 40 more${P02_TAIL}`,
     );
-    const core = (await import("@pharn-ci/core")) as unknown as Core;
+    const core = {
+      ...(await import("./text-coverage.js")),
+      ...(await import("../src/policy/rules/evaluate.js")),
+      ...(await import("../src/render/markdown.js")),
+    };
     const evaluation = core.evaluatePolicyRules({
       policy: FILE(forbid),
       agentSetupFileCount: 1,
@@ -224,9 +233,9 @@ describe("the P02–P06 and POLICY_SETTINGS_INVALID messages", { timeout: 60_000
     for (const [code, hint] of Object.entries(HINTS)) {
       expect(markdown, `the ${code} hint`).toContain(`  - Hint: ${hint}\n`);
     }
-    const source = readFileSync(new URL("../src/render/markdown.ts", import.meta.url), "utf8");
-    const table = source.slice(source.indexOf("MESSAGE_HINTS"));
+    const source = readFileSync(new URL("../src/fix/table.ts", import.meta.url), "utf8");
+    const table = source.slice(source.indexOf("MESSAGE_FIXES"));
     for (const code of Object.keys(HINTS))
-      expect(table, `MESSAGE_HINTS has ${code}`).toMatch(new RegExp(`\\b${code}\\s*:`));
+      expect(table, `MESSAGE_FIXES has ${code}`).toMatch(new RegExp(`\\b${code}\\s*:`));
   });
 });

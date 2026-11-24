@@ -1,15 +1,18 @@
 import { describe, expect, it } from "vitest";
-import { check, evaluatePolicyRules, type PolicyRuleInput, policyRuleMessages } from "../src/index.js";
+import type { ResolvedPolicy } from "../src/policy/resolved.js";
+import { evaluatePolicyRules } from "../src/policy/rules/evaluate.js";
+import { policyRuleMessages } from "../src/policy/rules/messages.js";
+import type { PolicyDocument } from "../src/policy/types.js";
+import type { Message } from "../src/report.js";
 import { fixture } from "./helpers.js";
 import { expectValidReport } from "./schema.js";
-import { withoutFix } from "./v090-codes.js";
+import { check } from "./text-coverage.js";
+import { withoutFix } from "./without-fix.js";
 
 // R1.2 (CORE-37): when the agent settings files cannot be read (no local diff, which a checkout without
 // `fetch-depth: 0` gives), POLICY_SETTINGS_INVALID is an error exactly when a rule whose list the policy sets (P02 to
 // P06) resolves to block: a demand that cannot be checked is not met. P02, P04 and P05 now fail closed as P03 and P06
 // already did; a policy with none of the five lists keeps the warning.
-
-type Message = { level: string; code: string; text: string };
 
 const REASON = "the diff came from the GitHub compare API, so the checkout may not be the pull request head";
 const TEXT = `The agent settings files were not read (${REASON}), so P02–P06 did not run. Run the check on a checkout of the pull request head with full history (\`actions/checkout\` with \`fetch-depth: 0\`) so they can be read.`;
@@ -24,10 +27,21 @@ const LISTS = {
 type Rule = keyof typeof LISTS;
 type Severity = "block" | "warn" | "off";
 
-const app = (document: unknown) => ({ source: "app", version: 3, fetchedAt: "2026-10-26T12:00:00.000Z", document });
-const file = (document: unknown) => ({ source: "file", version: null, path: "policy/org.json", document });
+// The documents are built by hand below, from readonly lists and computed rule keys; they are read as policy documents.
+const app = (document: unknown): ResolvedPolicy => ({
+  source: "app",
+  version: 3,
+  fetchedAt: "2026-10-26T12:00:00.000Z",
+  document: document as PolicyDocument,
+});
+const file = (document: unknown): ResolvedPolicy => ({
+  source: "file",
+  version: null,
+  path: "policy/org.json",
+  document: document as PolicyDocument,
+});
 
-function settingsMessage(policy: unknown): Message[] {
+function settingsMessage(policy: ResolvedPolicy): Message[] {
   const evaluation = evaluatePolicyRules({
     policy,
     agentSetupFileCount: 1,
@@ -37,7 +51,7 @@ function settingsMessage(policy: unknown): Message[] {
     configPath: null,
     ignored: [],
     settingsSources: { unavailable: REASON },
-  } as unknown as PolicyRuleInput);
+  });
   return withoutFix(policyRuleMessages(evaluation).filter((m) => m.code === "POLICY_SETTINGS_INVALID")) as Message[];
 }
 
@@ -102,7 +116,7 @@ describe("POLICY_SETTINGS_INVALID for unread settings: P02 to P06 fail closed at
       repoFiles: ["AGENTS.md", "src/a.ts", ".claude/settings.json"],
       policy: app(JSON.parse(fixture("policy-settings/p02/violates-forbidden-allow/policy.json"))),
       policySettingsSources: { unavailable: REASON },
-    } as never);
+    });
     expectValidReport(report);
     const invalid = withoutFix(report.messages.filter((m) => m.code === "POLICY_SETTINGS_INVALID"));
     expect(invalid).toEqual([{ level: "error", code: "POLICY_SETTINGS_INVALID", text: TEXT }]);

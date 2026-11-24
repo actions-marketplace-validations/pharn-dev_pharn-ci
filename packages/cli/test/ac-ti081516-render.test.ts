@@ -1,7 +1,9 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
+import type { Message } from "../../core/src/report.js";
 import { expectValidReport } from "../../core/test/schema.js";
+import { requiredDeps, type StreamedFake } from "../../node-io/test/required-deps.js";
 
 // check(), renderMarkdown() and main() are loaded inside the test body: the AC tests are written before TI08, TI15
 // and TI16 exist, so nothing the build adds may run while the file loads.
@@ -69,6 +71,7 @@ function fakeRepo(diff: string) {
   const err: string[] = [];
   const contents = new Map([[resolve(REPO_ROOT, "coverage/lcov.info"), fixture("test-files-deleted/coverage.info")]]);
   const deps = {
+    ...requiredDeps((): StreamedFake => deps),
     cwd: REPO_ROOT,
     git: async (args: string[]) => {
       if (args.includes("ls-files")) {
@@ -92,7 +95,8 @@ function fakeRepo(diff: string) {
 
 describe("TI08, TI15 and TI16 in the PR comment and the CLI", () => {
   it("AC-13: the section lists each signal with its location, detail and a hint, the three message hints exist without an accept label, the empty report keeps its line, the CLI JSON holds TI16, and every report is valid", async () => {
-    const { check, renderMarkdown } = await import("@pharn-ci/core");
+    const { renderMarkdown } = await import("@pharn-ci/core");
+    const { check } = await import("../../core/test/text-coverage.js");
     const base = {
       version: "0.1.0",
       coverage: { text: fixture("test-files-deleted/coverage.info"), format: "lcov" as const },
@@ -102,14 +106,15 @@ describe("TI08, TI15 and TI16 in the PR comment and the CLI", () => {
       testIntegrityMode: { input: "block" as const },
     };
 
-    // The report from check() carries one signal of each of the three ids.
+    // The report from check() carries one signal of TI08 and of TI16, and (CORE-144, decision Q6) none of TI15, which
+    // is no longer emitted.
     const whole = check({ ...base, diff: { text: DIFF } } as Parameters<typeof check>[0]);
     expectValidReport(whole);
     for (const id of IDS) {
       expect(
         whole.testIntegrity.signals.filter((s) => String(s.id) === id),
         id,
-      ).toHaveLength(1);
+      ).toHaveLength(id === TI15 ? 0 : 1);
     }
     const ti08 = whole.testIntegrity.signals.find((s) => String(s.id) === TI08);
     expect(ti08?.line).toBeNull();
@@ -145,16 +150,17 @@ describe("TI08, TI15 and TI16 in the PR comment and the CLI", () => {
 
     // A report carrying the three messages and no signal renders each code in Messages with its hint, and no hint
     // names an accept label.
-    const messaged = {
+    const messaged: typeof whole = {
       ...whole,
       testIntegrity: { ...whole.testIntegrity, signals: [] },
+      // The codes are built from parts (see `code`), so to the compiler they are strings and not message codes.
       messages: [
         ...whole.messages.filter((m) => !IDS.map(code).includes(String(m.code))),
         { level: "warn", code: code(TI08), text: "message-ti08" },
         { level: "warn", code: code(TI15), text: "message-ti15" },
         { level: "info", code: code(TI16), text: "message-ti16" },
-      ],
-    } as unknown as typeof whole;
+      ] as Message[],
+    };
     expectValidReport(messaged);
     const all = renderMarkdown(messaged).split("\n");
     for (const id of IDS) {
@@ -187,5 +193,18 @@ describe("TI08, TI15 and TI16 in the PR comment and the CLI", () => {
     expect(signals.filter((s) => s.id === TI16)).toEqual([
       expect.objectContaining({ id: TI16, path: "src/a.test.ts", severity: "info", line: 12 }),
     ]);
+
+    // CORE-144: the CLI JSON on the diff with the matching test and source literal holds no TI15 signal or message.
+    const all15 = fakeRepo(DIFF);
+    expect(
+      await main(
+        ["check", "--coverage", "coverage/lcov.info", "--format", "json", "--test-integrity", "block"],
+        all15.deps as never,
+      ),
+    ).not.toBe(2);
+    const full = JSON.parse(all15.stdout());
+    expectValidReport(full);
+    expect((full.testIntegrity.signals as Array<{ id: string }>).filter((s) => s.id === TI15)).toEqual([]);
+    expect((full.messages as Array<{ code: string }>).map((m) => m.code)).not.toContain(code(TI15));
   });
 });

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { Report } from "../src/report.js";
 import { fixture } from "./helpers.js";
 import { expectValidReport } from "./schema.js";
 
@@ -11,9 +12,6 @@ const REPO_ROOT = "/home/runner/work/demo/demo";
 const COVERAGE = "coverage/lcov.info";
 const repoFiles = fixture("tracked-coverage/files.txt").trim().split("\n");
 
-type Message = { level: string; code: string; text: string };
-type Report = { verdict: string; messages: Message[] };
-
 const tracked = (report: Report) => report.messages.filter((message) => message.code === "COVERAGE_FILE_TRACKED");
 
 async function run(options: {
@@ -22,7 +20,7 @@ async function run(options: {
   file?: string;
   files?: readonly { text: string; file: string }[];
 }): Promise<Report> {
-  const { check } = await import("../src/check.js");
+  const { check } = await import("./text-coverage.js");
   const text = fixture("tracked-coverage/coverage.info");
   const coverage =
     options.files === undefined
@@ -38,7 +36,7 @@ async function run(options: {
     repoRoot: REPO_ROOT,
     threshold: options.threshold,
     repoFiles,
-  } as Parameters<typeof check>[0]) as unknown as Report;
+  });
   expectValidReport(report);
   return report;
 }
@@ -114,7 +112,7 @@ describe("COVERAGE_FILE_TRACKED under a threshold (CORE-92)", () => {
 
   it("with several coverage files, a tracked one the diff changes is named and fails, even after an untouched one", async () => {
     const text = fixture("tracked-coverage/coverage.info");
-    const { check } = await import("../src/check.js");
+    const { check } = await import("./text-coverage.js");
     const report = check({
       version: "0.1.0",
       coverage: {
@@ -128,7 +126,7 @@ describe("COVERAGE_FILE_TRACKED under a threshold (CORE-92)", () => {
       repoRoot: REPO_ROOT,
       threshold: 80,
       repoFiles,
-    }) as unknown as Report;
+    });
     expectValidReport(report);
     const messages = tracked(report);
     expect(messages).toHaveLength(1);

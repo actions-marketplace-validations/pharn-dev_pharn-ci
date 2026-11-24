@@ -1,20 +1,18 @@
 import { describe, expect, it } from "vitest";
+import type { PolicyDocument } from "../src/policy/types.js";
+import type { Report } from "../src/report.js";
 import { fixture } from "./helpers.js";
 import { expectValidReport } from "./schema.js";
-import { withoutFix } from "./v090-codes.js";
+import { withoutFix } from "./without-fix.js";
 
 // E3 item 23 (policy settings), AC-16. check() is loaded inside the test body: the AC test is written before the build
 // adds the settings rules, so nothing the build adds may run while this file loads.
-
-type Violation = { id: string; severity: string; path: string | null; line: number | null; detail: string };
-type Message = { level: string; code: string; text: string };
-type Report = { verdict: string; messages: Message[]; policy?: { violations: Violation[] } };
 
 const REPO_ROOT = "/home/runner/work/demo/demo";
 const BUDGET = 2 ** 26;
 
 async function run(forbidden: string[], allow: string[]): Promise<Report> {
-  const document = {
+  const document: PolicyDocument = {
     version: 1,
     setup: {
       forbidden_permissions: forbidden,
@@ -26,7 +24,7 @@ async function run(forbidden: string[], allow: string[]): Promise<Report> {
   };
   const settings = `${JSON.stringify({ permissions: { allow, defaultMode: "bypassPermissions" } }, null, 2)}\n`;
   const mcp = `${JSON.stringify({ mcpServers: { evil: { command: "node" }, notes: { command: "node" } } }, null, 2)}\n`;
-  const { check } = await import("@pharn-ci/core");
+  const { check } = await import("./text-coverage.js");
   const report = check({
     version: "0.1.0",
     coverage: { text: fixture("golden/coverage.info"), format: "lcov" },
@@ -42,9 +40,9 @@ async function run(forbidden: string[], allow: string[]): Promise<Report> {
       ],
       dropped: [],
     },
-  } as never);
+  });
   expectValidReport(report);
-  return report as unknown as Report;
+  return report;
 }
 
 const ids = (report: Report) => new Set((report.policy?.violations ?? []).map((v) => v.id));

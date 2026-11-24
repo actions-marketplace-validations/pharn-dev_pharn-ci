@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { Report } from "../src/report.js";
 import { byCodeUnit } from "../src/text.js";
 import { fixture } from "./helpers.js";
 import { expectValidReport } from "./schema.js";
@@ -24,7 +25,7 @@ function edit(path: string, ...hunks: Hunk[]): string {
 }
 
 async function run(diff: string, mode: "block" | "warn" | "off") {
-  const { check } = await import("../src/check.js");
+  const { check } = await import("./text-coverage.js");
   const report = check({
     version: "0.1.0",
     coverage: { text: fixture("test-files-deleted/coverage.info"), format: "lcov" },
@@ -33,12 +34,10 @@ async function run(diff: string, mode: "block" | "warn" | "off") {
     threshold: 80,
     repoFiles: REPO_FILES,
     testIntegrityMode: { input: mode },
-  } as Parameters<typeof check>[0]);
+  });
   expectValidReport(report);
   return report;
 }
-
-type Report = Awaited<ReturnType<typeof run>>;
 
 /** `|| true` added to the existing test script (listed first), and the istanbul hint added to a source file. */
 const DIFF =

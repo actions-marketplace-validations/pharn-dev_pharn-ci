@@ -1,30 +1,25 @@
 import { describe, expect, it } from "vitest";
-import {
-  check,
-  evaluatePolicyRules,
-  MAX_RULE_VIOLATIONS,
-  type PolicyRuleInput,
-  parseUnifiedDiff,
-} from "../src/index.js";
+import { parseUnifiedDiff } from "../src/index.js";
+import { evaluatePolicyRules, MAX_RULE_VIOLATIONS } from "../src/policy/rules/evaluate.js";
+import type { PolicyRuleInput } from "../src/policy/rules/types.js";
+import type { PolicyDocument } from "../src/policy/types.js";
+import type { Report } from "../src/report.js";
 import { byCodeUnit } from "../src/text.js";
 import { fixture } from "./helpers.js";
 import { expectValidReport } from "./schema.js";
-import { withoutFix } from "./v090-codes.js";
+import { check } from "./text-coverage.js";
+import { withoutFix } from "./without-fix.js";
 
 // R1.1 (CORE-35): the per-rule cap of 50 keeps blocking violations first. 50 or more decoy settings files whose paths
 // sort before the real one (`.aNN/.claude/settings.json` < `.claude/settings.json`, and < `policy/org.json`), each
 // giving a weaker violation of the same rule, must not push the blocking violation out of the kept set and turn the
 // rule's message from an error into a warning.
 
-type Violation = { id: string; severity: string; path: string | null; line: number | null; detail: string };
-type Message = { level: string; code: string; text: string };
-type Report = { verdict: string; messages: Message[]; policy?: { violations: Violation[] } };
-
 const DIR = "policy-settings/cap-severity/";
 const REPO_ROOT = "/home/runner/work/demo/demo";
 const REAL = ".claude/settings.json";
 const POLICY_PATH = "policy/org.json";
-const POLICY_DOCUMENT = JSON.parse(fixture(`${DIR}policy.json`)) as unknown;
+const POLICY_DOCUMENT = JSON.parse(fixture(`${DIR}policy.json`)) as PolicyDocument;
 const REAL_TEXT = fixture(`${DIR}real-settings.json.txt`);
 const DECOY_TEXT = fixture(`${DIR}decoy-settings.json.txt`);
 const FILE_POLICY = { source: "file", version: null, path: POLICY_PATH, document: POLICY_DOCUMENT } as const;
@@ -72,9 +67,9 @@ function run(input: { diff: string; files: { path: string; text: string }[]; rep
     repoFiles: ["AGENTS.md", POLICY_PATH, "src/a.ts", ...input.repoFiles],
     policy: FILE_POLICY,
     policySettingsSources: { files: input.files, dropped: [] },
-  } as never);
+  });
   expectValidReport(report);
-  return report as unknown as Report;
+  return report;
 }
 
 const policyMessage = (report: Report, code: string) => withoutFix(report.messages.filter((m) => m.code === code));
@@ -84,7 +79,7 @@ describe("the per-rule policy cap keeps blocking violations first", { timeout: 6
   it("60 violations of one rule: the single block one, last by path, is kept; omitted counts 10; within a severity the order is path, line, detail", () => {
     const decoys = decoyPaths(59);
     const files = [{ path: REAL, text: REAL_TEXT }, ...decoys.map((path) => ({ path, text: DECOY_TEXT }))];
-    const input = {
+    const input: PolicyRuleInput = {
       policy: { source: "app", version: 3, fetchedAt: "2026-10-26T12:00:00.000Z", document: POLICY_DOCUMENT },
       agentSetupFileCount: 1,
       agentTools: [],
@@ -93,7 +88,7 @@ describe("the per-rule policy cap keeps blocking violations first", { timeout: 6
       configPath: null,
       ignored: [],
       settingsSources: { files, dropped: [] },
-    } as unknown as PolicyRuleInput;
+    };
     const evaluation = evaluatePolicyRules(input);
     const p02 = evaluation.violations.filter((v) => v.id === "P02");
 

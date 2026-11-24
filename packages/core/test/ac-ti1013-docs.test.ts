@@ -1,14 +1,10 @@
-import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { codeRow } from "./codeTable.js";
 import { fixture } from "./helpers.js";
 import { expectValidReport } from "./schema.js";
 
 const ROOT = new URL("../../../", import.meta.url);
-const read = (path: string) => readFileSync(new URL(path, ROOT), "utf8");
-/** The commit before this increment. */
-const BEFORE = "73ed546bc52c926fdf86c6d3ce12f5de86e4d82c";
 const REPO_ROOT = "/home/runner/work/demo/demo";
 /** The tracked files a fixture runs with when it has no sibling `<name>.files.txt`. */
 const DEFAULT_FILES = ["package.json", "src/a.test.ts"];
@@ -34,7 +30,7 @@ function filesFor(dir: string, name: string): string[] {
 }
 
 async function signalsOf(dir: string, name: string, repoFiles = filesFor(dir, name)) {
-  const { check } = await import("../src/check.js");
+  const { check } = await import("./text-coverage.js");
   const report = check({
     version: "0.1.0",
     coverage: { text: fixture("test-files-deleted/coverage.info"), format: "lcov" },
@@ -43,22 +39,18 @@ async function signalsOf(dir: string, name: string, repoFiles = filesFor(dir, na
     threshold: 80,
     repoFiles,
     testIntegrityMode: { input: "block" },
-  } as Parameters<typeof check>[0]);
+  });
   expectValidReport(report);
   return report.testIntegrity.signals.filter((signal) => String(signal.id) === dir);
 }
 
-// CORE-133: the CHANGELOG, README, LIMITS and THREAT-MODEL wording checks moved out.
+// CORE-133: the CHANGELOG, README, LIMITS and THREAT-MODEL wording checks moved out. CORE-132: the report.v1.json
+// comparison with an old commit was a history pin and is removed.
 describe("TI10 and TI13: schema and fixtures", () => {
-  it("AC-12: the v2 schema names both message codes and the v1 schema is byte-identical to the base commit's", () => {
-    const schema = read("schema/report.v2.json");
-    expect(schema).toContain("TEST_INTEGRITY_TI10");
-    expect(schema).toContain("TEST_INTEGRITY_TI13");
-    const before = execFileSync("git", ["show", `${BEFORE}:schema/report.v1.json`], {
-      cwd: fileURLToPath(ROOT),
-      encoding: "utf8",
-    });
-    expect(read("schema/report.v1.json")).toBe(before);
+  // CORE-140: the schema's code description is one sentence and a link to the code table of docs/output.md.
+  it("AC-12: the code table names both message codes", () => {
+    expect(codeRow("TEST_INTEGRITY_TI10")).toContain("TI10:");
+    expect(codeRow("TEST_INTEGRITY_TI13")).toContain("TI13:");
   });
 
   it("AC-12: at least five must-trigger and five must-not-trigger diffs per id, the named cases among them, and they behave", async () => {

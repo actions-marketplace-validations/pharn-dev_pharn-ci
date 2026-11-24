@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { TestIndex } from "../src/testIndex/types.js";
 import { measureGrowth, threadCpuMs } from "./growth.js";
 import { fixture } from "./helpers.js";
 import { expectValidReport } from "./schema.js";
@@ -16,7 +17,10 @@ import { expectValidReport } from "./schema.js";
 const REPO_ROOT = "/home/runner/work/demo/demo";
 const A = "src/a.test.ts";
 const B = "src/b.test.ts";
-const FULL = 524_288;
+// The 512 KiB cap: one run at it holds the 15 s ceiling. The growth is measured at half of it (CORE-134, half the
+// cost): a temporarily quadratic leaf pick still fails the limit of 8 there.
+const CAP = 524_288;
+const FULL = CAP / 2;
 const QUARTER = FULL / 4;
 const CEILING_MS = 15_000;
 const IMPORTS = 'import { describe, expect, it } from "vitest";\n\n';
@@ -64,7 +68,7 @@ function generate(bytes: number) {
   return {
     data: {
       version: "0.1.0",
-      coverage: { text: fixture("test-files-deleted/coverage.info"), format: "lcov" },
+      coverage: { text: fixture("test-files-deleted/coverage.info"), format: "lcov" as const },
       diff: { text: diff },
       repoRoot: REPO_ROOT,
       threshold: 80,
@@ -73,7 +77,7 @@ function generate(bytes: number) {
         base: { files: files.map((f) => ({ path: f.path, text: f.base })), dropped: [] },
         head: { files: files.map((f) => ({ path: f.path, text: f.head })), dropped: [] },
       },
-      testIntegrityMode: { input: "block" },
+      testIntegrityMode: { input: "block" as const },
     },
     sizes: { removed: aBase.count, hollow: bHead.count, base: aBase.text.length, head: bHead.text.length },
     files,
@@ -81,33 +85,31 @@ function generate(bytes: number) {
 }
 
 describe("TI02 phase 2: the body-checked leaf pick stays linear", () => {
-  it("AC-8: thousands of removed `works` tests beside thousands of hollow `works` tests in another touched file give TI02 blocks within the finding cap at full and quarter size, and the full run takes less than 8 times the quarter run", async () => {
-    const { check } = await import("../src/check.js");
-    const { MAX_FINDINGS_PER_FILE } = (await import("../src/signals/findingCap.js")) as unknown as {
-      MAX_FINDINGS_PER_FILE: number;
-    };
-    type Input = Parameters<typeof check>[0];
+  it("AC-8: thousands of removed `works` tests beside thousands of hollow `works` tests in another touched file give TI02 blocks within the finding cap at the 512 KiB cap, at half of it and at a quarter of that, each run within 15 s, and the half-cap run takes less than 8 times the quarter run", async () => {
+    const { check } = await import("./text-coverage.js");
+    const { MAX_FINDINGS_PER_FILE } = await import("../src/signals/findingCap.js");
+    const cap = generate(CAP);
     const full = generate(FULL);
     const quarter = generate(QUARTER);
+    const least: Record<number, number> = { [CAP]: 3000, [FULL]: 1500, [QUARTER]: 350 };
     for (const [run, bytes] of [
+      [cap, CAP],
       [full, FULL],
       [quarter, QUARTER],
     ] as const) {
       expect(run.sizes.base).toBeLessThanOrEqual(bytes);
       expect(run.sizes.head).toBeLessThanOrEqual(bytes);
-      expect(run.sizes.removed, "thousands of removed `works` tests").toBeGreaterThan(bytes === FULL ? 3000 : 700);
+      expect(run.sizes.removed, "thousands of removed `works` tests").toBeGreaterThan(least[bytes] as number);
       expect(run.sizes.hollow, "more hollow `works` tests than removed ones").toBeGreaterThan(run.sizes.removed);
     }
     // The generated files are valid TypeScript: the existing test index parses them with no syntax error.
-    const core = (await import("@pharn-ci/core")) as unknown as {
-      indexTestFile(path: string, text: string): { parsed: boolean; syntaxErrors?: number };
-    };
+    const core = await import("../src/testIndex/indexTestFile.js");
     for (const run of [full, quarter]) {
       for (const f of run.files) {
         for (const text of [f.base, f.head]) {
           const result = core.indexTestFile(f.path, text);
           expect(result.parsed, `${f.path}: ${JSON.stringify(result).slice(0, 200)}`).toBe(true);
-          expect(result.syntaxErrors).toBe(0);
+          expect((result as TestIndex).syntaxErrors).toBe(0);
         }
       }
     }
@@ -115,9 +117,7 @@ describe("TI02 phase 2: the body-checked leaf pick stays linear", () => {
     const all: number[] = [];
     const time = (run: ReturnType<typeof generate>) => {
       const started = threadCpuMs();
-      const report = check(run.data as unknown as Input) as unknown as {
-        testIntegrity: { signals: { id: string; severity: string; path: string }[]; languages: string[] };
-      };
+      const report = check(run.data);
       const ms = threadCpuMs() - started;
       all.push(ms);
       const ti02 = report.testIntegrity.signals.filter((s) => String(s.id) === "TI02");
@@ -134,6 +134,8 @@ describe("TI02 phase 2: the body-checked leaf pick stays linear", () => {
       return { ms, report };
     };
 
+    // The cap run: TI02 blocks within the finding cap, and the 15 s ceiling (checked for every timed run at the end).
+    expectValidReport(time(cap).report);
     for (const run of [full, quarter]) {
       const warm = time(run);
       expectValidReport(warm.report);

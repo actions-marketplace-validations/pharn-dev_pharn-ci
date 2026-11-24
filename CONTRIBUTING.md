@@ -5,10 +5,12 @@ safely work in your repo.
 
 ## Project shape
 
-pharn-ci is a pnpm monorepo with three packages: `packages/core` (pure functions: parsers, diff
-coverage, the agent setup scan, the Report v1 builder and the markdown renderer),
-`packages/cli` (`pharn-ci check`) and `packages/action` (the GitHub Action). `schema/report.v1.json`
-is the source of truth for all output. [`AGENTS.md`](./AGENTS.md) describes the layout and holds the
+pharn-ci is a pnpm monorepo with four packages: `packages/core` (pure functions: parsers, diff
+coverage, the agent setup scan, test-integrity signals, org policy rules, the Report v2 builder and
+the markdown renderer), `packages/cli` (`pharn-ci check`), `packages/action` (the GitHub Action) and
+`packages/node-io` (private shared Node I/O for the CLI and the Action, bundled into their dists).
+`schema/report.v2.json` is the source of truth for all output (`schema/report.v1.json` is the
+earlier version). [`AGENTS.md`](./AGENTS.md) describes the layout and holds the
 hard rules every change follows; read it before your first PR.
 
 ## Getting set up
@@ -52,16 +54,44 @@ The branch must be up to date with `main` before it can merge.
 - Golden files (`fixtures/golden/*`) change only when the output intentionally changes. Regenerate
   them with `pnpm test -u` and review the diff.
 - Test-integrity fixtures under `fixtures/test-integrity/<id>/` are named for the result they pin, with a
-  `block-`, `warn-`, `info-` or `pass-` prefix. Two keep historical names, and their tests say so:
-  `TI15/warn-*.diff` give `info` since TI15 became an info signal (0.3.0), and
+  `block-`, `warn-`, `info-` or `pass-` prefix. One keeps a historical name, and its tests say so:
   `TI02/pass-moved-to-other-file` gives one TI02 block since a cross-file move needs body evidence.
-  Renaming them would re-pin the fixture digests of several base-pinned tests.
+  Renaming it would re-pin the fixture digests of several base-pinned tests.
 - Secret-pattern tests (S01–S11) build their tokens at test time, inline or from `fixtures/secrets/`, and never
   commit a whole token, so gitleaks and GitHub push protection never see one. That is why they are not fixture files
   like the test-integrity cases.
 - Never weaken, skip or delete an existing test to make CI pass. If a test is wrong, fix it and say
   why in the PR description.
 - Bug fixes include a regression test.
+
+### One test file per feature
+
+A feature is one behaviour with one name: a signal (`TI05`, `P13`), a message code, an input, a parser or a reader.
+Its tests live in one file, in the package whose code they exercise (`core` for pure logic, `node-io` for reading
+files, git and python3, `cli` and `action` for wiring), named after the feature. A new case or a new acceptance
+criterion for a feature that has a file is a new `it` (or `describe`) in that file, not a new file.
+
+A new file is justified only when:
+
+- the feature has no file yet;
+- the tests need a setup that would slow or change their neighbours: the real `python3`, a real git repository, a
+  timing or growth measurement, or a module-level `vi.mock` (it applies to the whole file);
+- the feature's file would pass about 1,000 lines; split it by aspect as `<feature>-<aspect>.test.ts`.
+
+Example: a new `@pytest.mark` form the Python test index must read is one more case in
+`packages/node-io/test/ac-py-index-marks.test.ts`, not a new `ac-py-index-marks-xfail.test.ts`.
+
+### Typed tests
+
+`pnpm lint` typechecks tests: each package's `typecheck` script also runs its `tsconfig.test.json`, which includes
+`src/` and `test/` (all four packages: core, cli, action and node-io). The cli, action and node-io test configs extend
+the package's `tsconfig.json`. Core's extends `tsconfig.base.json` instead, since its tests use Node: core's own
+`tsconfig.json` keeps `"types": []`, so `packages/core/src` stays pure. In a test:
+
+- import report and input types from `@pharn-ci/core`, or from `../../core/src/<module>.js` for one it does not
+  export (core's own tests import from `../src/<module>.js`); never copy a type into the test;
+- no `as unknown as`: a dynamic `await import(...)` is typed already. Keep a cast only where the test builds a
+  deliberately invalid or partial value, with a comment that says so.
 
 ## Agent skills
 

@@ -32,7 +32,7 @@ function edit(removed: string, added: string): string {
 }
 
 async function ti14(diff: string) {
-  const { check } = await import("../src/check.js");
+  const { check } = await import("./text-coverage.js");
   const report = check({
     version: "0.1.0",
     coverage: { text: fixture("test-files-deleted/coverage.info"), format: "lcov" },
@@ -41,7 +41,7 @@ async function ti14(diff: string) {
     threshold: 80,
     repoFiles: fixture("test-files-deleted/files.txt").trim().split("\n"),
     testIntegrityMode: { input: "block" },
-  } as Parameters<typeof check>[0]);
+  });
   expectValidReport(report);
   return report.testIntegrity.signals.filter((signal) => String(signal.id) === "TI14");
 }

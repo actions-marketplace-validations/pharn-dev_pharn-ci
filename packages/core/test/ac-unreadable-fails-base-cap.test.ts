@@ -9,16 +9,6 @@ import { expectValidReport } from "./schema.js";
 const CODE = "TEST_INTEGRITY_INDEX_UNAVAILABLE";
 const PATH = "src/c.test.ts";
 
-interface Message {
-  code: string;
-  level: string;
-  text: string;
-}
-interface Report {
-  verdict: string;
-  messages: Message[];
-}
-
 describe("CORE-69: a modified test file dropped at the merge base by the read cap", () => {
   it("AC-8: a modified src/c.test.ts dropped at the merge base as over-file-cap and at HEAD as too-large gives one TEST_INTEGRITY_INDEX_UNAVAILABLE error naming it, and the verdict is fail", async () => {
     const diff = `${[
@@ -30,7 +20,7 @@ describe("CORE-69: a modified test file dropped at the merge base by the read ca
       "+  expect(total([1])).toBe(1);",
     ].join("\n")}\n`;
 
-    const { check } = await import("../src/check.js");
+    const { check } = await import("./text-coverage.js");
     const report = check({
       version: "0.1.0",
       coverage: { text: fixture("test-files-deleted/coverage.info"), format: "lcov" },
@@ -43,9 +33,9 @@ describe("CORE-69: a modified test file dropped at the merge base by the read ca
         base: { files: [], dropped: [{ path: PATH, reason: "over-file-cap" }] },
         head: { files: [], dropped: [{ path: PATH, reason: "too-large" }] },
       },
-    } as unknown as Parameters<typeof check>[0]);
+    });
     expectValidReport(report);
-    const r = report as unknown as Report;
+    const r = report;
 
     const messages = r.messages.filter((m) => m.code === CODE);
     expect(messages, `one ${CODE} message`).toHaveLength(1);

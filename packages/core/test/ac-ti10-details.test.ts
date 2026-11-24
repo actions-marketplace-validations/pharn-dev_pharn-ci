@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { Report } from "../src/report.js";
 import { fixture } from "./helpers.js";
 import { expectValidReport } from "./schema.js";
 
@@ -23,7 +24,7 @@ function edit(path: string, ...hunks: Hunk[]): string {
 }
 
 async function run(diff: string) {
-  const { check } = await import("../src/check.js");
+  const { check } = await import("./text-coverage.js");
   const report = check({
     version: "0.1.0",
     coverage: { text: fixture("test-files-deleted/coverage.info"), format: "lcov" },
@@ -32,12 +33,11 @@ async function run(diff: string) {
     threshold: 80,
     repoFiles: REPO_FILES,
     testIntegrityMode: { input: "block" },
-  } as Parameters<typeof check>[0]);
+  });
   expectValidReport(report);
   return report;
 }
 
-type Report = Awaited<ReturnType<typeof run>>;
 const ti10 = (report: Report) => report.testIntegrity.signals.filter((signal) => String(signal.id) === "TI10");
 const ti10Messages = (report: Report) => report.messages.filter((m) => (m.code as string) === "TEST_INTEGRITY_TI10");
 
@@ -102,7 +102,8 @@ function forbiddenText(diffs: string[]): string[] {
       out.add(line);
       const pair = /^"([^"]+)":\s*"((?:[^"\\]|\\.)*)"/.exec(line);
       if (pair === null) continue;
-      const [, key, value] = pair as unknown as [string, string, string];
+      // Both groups always take part in a match; the defaults only give them the type string.
+      const [, key = "", value = ""] = pair;
       out.add(`"${key}"`);
       if (key !== "test") out.add(key);
       out.add(value);

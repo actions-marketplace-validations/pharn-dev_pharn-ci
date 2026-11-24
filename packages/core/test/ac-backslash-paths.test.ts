@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { check } from "../src/check.js";
+
 import { readCoverageChunks } from "../src/chunkInputs.js";
 import { parseCobertura } from "../src/coverage/cobertura.js";
 import { parseLcov } from "../src/coverage/lcov.js";
@@ -7,8 +7,10 @@ import { literalBackslashKey, resolveBackslashPaths } from "../src/coverage/matc
 import { parseUnifiedDiff } from "../src/diff/unified.js";
 import { normalizePath } from "../src/paths.js";
 import { renderMarkdown } from "../src/render/markdown.js";
+import type { Report } from "../src/report.js";
 import { fixture } from "./helpers.js";
 import { expectValidReport } from "./schema.js";
+import { check } from "./text-coverage.js";
 
 // CORE-101: on Linux and macOS a backslash is a legal file-name character. A coverage path with one is read with the
 // backslash as part of the name when that names a tracked file, and as a separator (a Windows report) otherwise.
@@ -20,7 +22,6 @@ const FORMATS = [
 ] as const;
 
 type Format = (typeof FORMATS)[number]["format"];
-type Report = ReturnType<typeof check>;
 
 const lines = (path: string) => fixture(path).trim().split("\n");
 const codes = (report: Report) => report.messages.map((message) => message.code);
@@ -95,7 +96,8 @@ describe.each(FORMATS)("CORE-101 with a $format report", ({ format }) => {
     expect(codes(report)).toContain("DIFF_COVERAGE_BELOW_THRESHOLD");
     // The record matched a tracked file, so nothing is left over as an untracked coverage path.
     expect(codes(report)).not.toContain("COVERAGE_PATHS_PARTIALLY_UNMATCHED");
-    expect(report.untrackedCoveragePaths).toBeUndefined();
+    // untrackedCoveragePaths is a buildReport() input, never a report field: the message check above is the real one.
+    expect(report).not.toHaveProperty("untrackedCoveragePaths");
 
     // A threshold at or below the result passes.
     expect(runCheck("literal", format, { threshold: 60 }).verdict).toBe("pass");

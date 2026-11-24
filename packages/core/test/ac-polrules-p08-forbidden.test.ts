@@ -1,20 +1,17 @@
 import { describe, expect, it } from "vitest";
+import type { Report } from "../src/report.js";
 import { fixture } from "./helpers.js";
 import { expectValidReport } from "./schema.js";
-import { withoutFix } from "./v090-codes.js";
+import { withoutFix } from "./without-fix.js";
 
 // E3 item 22 (policy rules), AC-5. check() is loaded inside the test body and fixtures/policy-rules/ is read there
 // too: the AC test is written before the build adds the rules and the fixtures, so nothing the build adds may run
 // while this file loads.
 
-type Violation = { id: string; severity: string; path: string | null; line: number | null; detail: string };
-type Message = { level: string; code: string; text: string };
-type Report = { verdict: string; messages: Message[]; policy?: { violations: Violation[] } };
-
 const REPO_ROOT = "/home/runner/work/demo/demo";
 
 async function run(filesFixture: string): Promise<Report> {
-  const { check } = await import("@pharn-ci/core");
+  const { check } = await import("./text-coverage.js");
   const report = check({
     version: "0.1.0",
     coverage: { text: fixture("golden/coverage.info"), format: "lcov" },
@@ -28,9 +25,9 @@ async function run(filesFixture: string): Promise<Report> {
       fetchedAt: "2026-10-26T12:00:00.000Z",
       document: JSON.parse(fixture("policy-rules/p08-violates/policy.json")),
     },
-  } as never);
+  });
   expectValidReport(report);
-  return report as unknown as Report;
+  return report;
 }
 
 describe("org policy rule P08: forbidden file tracked", { timeout: 60_000 }, () => {

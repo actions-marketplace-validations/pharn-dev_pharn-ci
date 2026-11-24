@@ -1,13 +1,15 @@
 import { describe, expect, it } from "vitest";
 import { validateAcceptLabel } from "../src/acceptLabel.js";
-import { check } from "../src/check.js";
+
 import { shownPattern } from "../src/policy/rules/shown.js";
 import { codeSpan, oneLine } from "../src/report.js";
 import { removedTestDetail, summaryTestName } from "../src/signals/testName.js";
 import { cutDetail, cutValue, keyText } from "../src/testConfig/value.js";
 import { fixture } from "./helpers.js";
 import { expectValidReport } from "./schema.js";
-import { withoutFix } from "./v090-codes.js";
+import type { TextCheckInput } from "./text-coverage.js";
+import { check } from "./text-coverage.js";
+import { withoutFix } from "./without-fix.js";
 
 // report.json used to drop only the control characters; it now also drops the invisible and bidirectional characters
 // the PR comment drops (text.ts). Each site keeps its own replacement: a space for one-line text and test names, U+FFFD
@@ -68,7 +70,7 @@ function removedTestReport(name: string) {
       base: { files: [{ path: TEST_PATH, text: base }], dropped: [] },
       head: { files: [{ path: TEST_PATH, text: head }], dropped: [] },
     },
-  } as unknown as Parameters<typeof check>[0]);
+  });
   expectValidReport(report);
   return report;
 }
@@ -102,7 +104,7 @@ function configReport(include: string) {
       base: { files: [{ path: CONFIG_PATH, text: base }], dropped: [] },
       head: { files: [{ path: CONFIG_PATH, text: head }], dropped: [] },
     },
-  } as unknown as Parameters<typeof check>[0]);
+  });
   expectValidReport(report);
   return report;
 }
@@ -122,7 +124,7 @@ function unreadableReport(reason: string) {
       base: { unavailable: reason },
       head: { files: [{ path: TEST_PATH, text }], dropped: [] },
     },
-  } as unknown as Parameters<typeof check>[0]);
+  });
   expectValidReport(report);
   return report;
 }
@@ -170,7 +172,7 @@ describe("report.json drops the invisible and bidirectional characters the comme
     expect(ti02.map((s) => s.detail)).toEqual([
       `The test "drops${SPACES}the item" at line 6 of the base is gone at head, and no test with the same name or a similar body takes its place.`,
     ]);
-    const removed = (report.testIntegrity as unknown as { changes: { removed: { name: string }[] } }).changes.removed;
+    const removed = report.testIntegrity.changes?.removed ?? [];
     expect(removed.map((entry) => entry.name)).toEqual([`drops${SPACES}the item`]);
 
     // Control: a name that already had the spaces gives the same report, byte for byte.
@@ -180,10 +182,7 @@ describe("report.json drops the invisible and bidirectional characters the comme
   it("a test-config value carries none of them, each replaced by U+FFFD", () => {
     const report = configReport(`src/${INVISIBLE}/**/*.test.ts`);
     expectNoAdded(report, "test-config value");
-    const ti09 = report.testIntegrity.signals.filter((s) => String(s.id) === "TI09") as unknown as {
-      detail: string;
-      head?: string;
-    }[];
+    const ti09 = report.testIntegrity.signals.filter((s) => String(s.id) === "TI09");
     expect(ti09).toHaveLength(1);
     expect(JSON.stringify(ti09[0])).toContain(`src/${REPLACEMENTS}/**/*.test.ts`);
 
@@ -239,7 +238,10 @@ describe("report.json drops the invisible and bidirectional characters the comme
 });
 
 /** check() with only coverage and diff varied; everything else plain. */
-function coverageReport(coverage: unknown, diff: unknown = { text: diffOf("src/cart.ts", "a\n", "b\n") }) {
+function coverageReport(
+  coverage: TextCheckInput["coverage"],
+  diff: TextCheckInput["diff"] = { text: diffOf("src/cart.ts", "a\n", "b\n") },
+) {
   const report = check({
     version: "0.1.0",
     coverage,
@@ -247,7 +249,7 @@ function coverageReport(coverage: unknown, diff: unknown = { text: diffOf("src/c
     repoRoot: REPO_ROOT,
     threshold: 80,
     repoFiles: ["src/cart.ts"],
-  } as never);
+  });
   expectValidReport(report);
   return report;
 }
@@ -257,7 +259,7 @@ const textOf = (report: { messages: { code: string; text: string }[] }, code: st
 
 const SETTINGS = ".claude/settings.json";
 /** check() under a policy file that requires the deny rule `rule`, with settings sources as given. */
-function policyReport(rule: string, sources: unknown) {
+function policyReport(rule: string, sources: TextCheckInput["policySettingsSources"]) {
   const report = check({
     version: "0.1.0",
     coverage: { text: fixture("golden/coverage.info"), format: "lcov" },
@@ -272,7 +274,7 @@ function policyReport(rule: string, sources: unknown) {
       document: { version: 1, setup: { required_permissions_deny: [rule] } },
     },
     policySettingsSources: sources,
-  } as never);
+  });
   expectValidReport(report);
   return report;
 }
@@ -294,7 +296,7 @@ function p07Report(dir: string) {
       ],
       dropped: [],
     },
-  } as never);
+  });
   expectValidReport(report);
   return report;
 }
@@ -321,7 +323,11 @@ describe("the other message and detail sites drop them too", () => {
   it("COVERAGE_FILE_MISSING, COVERAGE_FILE_EMPTY and COVERAGE_FORMAT_UNSUPPORTED: the path carries none of them, each U+FFFD; a plain path is unchanged", () => {
     const odd = `cov/lc${INVISIBLE}ov.info`;
     const shown = `cov/lc${REPLACEMENTS}ov.info`;
-    const cases: [code: string, coverage: (path: string) => unknown, text: (path: string) => string][] = [
+    const cases: [
+      code: string,
+      coverage: (path: string) => TextCheckInput["coverage"],
+      text: (path: string) => string,
+    ][] = [
       ["COVERAGE_FILE_MISSING", (path) => ({ missingFile: path }), (path) => `Coverage file not found: ${path}`],
       [
         "COVERAGE_FILE_EMPTY",

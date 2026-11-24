@@ -8,6 +8,12 @@ import type { FixHint } from "./fix/table.js";
 import type { ConfigSource } from "./gateInputs.js";
 import type { AgentSetupFile, AgentSetupInventory } from "./setup/scan.js";
 import { AGENT_TOOLS, type AgentSetupSummary, type AgentTool, summarizeAgentSetup } from "./setup/summary.js";
+import {
+  TEST_INTEGRITY_SIGNALS,
+  type TestIntegrityMessageCode,
+  type TestIntegritySignalDefinition,
+  testIntegrityCode,
+} from "./signals/registry.js";
 import type { ResolvedTestIntegrityMode } from "./testIntegrityMode.js";
 import { hasBinaryReason, isBinaryUnreadable, ti09NotRunStart, ti0205NotRunStart } from "./testIntegrityUnreadable.js";
 import { cutCodeUnits, replaceUnsafeChars } from "./text.js";
@@ -32,7 +38,7 @@ export interface Report {
   testIntegrity: ReportTestIntegrity;
   /** The org policy's findings; present only when a policy was asked for and is in force or unavailable. */
   policy?: ReportPolicy;
-  /** Stale agent instructions (SI01 to SI04); present only when there is at least one finding. */
+  /** Stale agent instructions (SI01 to SI03; SI04 is not emitted); present only when there is at least one finding. */
   setupHealth?: ReportSetupHealth;
   /** The prompt-injection scan's findings; present only when there is at least one. */
   injection?: ReportInjection;
@@ -50,6 +56,7 @@ export interface Report {
  * when every character is a repo-path character (plus `:` and `@` in a script name) and it is at most 200 long.
  */
 export interface ReportStaleInstruction {
+  /** SI04 is kept for older reports; it is not emitted since the release after v0.11.0. */
   id: "SI01" | "SI02" | "SI03" | "SI04";
   path: string;
   line: number;
@@ -246,7 +253,11 @@ export interface ReportDiffCoverage {
 
 export type MessageLevel = "info" | "warn" | "error";
 
-/** Stable message codes. Add new ones here and in the schema description; never rename. */
+/**
+ * Stable message codes. Add new ones here and in the code table of docs/output.md; never rename. The
+ * `TEST_INTEGRITY_<id>` codes come from the signal registry (`signals/registry.ts`). TEST_INTEGRITY_TI15 and
+ * SETUP_STALE_SI04 are not emitted since the release after v0.11.0; they stay so an older report still type-checks.
+ */
 export type MessageCode =
   | "DIFF_COVERAGE_BELOW_THRESHOLD"
   | "DIFF_COVERAGE_UNGATED"
@@ -267,23 +278,7 @@ export type MessageCode =
   | "AGENT_SETUP_EXPECTED_MISSING"
   | "TEST_INTEGRITY_MODE_IGNORED"
   | "TEST_INTEGRITY_OFF"
-  | "TEST_INTEGRITY_TI01"
-  | "TEST_INTEGRITY_TI02"
-  | "TEST_INTEGRITY_TI03"
-  | "TEST_INTEGRITY_TI04"
-  | "TEST_INTEGRITY_TI05"
-  | "TEST_INTEGRITY_TI06"
-  | "TEST_INTEGRITY_TI07"
-  | "TEST_INTEGRITY_TI08"
-  | "TEST_INTEGRITY_TI09"
-  | "TEST_INTEGRITY_TI10"
-  | "TEST_INTEGRITY_TI11"
-  | "TEST_INTEGRITY_TI12"
-  | "TEST_INTEGRITY_TI13"
-  | "TEST_INTEGRITY_TI14"
-  | "TEST_INTEGRITY_TI15"
-  | "TEST_INTEGRITY_TI16"
-  | "TEST_INTEGRITY_TI17"
+  | TestIntegrityMessageCode
   | "TEST_INTEGRITY_INDEX_UNAVAILABLE"
   | "TEST_INTEGRITY_TEXT_TRUNCATED"
   | "TEST_INTEGRITY_ACCEPTED"
@@ -337,7 +332,8 @@ export type MessageCode =
   | "DEPENDENCY_D04"
   | "DEPENDENCY_D05"
   | "DEPENDENCY_LOOKUP_UNAVAILABLE"
-  | "DEPENDENCY_CHECK_INCOMPLETE";
+  | "DEPENDENCY_CHECK_INCOMPLETE"
+  | "POLICY_KEYS_UNKNOWN";
 
 export interface Message {
   level: MessageLevel;
@@ -349,7 +345,7 @@ export interface Message {
 
 /**
  * The findings of one file and signal id that a cap left out of `testIntegrity.signals`: the 20-per-file cap of the
- * base-and-head signals, or the 10-per-change cap of TI15 (counted per source path).
+ * base-and-head signals (an older report may also hold the 10-per-change cap of TI15, which is no longer emitted).
  */
 export interface OmittedSignals {
   id: string;
@@ -361,14 +357,17 @@ export interface OmittedSignals {
  * Test files that TI02 and TI05 could not compare, or why they did not run at all. The `{ files }` form also carries the
  * added test files whose tests could not be read (`added`): nothing that reads an added file's tests checked them. A
  * `files` entry with `changeMadeUnreadable` is a modified test file the change made unreadable at HEAD
- * (see `testIntegrityUnreadable.ts`); it makes the message an error in mode `block`. The flag is an input only and
- * never reaches the report. A modified test file whose diff entry git shows as binary is a `files` entry with the reason
- * `binary` and that flag, whatever the merge base held; an added one is an `added` entry with the reason `binary`.
+ * (see `testIntegrityUnreadable.ts`); it makes the message an error in mode `block`. An entry of either list with
+ * `failsClosed` (a dropped side or a Python head the index did not read, see `sourcesDropFailsClosed` and
+ * `pythonHeadFailsClosed`) does the same, without the binary routing of `changeMadeUnreadable`. Both flags are inputs
+ * only and never reach the report. A modified test file whose diff entry git shows as binary is a `files` entry with the
+ * reason `binary` and `changeMadeUnreadable`, whatever the merge base held; an added one is an `added` entry with the
+ * reason `binary`.
  */
 export type TestIndexUnavailable =
   | {
-      files: readonly { path: string; reason: string; changeMadeUnreadable?: boolean }[];
-      added?: readonly { path: string; reason: string }[];
+      files: readonly { path: string; reason: string; changeMadeUnreadable?: boolean; failsClosed?: boolean }[];
+      added?: readonly { path: string; reason: string; failsClosed?: boolean }[];
     }
   | { notRun: string };
 
@@ -382,9 +381,9 @@ export interface BuildReportInput {
   /** Threshold that applies even when diff coverage could not be computed. */
   threshold: number | null;
   /** The pharn-ci config in use, as a repo path (null outside the repo); absent means `.pharn/ci.yml`. */
-  configRepoPath?: string | null;
+  configRepoPath?: string | null | undefined;
   /** The format the coverage file was read as; carried into `diffCoverage.format` when given. */
-  coverageFormat?: CoverageFormat;
+  coverageFormat?: CoverageFormat | undefined;
   /** Why diff coverage is missing, when it is. */
   missing?:
     | { reason: "coverage-file-missing"; coverageFile: string }
@@ -392,259 +391,148 @@ export interface BuildReportInput {
     | { reason: "coverage-file-empty"; coverageFile: string | null }
     | { reason: "coverage-format-unsupported"; coverageFile: string | null }
     | { reason: "diff-unavailable"; detail: string }
-    | { reason: "coverage-paths-unmatched"; total: number; example: string; suggestedRoot: string | null };
+    | { reason: "coverage-paths-unmatched"; total: number; example: string; suggestedRoot: string | null }
+    | undefined;
   /** Count of distinct coverage paths that are not tracked files, when some but not all are; absent or 0 adds no message. */
-  untrackedCoveragePaths?: number;
+  untrackedCoveragePaths?: number | undefined;
   /** Count of malformed coverage records the parsers skipped; absent or 0 adds no message. Only set when diff coverage was computed. */
-  skippedCoverageLines?: number;
+  skippedCoverageLines?: number | undefined;
   /** Repo-relative paths the diff edits that configure this check (the config in use, workflows); absent or empty adds no message. */
-  changedConfigPaths?: readonly string[];
+  changedConfigPaths?: readonly string[] | undefined;
   /**
    * Where the config in use was read from when the change touches it (`CheckInput.configSource`). Only read
    * when `changedConfigPaths` names the config in use.
    */
-  configSource?: ConfigSource;
+  configSource?: ConfigSource | undefined;
   /** Repo-relative path of the coverage file when it is a tracked file; absent adds no message. */
-  trackedCoverageFile?: string;
+  trackedCoverageFile?: string | undefined;
   /**
    * True when the diff adds, modifies or renames to `trackedCoverageFile`, so the change under review wrote its own
    * coverage numbers; with a threshold that makes `COVERAGE_FILE_TRACKED` an error. Absent means false.
    */
-  trackedCoverageChanged?: boolean;
+  trackedCoverageChanged?: boolean | undefined;
   /** Changed files the diff shows as binary that the coverage report knows; absent or empty adds no message. */
-  binaryCoveredPaths?: readonly string[];
+  binaryCoveredPaths?: readonly string[] | undefined;
   /** Repo-relative test files the diff deletes or renames to a non-test name; absent or empty adds no message. */
-  deletedTestFiles?: readonly string[];
+  deletedTestFiles?: readonly string[] | undefined;
   agentSetup: AgentSetupInventory;
   /** Sorted paths of inventoried agent setup files whose size in HEAD is 0; absent or empty adds no message. */
-  emptyAgentSetupFiles?: readonly string[];
+  emptyAgentSetupFiles?: readonly string[] | undefined;
   /** When true, a repo with no agent setup files is an error instead of info. Off when absent. */
-  requireAgentSetup?: boolean;
+  requireAgentSetup?: boolean | undefined;
   /**
    * Agent tools the report names when no setup file configures them. Only names from the fixed tool list
    * reach the report; absent or empty adds no field and no message.
    */
-  expectedAgentTools?: readonly AgentTool[];
+  expectedAgentTools?: readonly AgentTool[] | undefined;
   /** Run metadata copied into the report as given; absent adds no field. */
-  meta?: ReportMeta;
+  meta?: ReportMeta | undefined;
   /** The effective test-integrity mode (see `resolveTestIntegrityMode`). Absent means the default `warn`. */
-  testIntegrity?: ResolvedTestIntegrityMode;
+  testIntegrity?: ResolvedTestIntegrityMode | undefined;
   /**
    * The test-integrity signals the detectors found, each with its effective severity (sorted by the caller). They fill
    * `testIntegrity.signals` and `testIntegrity.verdict`; each signal id also adds one `TEST_INTEGRITY_<id>` message
-   * (TI01, TI03, TI04, TI08, TI10, TI11, TI13, TI14, TI15, TI16, TI17).
+   * (TI01, TI03, TI04, TI08, TI10, TI11, TI13, TI14, TI16, TI17).
    * Absent or empty adds nothing.
    */
-  testIntegritySignals?: readonly TestIntegritySignal[];
+  testIntegritySignals?: readonly TestIntegritySignal[] | undefined;
   /**
    * The files whose kept diff text was cut at the bound where a signal reads the added lines (see
    * `textCutSignalFiles`), so a finding past the cut is not seen. Adds one `TEST_INTEGRITY_TEXT_TRUNCATED` warn
    * message unless the mode is off (an error in mode `block` when `textTruncatedTestFiles` is not empty). Absent or
    * empty adds nothing.
    */
-  textTruncatedFiles?: readonly string[];
+  textTruncatedFiles?: readonly string[] | undefined;
   /**
    * The cut files of `textTruncatedFiles` that are test files the change modifies (see `textCutModifiedTestFiles`). With
    * at least one and mode `block`, the `TEST_INTEGRITY_TEXT_TRUNCATED` message is an error, which the accept label
    * lowers to a warning. A build input only; it never reaches the report.
    */
-  textTruncatedTestFiles?: readonly string[];
+  textTruncatedTestFiles?: readonly string[] | undefined;
   /** The sorted languages of the test files the base-and-head signals indexed; fills `testIntegrity.languages`. */
-  testIntegrityLanguages?: readonly ("ts" | "js" | "py" | "go")[];
+  testIntegrityLanguages?: readonly ("ts" | "js" | "py" | "go")[] | undefined;
   /** Findings the per-file cap left out of `testIntegrity.signals`; the TI02, TI05, TI06, TI09 and TI12 messages say how many. */
-  omittedSignals?: readonly OmittedSignals[];
+  omittedSignals?: readonly OmittedSignals[] | undefined;
   /**
    * Touched test files TI02 and TI05 could not compare, or why they did not run; adds one message: a warn, except an
    * error in mode `block` when they did not run at all (the `{ notRun }` form) or when a `files` entry carries
-   * `changeMadeUnreadable` (a modified test file made unreadable at HEAD, or whose diff entry git shows as binary).
+   * `changeMadeUnreadable` (a modified test file made unreadable at HEAD, or whose diff entry git shows as binary), or
+   * when a `files` or `added` entry carries `failsClosed` (a side the sources dropped, or a Python head the index did
+   * not read).
    */
-  testIndexUnavailable?: TestIndexUnavailable;
+  testIndexUnavailable?: TestIndexUnavailable | undefined;
   /** The tests-changed summary (see `summarizeTestChanges`); fills `testIntegrity.changes`. Absent adds nothing. */
-  testChanges?: ReportTestChanges;
+  testChanges?: ReportTestChanges | undefined;
   /**
    * What the tests-exercise check found (see `detectUnexercisedChanges`), with every path not exercised, sorted. With at
    * least one such path and a mode that is not off, it fills `testIntegrity.exercise` (at most 200 paths) and adds one
    * `TESTS_NOT_EXERCISING_CHANGES` warn message. Absent, or none not exercised, adds nothing.
    */
-  testExercise?: { checked: number; notExercised: readonly string[] };
+  testExercise?: { checked: number; notExercised: readonly string[] } | undefined;
   /**
    * Touched test-config files TI09 could not read, or why it did not run. Adds one TI09 sentence to the one
    * `TEST_INTEGRITY_INDEX_UNAVAILABLE` message, after the TI02 and TI05 sentence when there is one. The `{ notRun }`
    * form makes that message an error in mode `block`.
    */
-  testConfigUnavailable?: TestConfigUnavailable;
+  testConfigUnavailable?: TestConfigUnavailable | undefined;
   /**
    * The stale-instruction findings (see `detectStaleInstructions`), copied into `setupHealth.stale`; absent or empty adds
    * no key.
    */
-  staleInstructions?: readonly ReportStaleInstruction[];
+  staleInstructions?: readonly ReportStaleInstruction[] | undefined;
   /**
    * The stale-instruction messages (see `staleInstructionMessages`), appended after the agent setup messages and before
    * the agent config secret messages, as given. Absent or empty adds nothing.
    */
-  staleInstructionMessages?: readonly Message[];
+  staleInstructionMessages?: readonly Message[] | undefined;
   /**
    * The messages of the agent config secret check (see `agentConfigSecretMessages`), appended after the agent setup
    * messages as given. They name a shape id, paths and line numbers, never a value. Absent or empty adds nothing.
    */
-  agentConfigSecretMessages?: readonly Message[];
+  agentConfigSecretMessages?: readonly Message[] | undefined;
   /**
    * The messages of the prompt-injection scan (see `injectionMessages`), appended after the agent config secret
    * messages as given. They name signal ids, paths and line numbers, never file text. Absent or empty adds nothing.
    */
-  injectionMessages?: readonly Message[];
+  injectionMessages?: readonly Message[] | undefined;
   /** The prompt-injection scan's findings, copied into the report as `injection.signals`; absent or empty adds no key. */
-  injectionSignals?: readonly ReportInjectionSignal[];
+  injectionSignals?: readonly ReportInjectionSignal[] | undefined;
   /**
    * Dependency safety (see `checkDependencies`): the report's `dependencies` object, copied as given, and its messages,
    * appended after the agent config secret messages and before the org policy messages. Absent adds nothing.
    */
-  dependencies?: { report: ReportDependencies; messages: readonly Message[] };
+  dependencies?: { report: ReportDependencies; messages: readonly Message[] } | undefined;
   /**
    * The messages of the org policy (the unavailable message, the per-rule messages and the ignored-settings message,
    * in that order), appended after the agent config secret messages as given, so they follow every other
    * message. Absent or empty adds nothing.
    */
-  policyMessages?: readonly Message[];
+  policyMessages?: readonly Message[] | undefined;
   /**
    * The levels the org policy's agent setup rule sets: `noFiles` for the no-agent-setup-files message (which then also says the org
    * policy requires setup), `expectedMissing` for the expected-tools message. Absent keeps today's levels and texts.
    */
-  agentSetupLevels?: { noFiles?: MessageLevel; expectedMissing?: MessageLevel };
+  agentSetupLevels?: { noFiles?: MessageLevel | undefined; expectedMissing?: MessageLevel | undefined } | undefined;
   /** The org policy object, copied into the report as given; absent adds no key. */
-  policy?: ReportPolicy;
+  policy?: ReportPolicy | undefined;
   /** The JUnit results of the run (see `junitReport`), copied into the report's `flaky` as given; absent adds no key. */
-  flaky?: ReportFlaky;
+  flaky?: ReportFlaky | undefined;
   /**
    * The JUnit messages (see `junitReport`), appended after the org policy's messages as given. Absent or empty adds
    * nothing.
    */
-  flakyMessages?: readonly Message[];
+  flakyMessages?: readonly Message[] | undefined;
 }
 
-/**
- * The one message each test-integrity signal id adds to a report that carries findings of that id. `paths` names the
- * top-severity files, or, for an id with `allPaths`, every file of the id, so the text does not depend on severity.
- * `notListed` is empty, or the sentence that says how many findings the cap left out.
- */
+/** The one message of each emitted signal id, from the registry, in its order (TI15 has none: not emitted). */
 const SIGNAL_MESSAGES: ReadonlyArray<{
   id: string;
   code: MessageCode;
-  allPaths?: true;
-  text: (top: "block" | "warn" | "info", paths: string, notListed: string) => string;
-}> = [
-  {
-    id: "TI01",
-    code: "TEST_INTEGRITY_TI01",
-    text: (top, paths) =>
-      top === "info"
-        ? `This change deletes test files together with the code they cover or replaces them: ${paths}.`
-        : `This change deletes or renames away test files that defined tests, with nothing in the change that accounts for them: ${paths}. Check that those tests were meant to go.`,
-  },
-  {
-    id: "TI02",
-    code: "TEST_INTEGRITY_TI02",
-    allPaths: true,
-    text: (_top, paths, notListed) =>
-      `This change removes tests from test files that stay, with no test of the same name or a similar body in the touched test files to take their place: ${paths}. Check that each removal was meant.${notListed}`,
-  },
-  {
-    id: "TI03",
-    code: "TEST_INTEGRITY_TI03",
-    text: (_top, paths) =>
-      `This change skips tests or marks them as expected to fail: ${paths}. Check that each skip was meant.`,
-  },
-  {
-    id: "TI04",
-    code: "TEST_INTEGRITY_TI04",
-    text: (_top, paths) =>
-      `This change adds \`.only\`, \`fit\` or \`fdescribe\`, which runs only the marked tests: ${paths}. Remove the markers before merging.`,
-  },
-  {
-    id: "TI05",
-    code: "TEST_INTEGRITY_TI05",
-    allPaths: true,
-    text: (_top, paths, notListed) =>
-      `This change leaves tests with fewer assertions than they had, or none: ${paths}. Check that each test still checks what it did.${notListed}`,
-  },
-  {
-    id: "TI06",
-    code: "TEST_INTEGRITY_TI06",
-    allPaths: true,
-    text: (_top, paths, notListed) =>
-      `This change weakens tests that stay: a stronger matcher became a weaker one, an assertion guard was lowered or removed, an assertion that compares a literal with itself was added, or an assertion moved into a try block or after an early return: ${paths}. Check that each test still checks what it did.${notListed}`,
-  },
-  {
-    id: "TI07",
-    code: "TEST_INTEGRITY_TI07",
-    allPaths: true,
-    text: (_top, paths, notListed) =>
-      `This change edits only the expected values of tests while it also edits source files, so the tests may have been made to agree with the code: ${paths}. Check that each new expected value is right.${notListed}`,
-  },
-  {
-    id: "TI08",
-    code: "TEST_INTEGRITY_TI08",
-    text: (_top, paths) =>
-      `This change regenerates or updates snapshots in bulk: ${paths}. Check that each new snapshot was reviewed.`,
-  },
-  {
-    id: "TI09",
-    code: "TEST_INTEGRITY_TI09",
-    allPaths: true,
-    text: (_top, paths, notListed) =>
-      `This change loosens test-runner settings so that fewer tests run, a weaker run passes or the coverage gate drops: ${paths}. Check that each looser setting was meant.${notListed}`,
-  },
-  {
-    id: "TI10",
-    code: "TEST_INTEGRITY_TI10",
-    text: (_top, paths) =>
-      `This change weakens a test script in package.json, so the test run can pass without the tests passing: ${paths}. Check that the change was meant.`,
-  },
-  {
-    id: "TI11",
-    code: "TEST_INTEGRITY_TI11",
-    text: (_top, paths) =>
-      `This change edits a workflow so that CI may run fewer tests or ignore their failures: ${paths}. Check that the removed step or trigger, the reduced matrix or the added condition was meant.`,
-  },
-  {
-    id: "TI12",
-    code: "TEST_INTEGRITY_TI12",
-    allPaths: true,
-    text: (_top, paths, notListed) =>
-      `This change mocks a module it also edits, so the tests may not run the code under review: ${paths}. Check that each mock was meant.${notListed}`,
-  },
-  {
-    id: "TI13",
-    code: "TEST_INTEGRITY_TI13",
-    text: (_top, paths) =>
-      `This change adds comments that leave code out of coverage: ${paths}. Check that each was meant.`,
-  },
-  {
-    id: "TI14",
-    code: "TEST_INTEGRITY_TI14",
-    text: (_top, paths) =>
-      `This change lowers the coverage threshold or adds a coverage exclusion in the check config: ${paths}. Once merged, the looser setting applies to every later pull request; check that it was meant.`,
-  },
-  {
-    id: "TI15",
-    code: "TEST_INTEGRITY_TI15",
-    allPaths: true,
-    text: (_top, paths, notListed) =>
-      `This change adds conditions in source that compare against values its tests add, so the code may special-case the tests: ${paths}. Check that each is real logic.${notListed}`,
-  },
-  {
-    id: "TI16",
-    code: "TEST_INTEGRITY_TI16",
-    text: (_top, paths) =>
-      `This change adds comments that switch off a linter or type checker in test files: ${paths}.`,
-  },
-  {
-    id: "TI17",
-    code: "TEST_INTEGRITY_TI17",
-    text: (_top, paths) =>
-      `This change adds assertions that always pass to test files: ${paths}. Check that each test still compares a value that can fail.`,
-  },
-];
+  message: NonNullable<TestIntegritySignalDefinition["message"]>;
+}> = TEST_INTEGRITY_SIGNALS.flatMap((signal) => {
+  const { message }: TestIntegritySignalDefinition = signal;
+  return message === undefined ? [] : [{ id: signal.id, code: testIntegrityCode(signal.id), message }];
+});
 
 /**
  * The one `TEST_INTEGRITY_<id>` message per signal id found, in the fixed id order. A message's level is the highest
@@ -656,7 +544,11 @@ export function testIntegritySignalMessages(
   options: { omitted?: readonly OmittedSignals[]; previous?: readonly Message[] } = {},
 ): Message[] {
   const messages: Message[] = [];
-  for (const { id, code, allPaths, text } of SIGNAL_MESSAGES) {
+  for (const {
+    id,
+    code,
+    message: { allPaths, text },
+  } of SIGNAL_MESSAGES) {
     const own = signals.filter((signal) => signal.id === id);
     if (own.length === 0) continue;
     const top = own.some((s) => s.severity === "block")
@@ -665,7 +557,7 @@ export function testIntegritySignalMessages(
         ? "warn"
         : "info";
     const level = top === "block" ? "error" : top === "warn" ? "warn" : "info";
-    // An id whose text is kept (TI02, TI05, TI06, TI07, TI09, TI12, TI15) keeps the text a previous message had, with the "not listed" counts the
+    // An id whose text is kept (TI02, TI05, TI06, TI07, TI09, TI12) keeps the text a previous message had, with the "not listed" counts the
     // findings no longer carry; only the level follows the severities.
     const previous = allPaths === true ? options.previous?.find((message) => message.code === code) : undefined;
     if (previous !== undefined) {
@@ -1031,8 +923,9 @@ export function oneLine(text: string): string {
  * did not run at all (the `{ notRun }` form): block asked for a test-integrity gate, and a gate that could not read the
  * touched test text fails closed (pre-sale review item 4). It is also an error when a `{ files }` entry carries
  * `changeMadeUnreadable` (a modified test file the change made unreadable at HEAD, or whose diff entry git shows as
- * binary). The other per-file entries (its unread added files included: an added file cannot hide a weakened existing
- * test) and every other mode stay a warning.
+ * binary). It is also an error when a `{ files }` entry or an `added` entry carries `failsClosed` (a side the sources
+ * dropped, or a `.py` head the Python index did not read; `testIntegrityUnreadable.ts`). The other per-file entries and
+ * every other mode stay a warning.
  */
 function indexUnavailableLevel(
   mode: string | undefined,
@@ -1046,7 +939,8 @@ function indexUnavailableLevel(
   const unreadable =
     unavailable !== undefined &&
     "files" in unavailable &&
-    unavailable.files.some((f) => f.changeMadeUnreadable === true);
+    (unavailable.files.some((f) => f.changeMadeUnreadable === true || f.failsClosed === true) ||
+      (unavailable.added ?? []).some((f) => f.failsClosed === true));
   return notRun || unreadable ? "error" : "warn";
 }
 

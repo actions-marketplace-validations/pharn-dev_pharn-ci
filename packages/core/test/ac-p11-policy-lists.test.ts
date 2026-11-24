@@ -1,23 +1,19 @@
 import { describe, expect, it } from "vitest";
+import type { AgentPrFacts } from "../src/agents.js";
+import type { ResolvedPolicy } from "../src/policy/resolved.js";
+import type { PolicyDocument } from "../src/policy/types.js";
+import type { Report, ReportMeta } from "../src/report.js";
 import { fixture } from "./helpers.js";
 import { expectValidReport } from "./schema.js";
+import type { TextCheckInput } from "./text-coverage.js";
 
 // E3 item 24a part B (P11), AC-11. check() is loaded inside the test body and fixtures/policy-rules/p11/ is read there
 // too: the AC test is written before the build adds rule P11 and its fixtures, so nothing the build adds may run while
 // this file loads.
 
-type Violation = { id: string; severity: string; path: string | null; line: number | null; detail: string };
-type Message = { level: string; code: string; text: string };
-type Report = {
-  verdict: string;
-  messages: Message[];
-  policy?: { violations: Violation[] };
-  meta?: Record<string, unknown>;
-};
-
 const REPO_ROOT = "/home/runner/work/demo/demo";
 const FETCHED_AT = "2026-10-26T12:00:00.000Z";
-const META = {
+const META: ReportMeta = {
   event: "pull_request",
   repository: "pharn-dev/pharn-ci",
   repositoryId: 123,
@@ -31,14 +27,24 @@ const META = {
   upload: { status: "skipped" },
 };
 const HUMAN_COMMITS = [{ authorLogin: "octocat", committerLogin: "octocat", message: "Fix the parser\n" }];
-const humanPr = (labels: string[], author = { login: "octocat", type: "User" }) => ({
+type Author = NonNullable<AgentPrFacts["pr"]>["author"];
+const humanPr = (labels: string[], author: Author = { login: "octocat", type: "User" }): AgentPrFacts => ({
   pr: { author, labels, commits: HUMAN_COMMITS },
 });
 const lists = (name: string) => JSON.parse(fixture(`policy-rules/p11/lists/${name}`));
-const app = (document: unknown) => ({ source: "app", version: 3, fetchedAt: FETCHED_AT, document });
+const app = (document: PolicyDocument): ResolvedPolicy => ({
+  source: "app",
+  version: 3,
+  fetchedAt: FETCHED_AT,
+  document,
+});
 
-async function run(policy: unknown, agentPrFacts: unknown, policyFileBase?: unknown): Promise<Report> {
-  const { check } = await import("@pharn-ci/core");
+async function run(
+  policy: ResolvedPolicy,
+  agentPrFacts: AgentPrFacts,
+  policyFileBase?: TextCheckInput["policyFileBase"],
+): Promise<Report> {
+  const { check } = await import("./text-coverage.js");
   const report = check({
     version: "0.1.0",
     coverage: { text: fixture("golden/coverage.info"), format: "lcov" },
@@ -50,9 +56,9 @@ async function run(policy: unknown, agentPrFacts: unknown, policyFileBase?: unkn
     policy,
     agentPrFacts,
     ...(policyFileBase === undefined ? {} : { policyFileBase }),
-  } as never);
+  });
   expectValidReport(report);
-  return report as unknown as Report;
+  return report;
 }
 
 describe("org policy rule P11: the policy's agent lists add to the defaults", { timeout: 60_000 }, () => {

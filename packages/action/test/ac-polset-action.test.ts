@@ -3,10 +3,12 @@ import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSy
 import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import type { Report } from "@pharn-ci/core";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { expectValidReport } from "../../core/test/schema.js";
-import { withoutFix } from "../../core/test/v090-codes.js";
+import { withoutFix } from "../../core/test/without-fix.js";
 import { runGitBatch } from "../../node-io/src/io.js";
+import { requiredDeps, type StreamedFake } from "../../node-io/test/required-deps.js";
 import { harness } from "./harness.js";
 
 // E3 item 23 (policy settings), AC-28. run() is loaded inside each run: the AC test is written before the Action
@@ -15,10 +17,7 @@ import { harness } from "./harness.js";
 // coverage file are read from it) and a gitBatch that reads that repository and records every call. PR-number mode is
 // built as packages/action/test/ac-secrets-action.test.ts builds it.
 
-type Violation = { id: string; severity: string; path: string | null; line: number | null; detail: string };
-type Message = { level: string; code: string; text: string };
-type Report = { verdict: string; messages: Message[]; policy?: { violations: Violation[] } };
-type Run = (deps: never) => Promise<unknown>;
+type Run = typeof import("../src/run.js").run;
 type Call = { args: string[]; input: string };
 
 const FIXTURES = new URL("../../../fixtures/", import.meta.url);
@@ -78,7 +77,7 @@ function recordingBatch() {
 }
 
 async function loadRun(): Promise<Run> {
-  return ((await import("../src/run.js")) as unknown as { run: Run }).run;
+  return (await import("../src/run.js")).run;
 }
 
 /** The report a run wrote, else the one it returned. */
@@ -91,7 +90,7 @@ function reportOf(written: Record<string, string> | Map<string, string>, returne
   return report as Report;
 }
 
-async function harnessRun(opts: { policy: string; batch?: boolean; localGit?: boolean; compareError?: Error }) {
+async function harnessRun(opts: { policy: string; localGit?: boolean; compareError?: Error }) {
   const run = await loadRun();
   const h = harness({
     inputs: { policy: opts.policy },
@@ -100,10 +99,10 @@ async function harnessRun(opts: { policy: string; batch?: boolean; localGit?: bo
     ...(opts.compareError === undefined ? {} : { compareError: opts.compareError }),
   });
   const batch = recordingBatch();
-  const deps = h.deps as unknown as Record<string, unknown>;
+  const deps = h.deps;
   deps.workspace = dir;
   deps.readFile = realReadFile;
-  if (opts.batch !== false) deps.gitBatch = batch.gitBatch;
+  deps.gitBatch = batch.gitBatch;
   const returned = await run(h.deps as never);
   return { h, calls: batch.calls, report: reportOf(h.written, returned) };
 }
@@ -128,6 +127,7 @@ async function prNumberRun() {
   const written = new Map<string, string>();
   const batch = recordingBatch();
   const deps = {
+    ...requiredDeps((): StreamedFake => deps),
     getInput: (name: string) => inputs[name] ?? INPUT_DEFAULTS[name] ?? "",
     context: {
       eventName: "workflow_run",
@@ -256,11 +256,7 @@ describe("action: policy mode reads the committed agent settings files", () => {
       }
     }
 
-    // No batch git runner: nothing is gathered, nothing is said.
-    const noBatch = await harnessRun({ policy: POLICY_INPUT, batch: false });
-    expect(noBatch.report.policy, "control: the file policy is in force").toBeDefined();
-    expect(newCodes(noBatch.report)).toEqual([]);
-    expect(noBatch.calls).toEqual([]);
+    // CORE-143: the batch git runner is a required dep, so the "no batch git runner" case left with its fallback.
 
     // No policy: nothing is gathered, nothing is said.
     const never = await harnessRun({ policy: "never" });

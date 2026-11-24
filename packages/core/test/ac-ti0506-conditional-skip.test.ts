@@ -1,7 +1,9 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { indexTestFile } from "../src/index.js";
+import type { Report } from "../src/report.js";
+import { indexTestFile } from "../src/testIndex/indexTestFile.js";
+import type { TestSourceFile as SourceFile } from "../src/testSources.js";
 import { FIXTURES, fixture } from "./helpers.js";
 import { expectValidReport } from "./schema.js";
 
@@ -13,24 +15,10 @@ const REPO_ROOT = "/home/runner/work/demo/demo";
 const PATH = "src/cart.test.ts";
 
 type Mode = "block" | "warn";
-interface SourceFile {
-  path: string;
-  text: string;
-}
 interface Case {
   diff: string;
   base: SourceFile[];
   head: SourceFile[];
-}
-interface Signal {
-  id: string;
-  severity: string;
-  path: string;
-  line: number | null;
-  detail: string;
-}
-interface Report {
-  testIntegrity: { signals: Signal[] };
 }
 
 const byPath = (a: SourceFile, b: SourceFile) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
@@ -54,7 +42,7 @@ function loadCase(signal: "TI05" | "TI06", name: string): Case {
 }
 
 async function runCase(c: Case, mode: Mode): Promise<Report> {
-  const { check } = await import("../src/check.js");
+  const { check } = await import("./text-coverage.js");
   const report = check({
     version: "0.1.0",
     coverage: { text: fixture("test-files-deleted/coverage.info"), format: "lcov" },
@@ -64,9 +52,9 @@ async function runCase(c: Case, mode: Mode): Promise<Report> {
     repoFiles: [...new Set([...c.head.map((f) => f.path), "src/cart.ts"])].sort(),
     testSources: { base: { files: c.base, dropped: [] }, head: { files: c.head, dropped: [] } },
     testIntegrityMode: { input: mode },
-  } as unknown as Parameters<typeof check>[0]);
+  });
   expectValidReport(report);
-  return report as unknown as Report;
+  return report;
 }
 
 /** The test of one side of a case with this name, through the JS/TS test index. */

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { TestIntegritySignal as Signal } from "../src/report.js";
 import { fixture } from "./helpers.js";
 import { expectValidReport } from "./schema.js";
 
@@ -9,14 +10,6 @@ import { expectValidReport } from "./schema.js";
 const REPO_ROOT = "/home/runner/work/demo/demo";
 const VITEST = "vitest.config.ts";
 const JEST = "jest.config.js";
-
-interface Signal {
-  id: string;
-  severity: string;
-  path: string;
-  line: number | null;
-  detail: string;
-}
 
 const linesOf = (text: string) => text.replace(/\n$/, "").split("\n");
 
@@ -31,7 +24,7 @@ function diffOf(path: string, base: string, head: string): string {
 
 /** check() in mode block over a modified config with this base and head text; its TI09 signals. */
 async function run(path: string, base: string, head: string): Promise<Signal[]> {
-  const { check } = await import("../src/check.js");
+  const { check } = await import("./text-coverage.js");
   const report = check({
     version: "0.1.0",
     coverage: { text: fixture("test-files-deleted/coverage.info"), format: "lcov" },
@@ -44,9 +37,9 @@ async function run(path: string, base: string, head: string): Promise<Signal[]> 
       base: { files: [{ path, text: base }], dropped: [] },
       head: { files: [{ path, text: head }], dropped: [] },
     },
-  } as unknown as Parameters<typeof check>[0]);
+  });
   expectValidReport(report);
-  return (report.testIntegrity.signals as unknown as Signal[]).filter((s) => String(s.id) === "TI09");
+  return report.testIntegrity.signals.filter((s) => String(s.id) === "TI09");
 }
 
 /** A vitest config whose `test.projects` list holds these entries (JS source), one per line. */

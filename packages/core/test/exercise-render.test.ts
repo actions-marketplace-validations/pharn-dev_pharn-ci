@@ -1,16 +1,18 @@
 import { describe, expect, it } from "vitest";
-import { check } from "../src/check.js";
-import { MESSAGE_HINTS, renderMarkdown } from "../src/render/markdown.js";
+
+import { MESSAGE_FIXES } from "../src/fix/table.js";
+import { renderMarkdown } from "../src/render/markdown.js";
 import type { Report } from "../src/report.js";
 import { fixture } from "./helpers.js";
 import { expectValidReport } from "./schema.js";
+import { check } from "./text-coverage.js";
 
 // A8 step 1: the comment shows the tests-exercise check under "🔍 Test integrity" as one warn line with its hint and a
 // collapsed list of paths, and leaves the message out of "💬 Messages" there. A report from elsewhere is untrusted: an
 // exercise object of the wrong shape shows nothing in the section and keeps the message in Messages.
 
-const HINT =
-  "Add or update a test that imports each listed file and asserts on the changed behaviour, or say in the PR why no test changes. This is a warning only.";
+// CORE-140: the comment's hint is the code's fix.hint, the one advice text of TESTS_NOT_EXERCISING_CHANGES.
+const HINT = "Add or change tests that import and assert on the changed source files.";
 
 function report(): Report {
   const made = check({
@@ -35,7 +37,7 @@ function section(markdown: string): string[] {
 
 describe("the tests-exercise lines of the comment", () => {
   it("has the fixed hint", () => {
-    expect(MESSAGE_HINTS.TESTS_NOT_EXERCISING_CHANGES).toBe(HINT);
+    expect(MESSAGE_FIXES.TESTS_NOT_EXERCISING_CHANGES.hint).toBe(HINT);
   });
 
   it("shows one warn line, the hint and a collapsed list under Test integrity, and no TESTS_NOT_EXERCISING_CHANGES in Messages", () => {
@@ -81,6 +83,7 @@ describe("the tests-exercise lines of the comment", () => {
     const hostile = {
       ...base,
       testIntegrity: { ...base.testIntegrity, exercise: { checked: "x", notExercised: "src/cart.ts" } },
+      // Invalid on purpose: the renderer must treat a hand-built exercise object as untrusted.
     } as unknown as Report;
     const markdown = renderMarkdown(hostile);
     expect(section(markdown).join("\n")).not.toContain("Tests exercise changes");

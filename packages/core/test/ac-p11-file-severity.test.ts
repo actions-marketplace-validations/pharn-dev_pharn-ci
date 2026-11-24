@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import type { AgentPrFacts } from "../src/agents.js";
+import type { Report } from "../src/report.js";
 import { fixture } from "./helpers.js";
 import { expectValidReport } from "./schema.js";
 
@@ -6,12 +8,8 @@ import { expectValidReport } from "./schema.js";
 // too: the AC test is written before the build adds rule P11 and its fixtures, so nothing the build adds may run while
 // this file loads.
 
-type Violation = { id: string; severity: string; path: string | null; line: number | null; detail: string };
-type Message = { level: string; code: string; text: string };
-type Report = { verdict: string; messages: Message[]; policy?: { violations: Violation[] } };
-
 const REPO_ROOT = "/home/runner/work/demo/demo";
-const AGENT_FACTS = {
+const AGENT_FACTS: AgentPrFacts = {
   pr: {
     author: { login: "claude[bot]", type: "Bot" },
     labels: [],
@@ -20,7 +18,7 @@ const AGENT_FACTS = {
 };
 
 async function run(extra: { mode?: string; rule?: string }): Promise<Report> {
-  const { check } = await import("@pharn-ci/core");
+  const { check } = await import("./text-coverage.js");
   const base = JSON.parse(fixture("policy-rules/p11/workflows/policy.json"));
   const document = {
     ...base,
@@ -36,9 +34,9 @@ async function run(extra: { mode?: string; rule?: string }): Promise<Report> {
     repoFiles: ["AGENTS.md", ".github/workflows/ci.yml", ".pharn/policy.json", "src/a.ts"],
     policy: { source: "file", version: null, path: ".pharn/policy.json", document },
     agentPrFacts: AGENT_FACTS,
-  } as never);
+  });
   expectValidReport(report);
-  return report as unknown as Report;
+  return report;
 }
 
 const p11 = (report: Report) => (report.policy?.violations ?? []).filter((v) => v.id === "P11");
@@ -47,8 +45,9 @@ const withCode = (report: Report, code: string) => report.messages.filter((m) =>
 describe("org policy rule P11: a file: policy always blocks", { timeout: 60_000 }, () => {
   it("AC-5: under a file: policy, protected_paths_mode warn and policy.rules.P11 warn both leave P11 at block and are each named once in POLICY_OVERRIDE_IGNORED", async () => {
     for (const [extra, named] of [
-      [{ mode: "warn" }, "agents.protected_paths_mode (policy-file)"],
-      [{ rule: "warn" }, "policy.rules.P11 (policy-file)"],
+      // CORE-123: the message names the setting and no layer (it was "policy.rules.P11 (policy-file)").
+      [{ mode: "warn" }, "applies: agents.protected_paths_mode."],
+      [{ rule: "warn" }, "applies: policy.rules.P11."],
     ] as const) {
       const report = await run(extra);
       expect(

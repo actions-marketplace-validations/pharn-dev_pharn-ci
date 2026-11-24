@@ -2,9 +2,11 @@ import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { acceptTestIntegrity } from "../src/acceptLabel.js";
-import { check } from "../src/check.js";
+import type { TestSourceDrop, TestSourceDropReason } from "../src/testSources.js";
+
 import { FIXTURES } from "./helpers.js";
 import { expectValidReport } from "./schema.js";
+import { check } from "./text-coverage.js";
 
 // CORE-50 (binary-diff-not-blind), not an AC test: the three ways the reason `binary` reaches the
 // TEST_INTEGRITY_INDEX_UNAVAILABLE message, and how the message tells them apart.
@@ -21,7 +23,7 @@ const ACCEPT = { label: "pharn/accepted", by: "Reviewer-1" };
 
 interface Side {
   files: { path: string; text: string }[];
-  dropped: { path: string; reason: string }[];
+  dropped: TestSourceDrop[];
 }
 
 const byPath = (a: { path: string }, b: { path: string }) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
@@ -37,7 +39,7 @@ function readSide(dir: string): Side {
     const text = readFileSync(join(dir, name), "utf8");
     if (name.endsWith(".txt")) side.files.push({ path: name.slice(0, -".txt".length), text });
     else if (name.endsWith(".dropped"))
-      side.dropped.push({ path: name.slice(0, -".dropped".length), reason: text.trim() });
+      side.dropped.push({ path: name.slice(0, -".dropped".length), reason: text.trim() as TestSourceDropReason });
   }
   side.files.sort(byPath);
   side.dropped.sort(byPath);
@@ -80,15 +82,19 @@ describe("CORE-50: how the reason binary reaches TEST_INTEGRITY_INDEX_UNAVAILABL
     expect(unavailable(accepted).map((m) => m.level)).toEqual(["warn"]);
   });
 
-  it("base-binary-text-diff: a base text that is binary, with a head that indexed, stays a warning in the TI02 and TI05 sentence", () => {
+  it("base-binary-text-diff: a base text that is binary, with a head that indexed, is an error in block (CORE-351) and stays in the TI02 and TI05 sentence", () => {
     const block = run("base-binary-text-diff", "block");
     expect(unavailable(block)).toHaveLength(1);
     const message = unavailable(block)[0];
-    expect(message?.level).toBe("warn");
+    // CORE-351: a side dropped as binary against a side with text fails closed; the sentence is unchanged.
+    expect(message?.level).toBe("error");
     expect(message?.text).toContain("TI02 and TI05 could not compare these touched test files");
     expect(message?.text).toContain("`src/cart.test.ts` (`binary`)");
     expect(message?.text).not.toContain("binary in the diff");
-    expect(block.verdict).not.toBe("fail");
+    expect(block.verdict).toBe("fail");
+
+    const warn = run("base-binary-text-diff", "warn");
+    expect(unavailable(warn).map((m) => m.level)).toEqual(["warn"]);
   });
 
   it("binary-modified-both-dropped: the flagged diff entry wins the merge, so the message is an error and names the file once", () => {

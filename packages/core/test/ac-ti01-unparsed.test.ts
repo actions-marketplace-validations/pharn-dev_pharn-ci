@@ -1,11 +1,12 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { check } from "../src/check.js";
 import { indexTestFile } from "../src/testIndex/indexTestFile.js";
+import type { TestSourceFile as SourceFile, TestSourceDrop } from "../src/testSources.js";
 import { FIXTURES, fixture } from "./helpers.js";
 import { expectValidReport } from "./schema.js";
-import { withoutFix } from "./v090-codes.js";
+import { check } from "./text-coverage.js";
+import { withoutFix } from "./without-fix.js";
 
 // fix/unparsed-added-test-file, part 2: a deleted test file with a same-stem test file added keeps TI01 at the mode's
 // level when its tests cannot be compared by body. When the base text was read but the test index refused it, the
@@ -19,13 +20,9 @@ const UNPARSED =
 const NOT_AVAILABLE =
   "Test file deleted; a test file of the same name was added, but the text to compare their tests was not available.";
 
-interface SourceFile {
-  path: string;
-  text: string;
-}
 interface Side {
   files: SourceFile[];
-  dropped: { path: string; reason: string }[];
+  dropped: TestSourceDrop[];
 }
 
 /** The `<logical path>.txt` files under one side of a fixture case. */

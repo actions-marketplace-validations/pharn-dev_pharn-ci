@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import type { Report } from "../src/report.js";
+import type { TestSources } from "../src/testSources.js";
 import { fixture } from "./helpers.js";
 import { expectValidReport } from "./schema.js";
 
@@ -9,16 +11,6 @@ import { expectValidReport } from "./schema.js";
 
 const CODE = "TEST_INTEGRITY_INDEX_UNAVAILABLE";
 const PATH = "src/a.test.ts";
-
-interface Message {
-  code: string;
-  level: string;
-  text: string;
-}
-interface Report {
-  verdict: string;
-  messages: Message[];
-}
 
 const BASE = [
   'import { expect, it } from "vitest";',
@@ -43,8 +35,8 @@ const DIFF = `${[
   "+  expect(total([1])).toBe(1);",
 ].join("\n")}\n`;
 
-async function run(testSources: unknown): Promise<Report> {
-  const { check } = await import("../src/check.js");
+async function run(testSources: TestSources): Promise<Report> {
+  const { check } = await import("./text-coverage.js");
   const report = check({
     version: "0.1.0",
     coverage: { text: fixture("test-files-deleted/coverage.info"), format: "lcov" },
@@ -54,9 +46,9 @@ async function run(testSources: unknown): Promise<Report> {
     repoFiles: [PATH, "src/cart.ts"],
     testIntegrityMode: { input: "block" },
     testSources,
-  } as unknown as Parameters<typeof check>[0]);
+  });
   expectValidReport(report);
-  return report as unknown as Report;
+  return report;
 }
 
 describe("CORE-69: a modified test file already unreadable at the merge base keeps warning", () => {

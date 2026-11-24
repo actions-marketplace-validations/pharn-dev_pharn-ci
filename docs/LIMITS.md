@@ -1,6 +1,6 @@
 # pharn-ci — Limits
 
-What pharn-ci does **not** guarantee, stated plainly. pharn-ci is pre-1.0 (latest release: `v0.11.0`).
+What pharn-ci does **not** guarantee, stated plainly. pharn-ci is pre-1.0 (releases: [`CHANGELOG.md`](../CHANGELOG.md)).
 These are the design's inherent limits and the known gaps in what is built. For the security design
 see [`THREAT-MODEL.md`](./THREAT-MODEL.md).
 
@@ -50,7 +50,10 @@ see [`THREAT-MODEL.md`](./THREAT-MODEL.md).
   group name it held is added, in a test with at least one assertion, in another test file of the change (a test of an
   added file, or a test of a modified file whose full name is not at base), and every test it held is found again in a
   distinct one of those tests by its body: a body-token Jaccard of at least 4/5, or a new body that holds at least 4/5
-  of the old body's distinct tokens and every assertion chain it held. A name alone never qualifies, so a file deleted
+  of the old body's distinct tokens and every assertion chain it held. Each test of the deleted file is compared by body
+  with at most 256 not-yet-paired new tests with an assertion, in head order, after the first 256 of its leaf name; a
+  test whose match lies past that bound keeps the file at the mode's level (`block`, `warn` in mode `warn`). A name
+  alone never qualifies, so a file deleted
   and re-added under the same names with trivial assertions blocks; the moved tests are also judged by TI05, TI06 and
   TI07 as pairs. A test moved and refactored past those thresholds (a new fixture helper, say) keeps the file a
   `block`: a known false block, cleared with the accept label. A name added in a file the change does not touch does
@@ -265,8 +268,11 @@ whether a test is still good.
   alone, because a name is what a change controls most easily: a real test deleted beside a hollow new test with a
   similar name stays a `block`. So a suite rewritten in one describe, whose tests get reworded names and bodies that
   share less than the rename-in-place or cross-file thresholds above, blocks even when nothing was lost (the corpus dry
-  run had one such PR). A person who confirms the rewrite clears it with the accept label. Every probe looks at no more
-  than 256 candidates.
+  run had one such PR). A person who confirms the rewrite clears it with the accept label. Each removed test is compared
+  with at most 256 not-yet-paired new tests per rule, in head order; a test whose match lies past the bound is reported
+  as removed. The bound counts the new tests a rule compares the removed test with: tests already paired, and in the
+  cross-file rules the removed test's own file, are skipped and not counted. A test past it is a TI02 at the mode's
+  level (`block`, `warn` in mode `warn`); when the test was in fact renamed or moved, the accept label clears it.
 - **Two tests merged into one: a known false block.** A change that folds two tests of a file into one test, keeping
   both bodies' assertions, leaves one of the two base tests without a counterpart: the merged test answers at most one
   of them (by name or by body; only an `.each` test answers several), no other new test of the file holds the other
@@ -282,7 +288,8 @@ whether a test is still good.
   compared (`TEST_INTEGRITY_INDEX_UNAVAILABLE`). An added test file the index refuses (or that has no text at HEAD,
   or no Python index) holds no test any signal reads: a test cannot be found to have moved into it, and its own
   tests are not checked. The same message names it in a sentence of its own, as a warning in every mode.
-- **Caps.** At most 20 findings per file; the matching probes at most 256 candidates per test (section 8).
+- **Caps.** At most 20 findings per file; the matching compares each removed test with at most 256 not-yet-paired new
+  tests per rule (section 8).
 - **Order of the rules.** Name pairs and phase 1 (4/5), then the rename in place, the `.each` replacement, the exact
   cross-file body hash or leaf name with a body that holds the old one (body evidence) and, last, the cross-file
   similarity. Every threshold is an integer comparison.
@@ -385,6 +392,18 @@ Both readings give one finding per line, the stronger one kept.
   name is the one pytest never collects, but tests of one name are paired in line order, so it is reported as a skip of
   the existing test, at the added `def`. Without the Python index, the line reading reads `pytest.importorskip(` and
   `raise unittest.SkipTest(` at the start of a line as a skip inside a body (`warn`), and none of the other forms.
+- **Decided only by the line pass today.** In these inputs only TI03's line pass, with its import-alias reader
+  (`pythonAliases.ts`, which resolves `import pytest as pt` and the like from the file's own column-0 imports), decides
+  the outcome; nothing the Python index returns does. Each was measured by running `check()` with a real index, with
+  the reader and with it stubbed out (CORE-351). Block-level: a `.py` test file whose merge-base text the index refuses
+  while its head indexes (the base-only refusal stays a warning); a modified test file dropped as `missing` on one side
+  while the other side has text; an alias skip decorator above a `def` the index does not collect as a test (custom
+  pytest collection such as `def check_*`, a method of a class not named `Test*`, a helper, a function nested in a
+  test); an alias `@pt.mark.xfail` added to a test the base already skipped; an alias `pytestmark = pt.mark.skip` in a
+  file with no tests. Warning-level: an alias skip call inside a helper or hook body (cannot be placed); an alias
+  conditional skip added to a test that already had one; an alias decorator above a shown `def` that is not a test;
+  and the warning-level versions of the base-only refusal and the one-sided `missing` drop. Reading these from the
+  index and deleting the alias reader is [CORE-356](https://linear.app/pharn-dev/issue/CORE-356).
 - **A skip moved to another file** reads as added without the test index, because the removed line is looked for in
   the same file only. A rename that edits the skip is judged against the old file's lines. With the index, a test the
   match finds again in another file is judged by its pair.
@@ -641,11 +660,14 @@ TI09 compares a fixed list of settings of the test-runner config files the chang
   `[tool.pytest.ini_options]` table count: a change from a file that has either one to a file that has neither gives
   nothing.
 - **pytest's native `[tool.pytest]` table.** `pyproject.toml` is read for pytest 9's native `[tool.pytest]` table
-  beside `[tool.pytest.ini_options]`, by the same rules. The headers are matched whole (`[tool.pytestx]`,
-  `[tool.pytest.foo]` and `[[tool.pytest]]` are other tables and give nothing), and a quoted or dotted key in a header
-  is not read. When a file holds both tables their entries are merged into one, and the native value wins over the
-  `ini_options` one of the same key, whatever pytest itself does with a file that has both (TI09 does not model it).
-  A table that cannot be read is refused like the other config texts (`too-large`, `invalid-toml`).
+  beside `[tool.pytest.ini_options]`, by the same rules. Both are taken from the file's nested TOML document, so a
+  table reads the same whether it is written as a header (quoted or spaced parts included), dotted keys
+  (`[tool]` then `pytest.ini_options.addopts = …`) or an inline table (`[tool.pytestx]`, `[tool.pytest.foo]` and
+  `[[tool.pytest]]` are other tables and give nothing). When a file holds both tables their entries are merged into
+  one, and the native value wins over the `ini_options` one of the same key, whatever pytest itself does with a file
+  that has both (TI09 does not model it). A file that is not valid TOML anywhere (a duplicated key or table included)
+  is refused like the other config texts (`invalid-toml`), as pytest refuses it, and so is one over the size cap
+  (`too-large`).
 - **Playwright per-project settings.** Only the top-level keys are read. `projects[].retries`, `projects[].grep`,
   `projects[].testMatch` and everything under `use` are not.
 - **Vitest and jest projects are matched by identity.** The object projects of a `projects` list are matched by name
@@ -803,46 +825,14 @@ TI08 reads the status and the added lines of snapshot files, the added and remov
   given per file. A diff that reaches `check()` already parsed without kept text yields no text-based TI08 finding; the
   mass-change rule still works, as it reads only the status and the added lines.
 
-### What TI15 misses
+### TI15 is not emitted
 
-TI15 reads the added lines of JS/TS and Python test files and of JS/TS and Python source files that are not test files.
-It is an `info` signal: it never blocks or warns, because on the precision corpus 0 of 30 sampled findings were a real
-special case (see [PRECISION.md](./PRECISION.md#official-results-v030-2026-10-26)).
-
-- **Both sides must be added in this diff.** A test that already holds the value, or a condition that was there before,
-  gives nothing.
-- **The `hard-coded-answer` form.** A change that adds no test line has no test literal to match, and the numbers in it
-  are one digit (see the Skylos list below).
-- **Short and common literals.** A string under 6 characters (UTF-16 code units), a number under 4 significant digits
-  and the stop-list (`true`, `false`, `null`, `none`, `undefined`, `test`, `error`, `default`, `get`, `post`, `put`,
-  `patch`, `delete`, `head`, `options`, `utf-8`, `utf8`, and the `typeof` results `string`, `number`, `boolean`,
-  `object`, `function`, `symbol`, `bigint`) are not read. A real special case with a short value (`"vip"`, `42`) is
-  missed.
-- **One package root.** A test literal matches a source condition only within the same package: the root of a path is
-  its nearest directory that holds a `package.json` or `pyproject.toml` (in the tracked files or added by the diff).
-  With no manifest at all, a path under `packages/` or `apps/` takes its first two segments as its root. A shared
-  literal between two packages is not seen, and a monorepo with no manifest outside `packages/` and `apps/` is one
-  root.
-- **Excluded directories.** A test file or a source file with a directory segment named `examples`, `benchmarks`,
-  `bench`, `docs` or `fixtures` is left out (the file name does not count, so `src/examples.ts` is read). A special
-  case in such a directory is missed.
-- **Template literals with `${`** are skipped.
-- **Other comparisons.** Only `===`, `!==`, `==`, `!=`, a `case` label and a Python `in (...)` group are read.
-  `includes`, `startsWith`, `Set.has`, `<` and a regular expression are not.
-- **Literals are compared as written.** Differently escaped forms of one value differ, the match is case-sensitive, and a
-  string never equals a number.
-- **Literals in comments are read,** because the scan does not understand comments or regular expressions. A quote in a
-  comment can open a literal, and an unclosed quote ends the scan of its line.
-- **Numbers need 4 significant digits.** A status code such as `404` or a number such as `200` or `1000` is not read
-  (trailing zeros of a whole number do not count); `1234` and `0.1255` are.
-- **The detail names the literal's kind and length, never its text.** A matched value can be a secret
-  (`if (key === "<token>")`), and the report leaves the job, so a reviewer finds the value at the source line the
-  finding names (`a 12-character string literal`, with the source `path:line` and the test file's path).
-- **Go and other languages** give nothing on either side.
-- **10 per change.** The first 10 findings of a change, ordered by source path, then line, then detail, are signals;
-  the rest are counted per source path, and the message ends with how many more there are in each file.
-- **Kept text is capped** at 5000 lines per file and 400 characters per line (section 8). A diff that reaches `check()`
-  already parsed without kept text yields no TI15.
+TI15 (a source condition that compares with a value the tests add) is not emitted since the release after v0.11.0
+(decision Q6). It was an `info` signal, on the precision corpus 0 of 30 sampled findings were a real special case (see
+[PRECISION.md](./PRECISION.md#official-results-v030-2026-10-26)), and it missed its own Skylos case,
+`hard-coded-answer`. So a source condition that special-cases a test value is not reported at all. The
+`TEST_INTEGRITY_TI15` code stays in the schema, so an older report that holds it still validates, and a policy may
+still set a severity for `TI15`: the key validates and changes nothing.
 
 ### What TI16 misses
 
@@ -949,7 +939,7 @@ file and runs no test. It is a warning in every mode and never fails the check.
 ## What test integrity does not catch
 
 The test-integrity signals that ship today (TI01, TI02, TI03, TI04, TI05, TI06, TI07, TI08, TI09, TI10, TI11, TI12,
-TI13, TI14, TI15, TI16 and TI17) read the added and removed lines of the diff, in files they recognise by name; TI02, TI05,
+TI13, TI14, TI16 and TI17; TI15 is not emitted) read the added and removed lines of the diff, in files they recognise by name; TI02, TI05,
 TI06, TI07 and TI12 also read the text of the JavaScript, TypeScript and Python test files the change modifies, and TI09
 the text of the test-runner config files it touches, at the merge base and at `HEAD`. They do not run tests or read a file that the diff does not touch, and they judge the strength of an
 assertion only from a fixed table of matchers (TI06). The accept label records that a reviewer who is not the author
@@ -983,10 +973,11 @@ Caught:
 - `always-true-matcher` — caught by TI17: a custom matcher whose `pass` is the constant true replaces `toBe(5)`, and
   the change adds an assertion that calls it. TI17 warns and never blocks by default; see "What TI17 misses" below.
 
-Not caught. This one names the signal meant for it, and that signal exists and misses its case:
+Not caught:
 
-- `hard-coded-answer` — missed; planned: TI15. The source returns the expected value for the test's input. TI15 now
-  exists and still misses it, because the change adds no test line to match against and its numbers are one digit.
+- `hard-coded-answer` — missed. The source returns the expected value for the test's input. No signal is planned for
+  it: TI15 was meant for it and missed it (the change adds no test line to match against and its numbers are one
+  digit), and TI15 is not emitted since the release after v0.11.0.
 
 Other ways a change can weaken tests without being seen:
 
@@ -1051,9 +1042,18 @@ must-not-trigger case exist; it does not mean every spelling is seen (see the Py
 | TI12 module under test mocked | caught — `vi.mock` and `jest.mock` of the module under test | caught — `patch` and `mock.patch` of it, through the Python index |
 | TI13 coverage exclusion | caught — Istanbul, V8 and C8 hints | caught — `block-pragma-*` and `pass-pragma-*` for `# pragma: no cover` |
 | TI14 pharn-ci config loosened | caught — the config file | not applicable — it reads the pharn-ci config, not test code |
-| TI15 test value hard-coded | caught — JS/TS test and source files | caught — Python test and source files |
+| TI15 test value hard-coded | not emitted since the release after v0.11.0 | not emitted since the release after v0.11.0 |
 | TI16 suppression added | caught — ESLint, TypeScript and Biome comments | caught — `noqa`, `type`, `pylint` and `pyright` comments |
 | TI17 always-true assertion | caught — `warn-matcher-arrow` | caught — `warn-helper-pytest` and `warn-wildcard-python-any` |
+
+**When the Python index does not read a file.** A Python run that gives no index (no interpreter, Python older than 3.8,
+a failed or timed-out run, output too large or unreadable) or a refusal of a `.py` test file's head (`syntax-error`,
+`too-deep`, `too-large`, `parser-threw`) leaves that file out of every signal that compares test text. Since CORE-351
+that fails closed: in `test-integrity: block`, the modified or added `.py` test file is named in
+`TEST_INTEGRITY_INDEX_UNAVAILABLE` as an error (the accept label lowers it), where it was a warning before; JS/TS test
+files of the same change are still compared. One case is not per file: with no interpreter at all (`python-not-found`)
+and a modified `.py` test file, the whole comparison stops before any JS/TS file is compared (TI02 and TI05 did not
+run), an error the accept label never lowers. A head the index read, with a base only the index refused, still warns.
 
 **Python misses.** What the Python column does not see:
 
@@ -1074,7 +1074,7 @@ must-not-trigger case exist; it does not mean every spelling is seen (see the Py
   top-level import of the same name replaces the earlier binding, so `import os as pt` after `import pytest as pt` hides
   pytest.
 - `[tool.pytest]` and `[tool.pytest.ini_options]` in one `pyproject.toml` are merged into one table in which the native
-  value wins, which is not necessarily what pytest does; a header written with a quoted or dotted key is not read.
+  value wins, which is not necessarily what pytest does.
 - Results depend on the runner's Python. Test files are parsed by the runner's own `python3` (or `python`), so a file
   that uses syntax newer than that interpreter (for example a `match` statement on Python 3.8 or 3.9) may not parse
   there; it is then named in `TEST_INTEGRITY_INDEX_UNAVAILABLE` (`warn`) and not compared. Pin the Python version
@@ -1115,15 +1115,29 @@ must-not-trigger case exist; it does not mean every spelling is seen (see the Py
   applied.
   `TEST_INTEGRITY_TEXT_TRUNCATED` is an error in mode `block` when a JavaScript, TypeScript, Python or Go test file the
   change modifies has more than 5000 changed lines. A reviewer who is not the PR author can lower these per-file errors
-  to warnings with the accept label; the did-not-run error stays. These still only warn in block: an added test file
-  that cannot be read, a modified test file that could not be read at the merge base either (for a reason other than
-  `over-file-cap`), the other reasons at HEAD (`syntax-error`, `syntax-error-heavy`, `parser-threw`, `missing`,
-  `unsafe-path`, `over-total-cap`), the Python index reasons other than `python-not-found`, and a cut file
-  that is not a modified test file. The change can cause one of these itself: the test files it modifies are read
-  first, so only they fill the 16 MiB cap ahead of one another, and a change that pads the other test files it modifies
-  (each under 512 KiB, sorting before the target) past 16 MiB has the target dropped at HEAD as `over-total-cap`. That
-  file then only warns and TI02 and TI05 do not compare it. This check does not close that; the padded files are in
-  the diff for a reviewer to see. A7 and P02–P07 need a local diff (`fetch-depth: 0`). Their "did not run" message is
+  to warnings with the accept label; the did-not-run error stays. Two more per-file cases are errors in block (CORE-351).
+  A modified test file the sources dropped on one side fails closed: as `over-file-cap` or `over-total-cap` on either
+  side whatever the other side holds, and as `too-large`, `binary` or `unsafe-path` while the other side's text was
+  read (the pull request moved the file across the boundary); `too-large` or `binary` on both sides and `missing` on
+  either side do not. A `.py` test file, modified or added, whose head text was read but not indexed by the Python index
+  fails closed: a Python run that gave no index (`python-too-old`, `python-failed`, `timeout`, `output-too-large`,
+  `bad-output`, and `python-not-found` for an added file; with a modified `.py` test file `python-not-found` stays the
+  whole-run did-not-run error) or a refusal as `syntax-error`, `too-deep`, `too-large` or `parser-threw`, whatever
+  the base side held. A caller that passes no Python index at all (a library call, not the CLI or the Action) keeps the
+  warning. These still only warn in block: an added JS/TS test file that cannot be read, a modified test file that
+  could not be read at the merge base either (for a reason other than `over-file-cap` or `over-total-cap`), the other
+  reasons at HEAD of a JS/TS file (`syntax-error`, `syntax-error-heavy`, `parser-threw`) and `missing` when the base
+  indexed, a `.py` file whose
+  head indexed while only its base was refused, the Python index's own `missing`, and a cut file that is not a
+  modified test file. The change can no longer use the cap to hide a modified test file: the test files it modifies
+  are read first, so only they fill the 16 MiB cap ahead of one another, and a change that pads the other test files
+  it modifies (each under 512 KiB, sorting before the target) past 16 MiB has the target dropped at HEAD as
+  `over-total-cap`, which now fails the run in block; the padded files are still in the diff for a reviewer to see. A
+  long-standing oversized or non-UTF-8 test file that a pull request shrinks or fixes also fails in block now, until
+  the accept label is applied. A file renamed from a path that is not a test file into a test path (`tests/helper.py`
+  to `tests/test_helper.py`) is read at HEAD only and counts as an added test file everywhere (its tests count as
+  added in the tests-changed summary, and a test removed elsewhere that it holds reads as moved), while TI03's line
+  pass still reads its diff lines as before. A7 and P02–P07 need a local diff (`fetch-depth: 0`). Their "did not run" message is
   a warning, except that `POLICY_SETTINGS_INVALID` for unread settings is an error under a required
   app policy or a policy that sets one of the lists `forbidden_permissions`, `required_permissions_deny`,
   `allowed_mcp_servers`, `forbidden_mcp_servers` or `required_hooks` with its rule (P02 to P06) at
@@ -1278,8 +1292,9 @@ for ten shapes of secret by prefix and position. It is a heuristic, not a secret
   `Bearer`; quote it, or the scheme word hides the value from S10.
 - **The files must be committed text.** A file over 512 KiB, a binary file, a path git cannot read safely, or one past the
   caps (200 files, 16 MiB) is named in `AGENT_CONFIG_SECRET_UNSCANNED` and not read.
-- **The Action reads the checkout's `HEAD`.** With a diff from the local checkout that is the pull request head; in
-  PR-number mode or with a compare-API diff it may not be, so nothing is read and the report says so.
+- **The Action reads the checkout's `HEAD`.** With a diff from the local checkout, or with no diff to measure (a base
+  that is `HEAD` or after it, no base), that is the head under review; in PR-number mode, with a compare-API diff or a
+  `pull_request_target` checkout of the base it may not be, so nothing is read and the report says so.
 - **An embedding with no batch git runner scans nothing.** The CLI and the Action gather the sources only when their
   deps carry a batch git runner (`gitBatch`); a program that calls `check()` itself passes `agentConfigSources` or gets
   no A7 message.
@@ -1287,9 +1302,11 @@ for ten shapes of secret by prefix and position. It is a heuristic, not a secret
 
 ## Stale agent instructions
 
-SI01 to SI04 (`SETUP_STALE_*`) compare the commands and paths the agent instruction files name with the tracked files,
-the root `package.json` and the root `Makefile`. They are a heuristic at `warn` (SI04 `info`), not a review of the
-instructions, and they never fail the check. What they miss:
+SI01 to SI03 (`SETUP_STALE_*`) compare the commands and paths the agent instruction files name with the tracked files,
+the root `package.json` and the root `Makefile`. They are a heuristic at `warn`, not a review of the instructions, and
+they never fail the check. SI04 is not emitted since the release after v0.11.0 (decision Q6): it needed the git
+history, so it was silent on the default shallow checkout, and it cost a `git log` call per instruction file. An
+instruction file that went old next to the code it describes is not reported. What they miss:
 
 - **Prose without backticks is never read.** "Run the build script" or a path written in a sentence names nothing; only
   inline code spans, shell-fenced (or unmarked) blocks, Markdown link targets and `@path` imports count. HTML links
@@ -1314,26 +1331,25 @@ instructions, and they never fail the check. What they miss:
   tracked (`pharn/.run/x`), extensionless tokens whose first segment is not a tracked entry or is a dependency name
   (`next/link`, `owner/repo`) and files a tool creates later are never reported, even when an instruction tells the
   agent to read them.
-- **Examples and negations are word heuristics.** A fenced block in any language but a shell is an example and is not
-  read; an indented block, an HTML comment and frontmatter are not read; a line or a section under a heading with
+- **Examples and negations are word heuristics.** A fenced block in any language but a shell (PowerShell and `cmd`
+  count as shells) is an example and is not read; its language is the fence's first word cut at `{` (`js{1,3}` is
+  `js`) or the word in a leading `{…}` (`{bash}`, `{.sh}`). Fences are read as CommonMark reads them inside list
+  items, but not inside a block quote (`` > ```bash ``), whose lines are prose. An indented block, an HTML comment and
+  frontmatter are not read; a line or a section under a heading with
   `not`, `never`, `don't`, `avoid`, `instead`, `deprecated`, `removed`, `legacy`, `example` or a similar word is
   skipped. A legacy name in a line without such a word ("equivalent to `middleware.ts`") is still read.
 - **Diff-aware by design.** A stale token in an instruction file the change does not touch is reported only when the
   change deletes or renames the path or file it names, or removes the script or target from the root manifest. A
   repository whose instructions went stale over many past pull requests shows nothing until one of those files is
   edited. Without a diff nothing is checked.
-- **SI04 needs history and is coarse.** The instruction file's last commit is read with `git log -1 --format=%ct`; on a
-  shallow checkout (the `actions/checkout` default) every file's last commit is HEAD, so SI04 is silent; use
-  `fetch-depth: 0`. A file is old after 90 days, a fixed value. Only exact paths count as named, and at most 20
-  instruction files are timed. An old file that still describes the code is reported all the same (`info`).
 - **Caps.** At most 50 instruction files (in path order), the first 256 KiB of each and 2000 tokens per file are read;
   the root `package.json` and `Makefile` are read up to 512 KiB. At most 20 findings per file and signal and 100 in
   all are listed; the messages count the rest. The tracked files are read from `git ls-files`.
 - **The Action reads only with a local diff.** In PR-number mode, with a compare-API diff or without a batch git
   runner nothing is read and nothing is reported. A failed read of the instruction files writes one log line and
-  reports nothing; a failed manifest read leaves SI01 out, a failed `git log` leaves SI04 out.
+  reports nothing; a failed manifest read leaves SI01 out.
 - **The org policy does not set these levels yet.** `test_integrity.signals` and the policy rules do not name SI01 to
-  SI04, so a policy cannot raise them to `error`.
+  SI03, so a policy cannot raise them to `error`.
 
 ## Prompt-injection scan
 
@@ -1394,7 +1410,9 @@ a text filter for content aimed at the next agent, not a judgement of what a tex
   the check for that reason; split the change. The rarer Markdown extensions (`.mdown`, `.mkd`) and plain text
   count against the budget for other files, so a cut there only warns. At most 20 findings per signal and file and 200 in
   all are listed; the messages count the rest.
-  At most 100 of an app policy's phrases are matched.
+  At most 100 of a policy's phrases are matched. For a `file:` policy united with the copy at the base commit, the base
+  copy's phrases are kept first and the pull request's own additions fill what is left, so a pull request cannot push
+  the base's phrases out by adding phrases that sort earlier; only a base copy with more than 100 phrases loses some.
 - **A pre-parsed diff must carry the text.** A program that calls `check()` with a diff it parsed itself gets no
   findings unless it parsed with `readDiffChunks` or the reader's `keepAddedText` option (and, for the separate
   budget of instruction and Markdown files, `priorityAddedText: injectionTextPriority`).
@@ -1435,9 +1453,18 @@ What they miss:
   6000 units.
 - **The CLI wrapper.** `pharn-ci test` runs the command without a shell, so `npm test && x`, shell globs and variables
   are not expanded (wrap them in `sh -c '…'` yourself); on Windows a `.cmd` shim such as `npm` must be named as
-  `npm.cmd`. It exits `0` only when every matched file was read whole and every failed test is quarantined; a failure
-  outside the tests (a build error with no JUnit, a crash before the report was written) keeps the command's code. A
-  signal's exit code is `128 + n` as the shell reports it. `junit-include-output` is not shipped: no output is ever read
+  `npm.cmd`. It exits `0` only when every matched file was read whole, every failed test is quarantined and no matched
+  file is stale; a failure outside the tests (a build error with no JUnit, a crash before the report was written)
+  keeps the command's code, and so does a quarantined failure next to an unrelated one in the same fresh file. A
+  signal's exit code is `128 + n` as the shell reports it.
+- **Stale files.** A matched file whose modification time and sha256 are both unchanged since before the command
+  started is stale, and keeps the command's code (stderr names it). This tells only whether the run wrote the file,
+  not what wrote it: a command that crashes after a step of its own touched or copied an old report makes that report
+  fresh, and a forged file written during the run is fresh (THREAT-MODEL residual 42). On a file system that keeps
+  modification times coarsely (a second, or two on FAT), a report rewritten with the same bytes within that tick looks
+  unchanged and is called stale, which keeps the command's code. Files are hashed in match order within 25 MiB in all;
+  a file past that budget is compared by its time alone, so the same time means stale. When the files cannot be
+  recorded before the run (the glob walk hits its limit, a file cannot be read), no file is fresh. `junit-include-output` is not shipped: no output is ever read
   or sent.
 
 ## Dependency safety
@@ -1585,7 +1612,7 @@ Every message and finding of the report carries an optional `fix` object ([Repor
 - **D04 asks for a review, not a revert.** A lockfile that drifts from its manifest may be a real change, so D04 is
   `request-review`; the hint also says to regenerate the lockfile with the package manager.
 - **`none` is a kind, not a gap.** The operational messages (a coverage file that is missing, a policy that could not be
-  fetched, a JUnit file that was refused) and the signals no code change fixes (SI01 to SI04 and the policy rules P01,
+  fetched, a JUnit file that was refused) and the signals no code change fixes (SI01 to SI03 and the policy rules P01,
   P07 and P10) have kind `none`; the hint still says what to check.
 - **P12 has no hint.** The schema allows the id, but core produces no P12 finding, so there is no entry for it.
 - **A report that did not go through `check()` has fewer hints.** The accept label and the upload outcome add `fix` to the
@@ -1605,7 +1632,10 @@ applied once per run. What it does not do:
   full timeout, and with the one retry a failing request can take about 21 s.
 - **Fork pull requests and jobs without `id-token: write` get no policy.** GitHub gives a fork pull request no OIDC
   token, and a job that does not grant `id-token: write` has none. Under `policy: auto` that is silent apart from one
-  info line, and the check runs without the policy; `policy: required` makes it a failing check. The OIDC token is also
+  info line, and the check runs without the policy; `policy: required` makes it a failing check. A job that grants
+  `id-token: write` and whose token request fails or times out is not silent: it gets a `POLICY_UNAVAILABLE` warning
+  (`no-oidc-token`), but pharn-ci cannot tell a runner outage from a step that broke the token service, and it runs
+  without the policy all the same. The OIDC token is also
   the only identity the app sees, so a repository the app does not know gets no policy (`204` or `404`).
 - **A `file:` policy can only tighten.** The pull request carries the file, so pharn-ci applies a threshold, mode,
   `setup.require`, `setup.expect` and signal severities only upwards, and never its exclusions, root, accept label or
@@ -1613,15 +1643,32 @@ applied once per run. What it does not do:
   effective settings only when it is a tightening-only document and no lower layer holds a value above it that the
   app would have named: an app value above a lower layer's is recorded as `looser`, while the same file value above it
   is not, so the two reports then differ by one `POLICY_OVERRIDE_IGNORED` message.
+- **A `file:` policy is united with its copy at the base commit only when that copy can be read.** The Action and the
+  CLI read the file at the base commit the local diff is taken against (the base branch's copy, not necessarily the
+  merge base) and apply each setting a file may carry as the stricter of that copy and the pull request's (the per-key
+  rules are in [Changing a `file:` policy](policy.md)). The copy is read only from a local diff: in PR-number mode,
+  with a compare-API diff, or when the file is new, unreadable or not a valid policy at the base commit, every setting
+  comes from the policy file in the checkout alone, and no message says the union did not happen; P09 still reports the
+  edit. A deleted base value equal to its default is not named (`agents.protected_paths_mode` is the one exception),
+  and a united list is not held to the 1000-entry input cap (at most twice that; the cap validates one document's
+  input and has no effect at run time).
+- **An older build skips what a newer policy adds.** A key, id or agent tool the app serves that this version does
+  not know is left out, the rest of the policy applies, and `POLICY_KEYS_UNKNOWN` names it (up to 20 names). Until the
+  Action pin is updated, a skipped signal, rule or tool is not checked, and a new key that would qualify a known setting
+  is not seen, so the known setting applies as this version reads it (THREAT-MODEL, item 45). A known key with a bad
+  value still voids the policy (`POLICY_UNAVAILABLE`), and a `file:` policy with an unknown key still fails the step.
 - **The `policy` and `app-url` inputs are the workflow's.** A pull request that edits the workflow can set them
-  (THREAT-MODEL, items 22 and 24).
+  (THREAT-MODEL, items 24 and 26).
 - **Only some keys are applied.** The `setup` lists are applied: `forbidden_files` feeds P08, `forbidden_permissions`,
   `required_permissions_deny`, `allowed_mcp_servers`, `forbidden_mcp_servers` and `required_hooks` feed P02 to P06,
   and `setup.consistency` feeds P07. `policy.rules` applies to P01 to P09, P11, P13 and P14 (P10 cannot be overridden).
   Of `agents`, only `agents.labels`, `agents.extra_logins`, `agents.protected_paths`, `agents.protected_paths_mode`,
   `agents.max_files` and `agents.max_changed_lines` are applied (the first two add to the detection, the next two feed
   P11, the last two P14); `flaky.quarantine` decides whether the app's quarantine list applies to the JUnit results;
-  `dependencies` and the other `agents` keys are validated and carried in the document, not applied yet.
+  the `dependencies` keys are applied to [dependency safety](checks/dependencies.md) (from a `file:` policy, its
+  registries and allowed hosts are not); `policy.required` (app policy only) makes agent settings files that could not
+  be read an error. `agents.require_human_approval` and `policy.rules.P12` are validated and carried in the document,
+  not applied: no P12 runs.
 - **What P09 sees, and what it misses.** P09 sees four kinds of edit in the diff: (1) the `file:` policy file itself,
   edited or renamed away; (2) the config in use, while `.pharn/ci.yml` holds a setting looser than the policy; (3) a
   file under `.github/workflows/`, while a workflow input is looser than the policy; (4) `.claude/settings.json` or
@@ -1629,8 +1676,8 @@ applied once per run. What it does not do:
   cannot see a pull request that edits the workflow to `policy: never`, removes the pharn-ci step or changes
   `app-url`: the Action then does not run or does not ask for the policy, so nothing is checked against it. TI11 and
   `CONFIG_CHANGED_IN_DIFF` flag such a workflow edit. Class 4 is judged when the files were read: a block when the
-  edited file fails P02 to P06 or could not be checked, a warn when it only warns or supplies a required deny rule or
-  hook, info when it complies; it stays a warn (direction not judged) when they were not read.
+  edited file fails P02 to P06 or could not be checked, a warn when it only warns, and no entry when it complies or
+  supplies a required deny rule or hook; it stays a warn (direction not judged) when they were not read.
 
 ### What P01 misses
 
@@ -1640,7 +1687,8 @@ applied once per run. What it does not do:
 - **Presence, not content.** A file counts when the inventory lists it: tracked in `HEAD`, by path. An empty file
   counts (it gets `AGENT_SETUP_FILE_EMPTY`), and what a file says is never read.
 - **Unknown names are skipped.** A tool name in `setup.expect` that is not on the fixed agent tool list gives no
-  finding (the policy validator rejects one in a served or `file:` policy first).
+  finding: a served policy leaves it out of the list and names it in `POLICY_KEYS_UNKNOWN`, and a `file:` policy that
+  holds one is refused.
 - **Tracked files only.** A file that is not committed, or that `git ls-files` could not list, is not seen.
 
 ### What P02–P06 miss
@@ -1691,9 +1739,11 @@ P08 matches the tracked paths of the repository against `setup.forbidden_files`.
   `POLICY_OVERRIDE_IGNORED` and not applied, because the pull request carries the file.
 - **The CLI has no pull request.** It gathers no agent PR facts, so P11 never fires there.
 - **At most 50 violations are listed.** The rest are counted in the `POLICY_P11` text, which names up to 20 paths.
-- **The merge-base read needs a local diff.** The `file:` policy is read at the merge base only for a diff from the
+- **The base-commit read needs a local diff.** The `file:` policy is read at the base commit only for a diff from the
   local checkout. PR-number mode and the compare API fail closed: an edited policy file then makes the pull request an
-  agent PR (`policy-lists-unreadable`).
+  agent PR (`policy-lists-unreadable`). The protected paths and `protected_paths_mode` then come from the policy file
+  in the checkout alone, which in PR-number mode is not the pull request's copy, and nothing is united with it (see
+  [Org policy](#org-policy)).
 - **Dependabot and Renovate count as agent PRs.** Protecting `package.json` or a lockfile blocks their updates: do not
   protect files those bots must update.
 - **Other `agents` keys are not applied.** `require_human_approval` (rule P12) is validated and carried, not applied by
@@ -1718,7 +1768,7 @@ What it misses:
   apply, and a repository whose config already excludes wide paths counts less.
 - **Only agent PRs that identify themselves.** As for P11 (§9): an agent that commits through a person's account with
   no trailer, label or known login is judged as a person's, and the CLI, which has no pull request, never runs P14.
-- **An unreadable merge base fails closed only while the file still sets a cap.** When the merge-base `file:` policy
+- **An unreadable base copy fails closed only while the file still sets a cap.** When the `file:` policy at the base commit
   cannot be read (PR-number mode, a compare-API diff), a pull request that edits the file and removes every cap is not
   checked, the same gap P11 has for removed protected paths; the pull request still counts as an agent PR.
 
@@ -1735,6 +1785,8 @@ review of the instructions. What it misses:
   A root file and a nested `AGENTS.md` that name different tools do not contradict.
 - **Tools in indented, non-shell or multi-line code are missed.** An indented code block, a `json`, `python` or other
   non-shell fence, a command split over several lines and a command in a console line without a prompt declare nothing.
+  A fence inside a block quote (`` > ```bash ``) is prose, so it declares nothing either; a fence inside a list item is
+  read, as the stale-instruction check reads it.
 - **Negation is a word heuristic.** A span after a cue word ("don't", "instead of", "never"), before "is not" or
   "isn't", or under a heading with such a word is skipped. A list continuation (``Don't use `npm` or `yarn` ``) negates
   only the first span, and a file that names pnpm among others never contradicts a pnpm file.
@@ -1749,8 +1801,9 @@ review of the instructions. What it misses:
   large or at an unsafe path is one path-less violation at P07's severity, because a pull request can cause it; a path
   that is not a file at `HEAD` is `info`. At most 50 violations are listed (the rest are counted), and the message names
   up to 20 files.
-- **The Action reads only with a local diff.** In PR-number mode and with a compare-API diff the checkout may not be the
-  pull request head, so nothing is read and one `info` violation says so.
+- **The Action reads only from the head under review.** In PR-number mode, with a compare-API diff and with a
+  `pull_request_target` checkout of the base the checkout may not be the pull request head, so nothing is read and one
+  `info` violation says so.
 - **P07 runs only under a policy.** With no policy, `policy: never`, an unavailable policy or P07 switched off, no
   instruction file is read. A `file:` policy never lowers it below `warn`.
 
@@ -1828,7 +1881,7 @@ run. What it does not do:
   sent as they are. The cap is the smaller of 2048 bytes and the org's `settings.messageMaxBytes` from the same run's
   policy response, used only when that response was a `200` that validated whole (never under `policy: never` or a
   `file:` policy, never from a refused or missing response); the app can lower the cap, never raise it.
-- **`settings.redactMessages` is validated and not applied.** The Action never turns redaction off.
+- **`settings.redactMessages` is not read.** It is optional and skipped; the Action never turns redaction off.
   `settings.uploadJunit: false` keeps the JUnit results out of the upload; the response's `quarantine` list is applied
   to the JUnit results (see Flaky tests and JUnit results).
 - **The JUnit results are rebuilt, not sent.** With JUnit results, the archive also holds `junit/results.xml`, rebuilt
@@ -1896,7 +1949,7 @@ run. What it does not do:
   otherwise it is one TI10 finding; a binary workflow file is one TI11 finding; a binary pharn-ci config that the
   change modifies, renames or deletes is one TI14 finding; a binary test-runner config is judged by TI09 from its
   base and head text, as a text one is. A finding on a binary file has a fixed sentence and no line number, because
-  no file text reaches it. The accept label lowers each of them. Still missed: TI13 and TI15 in a binary source file,
+  no file text reaches it. The accept label lowers each of them. Still missed: TI13 in a binary source file,
   TI08 in a binary `package.json` or pytest config, a modified or added binary test file in a language the index does
   not read (only JS/TS and Python are indexed), snapshot files, and a deleted or renamed binary file that is not a test
   file. pharn-ci does not read the base branch's copies of these files and does not detect changes to
@@ -2061,8 +2114,10 @@ limited by git, Node or GitHub alone.
   deleted one once, so a change that modifies about 100 `.py` test files (fewer when it also adds or deletes some), or
   whose `.py` test files hold 16 MiB across both sides, can have a modified `.py` test file refused at HEAD while its
   base was indexed, even when that file is small. That fails `block` (the accept label lowers it). A body is compared by its first 4000
-  characters. Matching a test with a similar one probes at most 256 candidates per test, so a file of thousands of
-  near-identical bodies can report a renamed test as removed. At most 20 TI02 and 20 TI05 findings are listed per file;
+  characters. Each removed test is compared with at most 256 not-yet-paired new tests per rule, in head order; a test
+  whose match lies past the bound is reported as removed. A file, or the pool of the other touched files, with more than
+  256 new tests ahead of the match can therefore report a renamed or moved test as removed, which the accept label
+  clears. At most 20 TI02 and 20 TI05 findings are listed per file;
   the messages say how many were left out, and the block findings come first. The action and CLI dists carry the
   TypeScript parser for this and are about 11 MB.
 

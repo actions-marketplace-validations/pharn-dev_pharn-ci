@@ -6,7 +6,6 @@ import { describe, expect, it } from "vitest";
 type Line = { line: number; text: string };
 type Parsed = { path: string; hunks?: Array<{ added: Line[]; removed: Line[] }>; textTruncated?: boolean };
 type KeepText = (file: { path: string; oldPath: string }) => boolean;
-type ParseFn = (text: string, options?: { keepText?: KeepText }) => Parsed[];
 type SelectorFactory = (configPath?: string, repoRoot?: string) => KeepText;
 
 /** A modified file whose one hunk removes `removed` at line `at` and adds `added` in its place. */
@@ -63,11 +62,11 @@ const texts = (file: Parsed) => ({
 
 describe("the diff reader keeps the text of package.json and source files", () => {
   it("AC-1: package.json files, JS/TS and Python sources keep their line text within the existing bounds; lockfile, Markdown and dependabot keep none", async () => {
-    const core = (await import("@pharn-ci/core")) as unknown as Record<string, unknown>;
+    const core = await import("../src/signals/signalFiles.js");
     const factory = core.keepSignalFileText as SelectorFactory;
     expect(typeof factory).toBe("function");
     const { parseUnifiedDiff } = await import("../src/diff/unified.js");
-    const parse = parseUnifiedDiff as unknown as ParseFn;
+    const parse = parseUnifiedDiff;
     const keepText = factory();
 
     const lines = FILES.flatMap(([path, removed, added]) => edit(path, 7, [removed], [added]));

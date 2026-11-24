@@ -1,4 +1,4 @@
-<img src="https://raw.githubusercontent.com/pharn-dev/pharn-ci/main/docs/assets/pharn-logo.svg" alt="pharn" width="48" height="48">
+<img src="https://raw.githubusercontent.com/pharn-dev/pharn-ci/515998146a22a1886341d94236e4138e1777c13a/docs/assets/pharn-logo.svg" alt="pharn" width="48" height="48">
 
 ## 🛡️ pharn-ci · ❌ Fail
 
@@ -20,7 +20,7 @@ No test-integrity findings (mode: warn).
 ### 💬 Messages (1)
 
 - ❌ `COVERAGE_PATHS_UNMATCHED` None of the 2 file paths in the coverage report are tracked files in the repository (for example \`src/a.ts\`), so diff coverage was not measured. The paths look relative to \`packages/core\`: set coverage-root: \`packages/core\` (coverage.root in .pharn/ci.yml, --coverage-root in the CLI).
-  - Hint: Write coverage paths relative to the repository root, or set the directory they start from (`coverage.root`, `coverage-root` or `--coverage-root`).
+  - Hint: Check that the coverage paths start at the repository root, or set the directory they start from (`coverage.root`, the `coverage-root` input or `--coverage-root`).
 
 ### 🤖 Agent setup (1 file)
 

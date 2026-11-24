@@ -21234,9 +21234,6 @@ function setFailed(message) {
   process.exitCode = ExitCode.Failure;
   error(message);
 }
-function isDebug() {
-  return process.env["RUNNER_DEBUG"] === "1";
-}
 function debug(message) {
   issueCommand("debug", {}, message);
 }
@@ -25528,92 +25525,258 @@ function createGitHubApi(opts) {
 import { mkdir as mkdir2, writeFile as writeFile2 } from "node:fs/promises";
 import { dirname as dirname2, resolve } from "node:path";
 
+// ../core/src/signals/registry.ts
+var TEST_INTEGRITY_SIGNALS = [
+  {
+    id: "TI01",
+    fix: {
+      kind: "restore-test",
+      hint: "Restore the deleted test file, or move its tests to a test file that still runs them."
+    },
+    binary: true,
+    message: {
+      text: (top, paths) => top === "info" ? `This change deletes test files together with the code they cover or replaces them: ${paths}.` : `This change deletes or renames away test files that defined tests, with nothing in the change that accounts for them: ${paths}. Check that those tests were meant to go.`
+    }
+  },
+  {
+    id: "TI02",
+    fix: {
+      kind: "restore-test",
+      hint: "Restore the removed test, or keep a test with the same assertions in one of the touched test files, or say in the PR why it goes."
+    },
+    accept: "always",
+    message: {
+      allPaths: true,
+      text: (_top, paths, notListed) => `This change removes tests from test files that stay, with no test of the same name or a similar body in the touched test files to take their place: ${paths}. Check that each removal was meant.${notListed}`
+    }
+  },
+  {
+    id: "TI03",
+    fix: {
+      kind: "restore-test",
+      hint: "Remove the skipping of the test so it runs again, or say in the PR why it must stay, for example a test that fails in CI."
+    },
+    accept: "always",
+    message: {
+      text: (_top, paths) => `This change skips tests or marks them as expected to fail: ${paths}. Check that each skip was meant.`
+    }
+  },
+  {
+    id: "TI04",
+    fix: {
+      kind: "restore-test",
+      hint: "Remove the focused-run marker (.only, fit or fdescribe) so every test in the file runs again."
+    },
+    message: {
+      text: (_top, paths) => `This change adds \`.only\`, \`fit\` or \`fdescribe\`, which runs only the marked tests: ${paths}. Remove the markers before merging.`
+    }
+  },
+  {
+    id: "TI05",
+    fix: {
+      kind: "restore-assertion",
+      hint: "Restore the assertions this test had, so it checks the behaviour again, or say in the PR why it checks less now."
+    },
+    accept: "always",
+    message: {
+      allPaths: true,
+      text: (_top, paths, notListed) => `This change leaves tests with fewer assertions than they had, or none: ${paths}. Check that each test still checks what it did.${notListed}`
+    }
+  },
+  {
+    id: "TI06",
+    fix: {
+      kind: "restore-assertion",
+      hint: "Restore the stronger matcher, guard or placement of the assertion this test had, or say in the PR why the test checks less now."
+    },
+    accept: "block",
+    message: {
+      allPaths: true,
+      text: (_top, paths, notListed) => `This change weakens tests that stay: a stronger matcher became a weaker one, an assertion guard was lowered or removed, an assertion that compares a literal with itself was added, or an assertion moved into a try block or after an early return: ${paths}. Check that each test still checks what it did.${notListed}`
+    }
+  },
+  {
+    id: "TI07",
+    fix: {
+      kind: "restore-assertion",
+      hint: "Restore the expected values; if the behaviour really changed, say why in the pull request and have a reviewer confirm it."
+    },
+    message: {
+      allPaths: true,
+      text: (_top, paths, notListed) => `This change edits only the expected values of tests while it also edits source files, so the tests may have been made to agree with the code: ${paths}. Check that each new expected value is right.${notListed}`
+    }
+  },
+  {
+    id: "TI08",
+    fix: {
+      kind: "request-review",
+      hint: "Ask a reviewer to confirm the snapshot changes are intended before merging, and keep snapshot-update flags out of the test command."
+    },
+    message: {
+      text: (_top, paths) => `This change regenerates or updates snapshots in bulk: ${paths}. Check that each new snapshot was reviewed.`
+    }
+  },
+  {
+    id: "TI09",
+    fix: {
+      kind: "revert-config",
+      hint: "Revert the test-runner config change so the same tests run under the same rules, or say in the PR why it changes; a raised retry count or timeout is a warning only."
+    },
+    accept: "always",
+    message: {
+      allPaths: true,
+      text: (_top, paths, notListed) => `This change loosens test-runner settings so that fewer tests run, a weaker run passes or the coverage gate drops: ${paths}. Check that each looser setting was meant.${notListed}`
+    }
+  },
+  {
+    id: "TI10",
+    fix: {
+      kind: "revert-config",
+      hint: "Restore the test script in package.json so it runs the whole suite and fails when a test fails, or say in the PR why it changes."
+    },
+    accept: "always",
+    binary: true,
+    message: {
+      text: (_top, paths) => `This change weakens a test script in package.json, so the test run can pass without the tests passing: ${paths}. Check that the change was meant.`
+    }
+  },
+  {
+    id: "TI11",
+    fix: {
+      kind: "revert-config",
+      hint: "Revert the workflow change so CI runs the tests on pull requests as before."
+    },
+    binary: true,
+    message: {
+      text: (_top, paths) => `This change edits a workflow so that CI may run fewer tests or ignore their failures: ${paths}. Check that the removed step or trigger, the reduced matrix or the added condition was meant.`
+    }
+  },
+  {
+    id: "TI12",
+    fix: {
+      kind: "request-review",
+      hint: "Ask a reviewer to confirm that mocking the changed module still tests its real behaviour."
+    },
+    accept: "block",
+    message: {
+      allPaths: true,
+      text: (_top, paths, notListed) => `This change mocks a module it also edits, so the tests may not run the code under review: ${paths}. Check that each mock was meant.${notListed}`
+    }
+  },
+  {
+    id: "TI13",
+    fix: {
+      kind: "revert-config",
+      hint: "Remove the added coverage pragma and add a test that runs those lines, or say in the PR why they cannot be tested."
+    },
+    accept: "always",
+    message: {
+      text: (_top, paths) => `This change adds comments that leave code out of coverage: ${paths}. Check that each was meant.`
+    }
+  },
+  {
+    id: "TI14",
+    fix: {
+      kind: "revert-config",
+      hint: "Revert the change to the coverage settings of the pharn-ci config so the gate measures the same files as before."
+    },
+    binary: true,
+    message: {
+      text: (_top, paths) => `This change lowers the coverage threshold or adds a coverage exclusion in the check config: ${paths}. Once merged, the looser setting applies to every later pull request; check that it was meant.`
+    }
+  },
+  {
+    // Not emitted since CORE-144: no message. The code TEST_INTEGRITY_TI15 and the policy key TI15 stay valid.
+    id: "TI15",
+    fix: {
+      kind: "request-review",
+      hint: "Ask a reviewer to confirm the code does not special-case the value the test checks."
+    }
+  },
+  {
+    id: "TI16",
+    fix: {
+      kind: "request-review",
+      hint: "Ask a reviewer to confirm the lint or type suppression added to the test file is needed."
+    },
+    message: {
+      text: (_top, paths) => `This change adds comments that switch off a linter or type checker in test files: ${paths}.`
+    }
+  },
+  {
+    id: "TI17",
+    fix: {
+      kind: "restore-assertion",
+      hint: "Restore an assertion that can fail in place of the one that always passes, or say in the PR why the test checks less now."
+    },
+    accept: "block",
+    message: {
+      text: (_top, paths) => `This change adds assertions that always pass to test files: ${paths}. Check that each test still compares a value that can fail.`
+    }
+  }
+];
+var TEST_INTEGRITY_SIGNAL_IDS = TEST_INTEGRITY_SIGNALS.map((s) => s.id);
+function testIntegrityCode(id) {
+  return `TEST_INTEGRITY_${id}`;
+}
+var TEST_INTEGRITY_SIGNAL_FIXES = Object.fromEntries(
+  TEST_INTEGRITY_SIGNALS.map((s) => [s.id, s.fix])
+);
+var TEST_INTEGRITY_MESSAGE_FIXES = Object.fromEntries(
+  TEST_INTEGRITY_SIGNALS.map((s) => [testIntegrityCode(s.id), s.fix])
+);
+function testIntegritySignal(id) {
+  return TEST_INTEGRITY_SIGNALS.find((s) => s.id === id);
+}
+
 // ../core/src/fix/table.ts
-var REVIEW_POLICY = "Ask a maintainer or the policy owner to review the committed agent settings this rule names.";
 var REVIEW_INJECTION = "Ask a reviewer to look at the added text that addresses an AI agent before merging.";
 var SIGNAL_FIXES = {
-  TI01: {
-    kind: "restore-test",
-    hint: "Restore the deleted test file, or move its tests to a test file that still runs them."
-  },
-  TI02: {
-    kind: "restore-test",
-    hint: "Restore the removed test, or keep a test with the same assertions in one of the touched test files."
-  },
-  TI03: { kind: "restore-test", hint: "Remove the marker that turns this test off, so it runs again." },
-  TI04: {
-    kind: "restore-test",
-    hint: "Remove the focused-run marker (.only, fit or fdescribe) so every test in the file runs again."
-  },
-  TI05: { kind: "restore-assertion", hint: "Restore the assertions this test had, so it checks the behaviour again." },
-  TI06: {
-    kind: "restore-assertion",
-    hint: "Restore the stronger assertion this test had in place of the weaker one."
-  },
-  TI07: {
-    kind: "restore-assertion",
-    hint: "Restore the expected values; if the behaviour really changed, say why in the pull request and have a reviewer confirm it."
-  },
-  TI08: { kind: "request-review", hint: "Ask a reviewer to confirm the snapshot changes are intended before merging." },
-  TI09: {
-    kind: "revert-config",
-    hint: "Revert the test-runner config change so the same tests run under the same rules as before."
-  },
-  TI10: {
-    kind: "revert-config",
-    hint: "Revert the test script change in package.json so it runs the whole suite and fails when a test fails."
-  },
-  TI11: {
-    kind: "revert-config",
-    hint: "Revert the workflow change so CI runs the tests on pull requests as before."
-  },
-  TI12: {
-    kind: "request-review",
-    hint: "Ask a reviewer to confirm that mocking the changed module still tests its real behaviour."
-  },
-  TI13: {
-    kind: "revert-config",
-    hint: "Remove the added coverage pragma and add tests that run those lines."
-  },
-  TI14: {
-    kind: "revert-config",
-    hint: "Revert the change to the coverage settings of the pharn-ci config so the gate measures the same files as before."
-  },
-  TI15: {
-    kind: "request-review",
-    hint: "Ask a reviewer to confirm the code does not special-case the value the test checks."
-  },
-  TI16: {
-    kind: "request-review",
-    hint: "Ask a reviewer to confirm the lint or type suppression added to the test file is needed."
-  },
-  TI17: {
-    kind: "restore-assertion",
-    hint: "Restore an assertion that can fail in place of the one that always passes."
-  },
+  ...TEST_INTEGRITY_SIGNAL_FIXES,
   P01: { kind: "none", hint: "A maintainer should add the agent setup files the org policy requires." },
-  P02: { kind: "request-review", hint: REVIEW_POLICY },
-  P03: { kind: "request-review", hint: REVIEW_POLICY },
-  P04: { kind: "request-review", hint: REVIEW_POLICY },
-  P05: { kind: "request-review", hint: REVIEW_POLICY },
-  P06: { kind: "request-review", hint: REVIEW_POLICY },
+  P02: {
+    kind: "request-review",
+    hint: "Ask a maintainer to narrow or remove the allow rule (or the `defaultMode` or `additionalDirectories` key) that the settings file sets against the org policy's `setup.forbidden_permissions`."
+  },
+  P03: {
+    kind: "request-review",
+    hint: "Ask a maintainer to add a deny rule equal to or broader than the required one to the `.claude/settings.json` of each directory named."
+  },
+  P04: {
+    kind: "request-review",
+    hint: "Ask a maintainer to remove the MCP server that the org policy's `setup.allowed_mcp_servers` does not list, or the `enableAllProjectMcpServers` setting."
+  },
+  P05: {
+    kind: "request-review",
+    hint: "Ask a maintainer to remove the MCP server the org policy forbids from the file that names it."
+  },
+  P06: {
+    kind: "request-review",
+    hint: "Ask a maintainer to add the required command hook, with a matcher that covers the required one (`*` or the same tool names) and no `if` condition, or remove `disableAllHooks`."
+  },
   P07: {
     kind: "none",
-    hint: "A maintainer should make the agent instruction files agree on one package manager and one test runner."
+    hint: "A maintainer should make the agent instruction files in one directory agree on one package manager and test runner, or move a file into the package it describes."
   },
   P08: {
     kind: "request-review",
-    hint: "Ask a maintainer to review the tracked files that match the org policy's forbidden patterns."
+    hint: "Ask a maintainer to stop tracking the files that match the org policy's forbidden patterns (`git rm --cached` them and add them to `.gitignore`)."
   },
   P09: { kind: "revert-config", hint: "Revert the edit to the file the org policy guards." },
   P10: { kind: "none", hint: "The org policy could not be used; a maintainer should check where it comes from." },
   P11: {
     kind: "request-review",
-    hint: "Ask a person to review or make the change to the paths the org policy protects from agent pull requests."
+    hint: "Ask a person to review or make the change to the paths the org policy protects from agent pull requests (`agents.protected_paths`)."
   },
   P13: { kind: "revert-config", hint: "Revert the edit that widens what an agent may do." },
-  P14: { kind: "split-pr", hint: "Split the change into smaller pull requests within the org policy's size caps." },
-  SI01: { kind: "none", hint: "Update this agent instruction so it names a script, path or file that exists." },
+  P14: {
+    kind: "split-pr",
+    hint: "Split the change into smaller pull requests within the org policy's size caps (`agents.max_files`, `agents.max_changed_lines`); lockfiles, snapshots and `*.generated.*` files do not count."
+  },
+  SI01: {
+    kind: "none",
+    hint: "Update this agent instruction so the command names a script in the root package.json or a target in the root Makefile, or remove it."
+  },
   SI02: { kind: "none", hint: "Update this agent instruction so it names a script, path or file that exists." },
   SI03: { kind: "none", hint: "Update this agent instruction so it names a script, path or file that exists." },
   SI04: {
@@ -25622,7 +25785,7 @@ var SIGNAL_FIXES = {
   },
   PI01: {
     kind: "request-review",
-    hint: "Ask a reviewer to look at the invisible characters this change adds before merging."
+    hint: "Ask a reviewer to look at the invisible or bidirectional characters this change adds before merging; where code needs one, write it as an escape such as `\\u202E`."
   },
   PI02: { kind: "request-review", hint: REVIEW_INJECTION },
   PI03: { kind: "request-review", hint: REVIEW_INJECTION },
@@ -25645,17 +25808,17 @@ var SIGNAL_FIXES = {
   },
   D04: {
     kind: "request-review",
-    hint: "Regenerate the lockfile with the package manager and ask a reviewer to confirm the manifest change was meant."
+    hint: "Regenerate the lockfile with the package manager and commit it with the manifest, and ask a reviewer to confirm the change, above all a new hash for the same version."
   },
   D05: {
     kind: "remove-dependency",
-    hint: "Remove the dependency from outside the allowed registries, or use the package's registry release."
+    hint: "Depend on a published registry version, or name the host of a registry your team runs in the dependency-allowed-hosts input; otherwise remove the dependency."
   }
 };
 var S = SIGNAL_FIXES;
 var REVIEW_SECRET = {
   kind: "request-review",
-  hint: "Ask a maintainer to remove the value from the committed agent config, rotate it and load it from the environment."
+  hint: "Ask a maintainer to revoke the value at its provider, remove it from the agent config and from git history, and load it from the environment or a secret store."
 };
 var MESSAGE_FIXES = {
   DIFF_COVERAGE_BELOW_THRESHOLD: {
@@ -25672,39 +25835,39 @@ var MESSAGE_FIXES = {
   },
   COVERAGE_FILE_MISSING: {
     kind: "none",
-    hint: "Check that the test step writes the coverage file where the check reads it."
+    hint: "Check that a test step with coverage runs before this check and writes the file where it reads it (`coverage.file`, the `coverage-file` input or `--coverage`)."
   },
   COVERAGE_FILE_EMPTY: {
     kind: "none",
-    hint: "Check that the tests ran and wrote records to the coverage file."
+    hint: "Check that the tests ran with coverage turned on before this check and wrote records for this repository's sources to the coverage file."
   },
   COVERAGE_FORMAT_UNSUPPORTED: {
     kind: "none",
-    hint: "Check that the coverage file is in lcov or Cobertura XML format."
+    hint: "Check that the coverage file is lcov or Cobertura XML; if it is, set its format (`coverage.format`, the `coverage-format` input or `--coverage-format`)."
   },
   DIFF_UNAVAILABLE: {
     kind: "none",
-    hint: "Check that the workflow fetches the base commit so the diff can be read."
+    hint: "Check that the workflow fetches the base commit (`fetch-depth: 0` on `actions/checkout`), or set the base with the `base-ref` input or `--base`."
   },
   COVERAGE_PATHS_UNMATCHED: {
     kind: "none",
-    hint: "Check that the coverage paths start at the repository root, or set the coverage root."
+    hint: "Check that the coverage paths start at the repository root, or set the directory they start from (`coverage.root`, the `coverage-root` input or `--coverage-root`)."
   },
   COVERAGE_PATHS_PARTIALLY_UNMATCHED: {
     kind: "none",
-    hint: "Check that the coverage paths start at the repository root so every file is matched."
+    hint: "Check that the coverage paths start at the repository root or at `coverage.root`, so every changed file is matched; generated files and files outside the repository need nothing."
   },
   COVERAGE_LINES_SKIPPED: {
     kind: "none",
-    hint: "Check that the coverage reporter finished writing the file."
+    hint: "Check that the coverage reporter finished writing the file, and regenerate it; a truncated or hand-edited file can show more coverage than the tests gave."
   },
   CONFIG_CHANGED_IN_DIFF: {
     kind: "request-review",
-    hint: "Ask a reviewer to confirm that the change to the files that configure this check is meant."
+    hint: "Ask a reviewer to confirm that the change to the files that configure this check is meant, and protect `.pharn/ci.yml` and `.github/workflows/` with CODEOWNERS."
   },
   COVERAGE_FILE_TRACKED: {
     kind: "request-review",
-    hint: "Ask a maintainer to stop tracking the coverage file, so a change cannot supply its own numbers."
+    hint: "Ask a maintainer to stop tracking the coverage file (`git rm --cached` it, add it to `.gitignore`) and generate it in CI, so a change cannot supply its own numbers."
   },
   DIFF_BINARY_COVERED_FILE: {
     kind: "none",
@@ -25716,7 +25879,7 @@ var MESSAGE_FIXES = {
   },
   NO_AGENT_SETUP_FILES: {
     kind: "none",
-    hint: "Check whether the repository should have an agent instruction file such as AGENTS.md."
+    hint: "Check whether the repository should have an agent instruction file, such as AGENTS.md or CLAUDE.md at its root, that tells agents how to build and test."
   },
   AGENT_SETUP_FILE_EMPTY: {
     kind: "none",
@@ -25724,33 +25887,20 @@ var MESSAGE_FIXES = {
   },
   AGENT_SETUP_EXPECTED_MISSING: {
     kind: "none",
-    hint: "Check which agent tools the repository expects and add their setup files."
+    hint: "Check which agent tools `setup.expect` names (in the org policy or `.pharn/ci.yml`) and add their setup files, such as AGENTS.md, CLAUDE.md or `.cursor/rules/`."
   },
   TEST_INTEGRITY_MODE_IGNORED: {
     kind: "none",
-    hint: "Check the test integrity mode in the config; a config can only make the check stricter."
+    hint: "Check the mode in the workflow: `test_integrity.mode` in `.pharn/ci.yml` can only make the `test-integrity` input stricter, so remove the looser value."
   },
-  TEST_INTEGRITY_OFF: { kind: "none", hint: "Check why test integrity is off for this run." },
-  TEST_INTEGRITY_TI01: S.TI01,
-  TEST_INTEGRITY_TI02: S.TI02,
-  TEST_INTEGRITY_TI03: S.TI03,
-  TEST_INTEGRITY_TI04: S.TI04,
-  TEST_INTEGRITY_TI05: S.TI05,
-  TEST_INTEGRITY_TI06: S.TI06,
-  TEST_INTEGRITY_TI07: S.TI07,
-  TEST_INTEGRITY_TI08: S.TI08,
-  TEST_INTEGRITY_TI09: S.TI09,
-  TEST_INTEGRITY_TI10: S.TI10,
-  TEST_INTEGRITY_TI11: S.TI11,
-  TEST_INTEGRITY_TI12: S.TI12,
-  TEST_INTEGRITY_TI13: S.TI13,
-  TEST_INTEGRITY_TI14: S.TI14,
-  TEST_INTEGRITY_TI15: S.TI15,
-  TEST_INTEGRITY_TI16: S.TI16,
-  TEST_INTEGRITY_TI17: S.TI17,
+  TEST_INTEGRITY_OFF: {
+    kind: "none",
+    hint: "Check why test integrity is off for this run; the `test-integrity` input or `--test-integrity` set to `warn` or `block` turns it on."
+  },
+  ...TEST_INTEGRITY_MESSAGE_FIXES,
   TEST_INTEGRITY_INDEX_UNAVAILABLE: {
     kind: "none",
-    hint: "Check that the touched test files can be read, so removed tests and assertions are compared; a -diff or binary attribute in .gitattributes, or a NUL byte in the file, can cause this."
+    hint: "Check the named test files by hand; a file over 512 KiB, over 200 touched test files, no Python 3.8+ for `.py` files, or a `binary` or `-diff` attribute in `.gitattributes` stops the comparison."
   },
   TEST_INTEGRITY_TEXT_TRUNCATED: {
     kind: "none",
@@ -25758,11 +25908,11 @@ var MESSAGE_FIXES = {
   },
   TEST_INTEGRITY_ACCEPTED: {
     kind: "none",
-    hint: "Check that the reviewer's sign-off covers the findings listed in the report."
+    hint: "Check that the sign-off covers the findings listed in the report, and remove the label if a later push should be judged again."
   },
   TEST_INTEGRITY_ACCEPT_IGNORED: {
     kind: "none",
-    hint: "Check that a reviewer who is not the author applies the accept label."
+    hint: "Check that a reviewer who is not the author applies the accept label; it counts only when a user account other than the author applied it last."
   },
   AGENT_CONFIG_SECRET_S01: REVIEW_SECRET,
   AGENT_CONFIG_SECRET_S02: REVIEW_SECRET,
@@ -25777,23 +25927,26 @@ var MESSAGE_FIXES = {
   AGENT_CONFIG_SECRET_S11: REVIEW_SECRET,
   AGENT_CONFIG_SECRET_UNSCANNED: {
     kind: "none",
-    hint: "Check the agent config files that could not be scanned for committed secrets."
+    hint: "Check the named agent config files by hand; to be scanned for secrets a file must be text, under 512 KiB and inside the repository, on a checkout of the pull request head."
   },
   POLICY_UNAVAILABLE: {
     kind: "none",
-    hint: "Check that the workflow grants id-token write and that the org policy can be fetched."
+    hint: "Check that the job has `permissions: id-token: write` (fork pull requests get no OIDC token) and that the pharn.dev app is installed for this repository."
   },
   POLICY_OVERRIDE_IGNORED: {
     kind: "none",
     hint: "Check that the workflow inputs and the config only make the org policy stricter."
   },
-  UPLOAD_TOO_LARGE: { kind: "none", hint: "Check the size of the report; the check itself ran in full." },
+  UPLOAD_TOO_LARGE: {
+    kind: "none",
+    hint: "Check the size of the report; the check itself ran in full, and the whole report is in the job summary and report.json."
+  },
   POLICY_P08: S.P08,
   POLICY_P09: S.P09,
   POLICY_P11: S.P11,
   AGENT_PR_DETECTION_INCOMPLETE: {
     kind: "none",
-    hint: "Check that the token can read the pull request, its labels and its commits."
+    hint: "Check that the token can read the pull request, its labels and its commits, then run the job again; a pull request with more than 250 commits always counts as an agent PR."
   },
   POLICY_P02: S.P02,
   POLICY_P03: S.P03,
@@ -25802,7 +25955,7 @@ var MESSAGE_FIXES = {
   POLICY_P06: S.P06,
   POLICY_SETTINGS_INVALID: {
     kind: "none",
-    hint: "Check the policy settings and correct the ones the report names."
+    hint: "Check that the agent settings files the report names are valid JSON and regular files under 512 KiB, on a checkout of the pull request head."
   },
   POLICY_P07: S.P07,
   POLICY_P13: S.P13,
@@ -25826,10 +25979,16 @@ var MESSAGE_FIXES = {
   },
   JUNIT_NOT_FOUND: {
     kind: "none",
-    hint: "Check that the test step writes the JUnit XML file where the junit paths point."
+    hint: "Check that the test step writes JUnit XML where `junit-paths` or `--junit` points, and that the pharn-ci step runs after it with `if: always()`."
   },
-  JUNIT_INVALID: { kind: "none", hint: "Check that the JUnit XML file is well formed and complete." },
-  JUNIT_TOO_LARGE: { kind: "none", hint: "Check the size of the JUnit XML file; it is too large to be read." },
+  JUNIT_INVALID: {
+    kind: "none",
+    hint: "Check that the JUnit XML file is well formed and complete: one `testsuites` or `testsuite` root, no DOCTYPE, every element closed."
+  },
+  JUNIT_TOO_LARGE: {
+    kind: "none",
+    hint: "Check the JUnit XML files against the caps (50 files, 25 MiB, 20,000 test cases) and narrow `junit-paths` to the files of this job; results past a cap are not counted."
+  },
   FLAKY_QUARANTINED_FAILURES: {
     kind: "none",
     hint: "Check the quarantined tests that failed and whether they are still flaky."
@@ -25845,7 +26004,11 @@ var MESSAGE_FIXES = {
   },
   DEPENDENCY_CHECK_INCOMPLETE: {
     kind: "none",
-    hint: "Check that the manifest or lockfile the report names can be read and parsed."
+    hint: "Check that the manifest or lockfile the report names parses and stays under 32 MiB, on a checkout of the pull request head with `fetch-depth: 0`."
+  },
+  POLICY_KEYS_UNKNOWN: {
+    kind: "none",
+    hint: "Update the pharn-ci pin in the workflow to a release that knows the org policy's newer keys."
   }
 };
 
@@ -26433,6 +26596,20 @@ function changeMadeUnreadable(base, headReason) {
   if (!HEAD_UNREADABLE_ERROR_REASONS.includes(headReason)) return false;
   return base.ok || base.reason === "over-file-cap";
 }
+var DROP_ALWAYS_FAILS_CLOSED_REASONS = ["over-file-cap", "over-total-cap"];
+var DROP_FAILS_CLOSED_AGAINST_TEXT_REASONS = ["too-large", "binary", "unsafe-path"];
+function sourcesDropFailsClosed(base, head) {
+  const dropFails = (side, other) => {
+    if (side.ok || side.hadText) return false;
+    if (DROP_ALWAYS_FAILS_CLOSED_REASONS.includes(side.reason)) return true;
+    return DROP_FAILS_CLOSED_AGAINST_TEXT_REASONS.includes(side.reason) && (other.ok || other.hadText);
+  };
+  return dropFails(base, head) || dropFails(head, base);
+}
+var PYTHON_FILE_REFUSAL_REASONS = ["syntax-error", "too-deep", "too-large", "parser-threw"];
+function pythonHeadFailsClosed(head) {
+  return !head.ok && head.hadText && head.fromPythonIndex;
+}
 var TI0205_NOT_RUN_LEAD = "TI02 and TI05 did not run: the text of the touched test files could not be read (";
 var TI09_NOT_RUN_LEAD = "TI09 did not run: the text of the touched test-config files could not be read (";
 function ti0205NotRunStart(reasonSpan) {
@@ -26447,103 +26624,17 @@ var WHOLE_RUN_SENTENCE_LEADS = [TI0205_NOT_RUN_LEAD, TI09_NOT_RUN_LEAD];
 function emptyTestIntegrity() {
   return { mode: "warn", source: "default", verdict: "pass", signals: [], languages: [] };
 }
-var SIGNAL_MESSAGES = [
-  {
-    id: "TI01",
-    code: "TEST_INTEGRITY_TI01",
-    text: (top, paths) => top === "info" ? `This change deletes test files together with the code they cover or replaces them: ${paths}.` : `This change deletes or renames away test files that defined tests, with nothing in the change that accounts for them: ${paths}. Check that those tests were meant to go.`
-  },
-  {
-    id: "TI02",
-    code: "TEST_INTEGRITY_TI02",
-    allPaths: true,
-    text: (_top, paths, notListed) => `This change removes tests from test files that stay, with no test of the same name or a similar body in the touched test files to take their place: ${paths}. Check that each removal was meant.${notListed}`
-  },
-  {
-    id: "TI03",
-    code: "TEST_INTEGRITY_TI03",
-    text: (_top, paths) => `This change skips tests or marks them as expected to fail: ${paths}. Check that each skip was meant.`
-  },
-  {
-    id: "TI04",
-    code: "TEST_INTEGRITY_TI04",
-    text: (_top, paths) => `This change adds \`.only\`, \`fit\` or \`fdescribe\`, which runs only the marked tests: ${paths}. Remove the markers before merging.`
-  },
-  {
-    id: "TI05",
-    code: "TEST_INTEGRITY_TI05",
-    allPaths: true,
-    text: (_top, paths, notListed) => `This change leaves tests with fewer assertions than they had, or none: ${paths}. Check that each test still checks what it did.${notListed}`
-  },
-  {
-    id: "TI06",
-    code: "TEST_INTEGRITY_TI06",
-    allPaths: true,
-    text: (_top, paths, notListed) => `This change weakens tests that stay: a stronger matcher became a weaker one, an assertion guard was lowered or removed, an assertion that compares a literal with itself was added, or an assertion moved into a try block or after an early return: ${paths}. Check that each test still checks what it did.${notListed}`
-  },
-  {
-    id: "TI07",
-    code: "TEST_INTEGRITY_TI07",
-    allPaths: true,
-    text: (_top, paths, notListed) => `This change edits only the expected values of tests while it also edits source files, so the tests may have been made to agree with the code: ${paths}. Check that each new expected value is right.${notListed}`
-  },
-  {
-    id: "TI08",
-    code: "TEST_INTEGRITY_TI08",
-    text: (_top, paths) => `This change regenerates or updates snapshots in bulk: ${paths}. Check that each new snapshot was reviewed.`
-  },
-  {
-    id: "TI09",
-    code: "TEST_INTEGRITY_TI09",
-    allPaths: true,
-    text: (_top, paths, notListed) => `This change loosens test-runner settings so that fewer tests run, a weaker run passes or the coverage gate drops: ${paths}. Check that each looser setting was meant.${notListed}`
-  },
-  {
-    id: "TI10",
-    code: "TEST_INTEGRITY_TI10",
-    text: (_top, paths) => `This change weakens a test script in package.json, so the test run can pass without the tests passing: ${paths}. Check that the change was meant.`
-  },
-  {
-    id: "TI11",
-    code: "TEST_INTEGRITY_TI11",
-    text: (_top, paths) => `This change edits a workflow so that CI may run fewer tests or ignore their failures: ${paths}. Check that the removed step or trigger, the reduced matrix or the added condition was meant.`
-  },
-  {
-    id: "TI12",
-    code: "TEST_INTEGRITY_TI12",
-    allPaths: true,
-    text: (_top, paths, notListed) => `This change mocks a module it also edits, so the tests may not run the code under review: ${paths}. Check that each mock was meant.${notListed}`
-  },
-  {
-    id: "TI13",
-    code: "TEST_INTEGRITY_TI13",
-    text: (_top, paths) => `This change adds comments that leave code out of coverage: ${paths}. Check that each was meant.`
-  },
-  {
-    id: "TI14",
-    code: "TEST_INTEGRITY_TI14",
-    text: (_top, paths) => `This change lowers the coverage threshold or adds a coverage exclusion in the check config: ${paths}. Once merged, the looser setting applies to every later pull request; check that it was meant.`
-  },
-  {
-    id: "TI15",
-    code: "TEST_INTEGRITY_TI15",
-    allPaths: true,
-    text: (_top, paths, notListed) => `This change adds conditions in source that compare against values its tests add, so the code may special-case the tests: ${paths}. Check that each is real logic.${notListed}`
-  },
-  {
-    id: "TI16",
-    code: "TEST_INTEGRITY_TI16",
-    text: (_top, paths) => `This change adds comments that switch off a linter or type checker in test files: ${paths}.`
-  },
-  {
-    id: "TI17",
-    code: "TEST_INTEGRITY_TI17",
-    text: (_top, paths) => `This change adds assertions that always pass to test files: ${paths}. Check that each test still compares a value that can fail.`
-  }
-];
+var SIGNAL_MESSAGES = TEST_INTEGRITY_SIGNALS.flatMap((signal2) => {
+  const { message } = signal2;
+  return message === void 0 ? [] : [{ id: signal2.id, code: testIntegrityCode(signal2.id), message }];
+});
 function testIntegritySignalMessages(signals, options = {}) {
   const messages = [];
-  for (const { id, code: code2, allPaths, text } of SIGNAL_MESSAGES) {
+  for (const {
+    id,
+    code: code2,
+    message: { allPaths, text }
+  } of SIGNAL_MESSAGES) {
     const own = signals.filter((signal2) => signal2.id === id);
     if (own.length === 0) continue;
     const top = own.some((s) => s.severity === "block") ? "block" : own.some((s) => s.severity === "warn") ? "warn" : "info";
@@ -26827,7 +26918,7 @@ function oneLine(text) {
 function indexUnavailableLevel(mode, unavailable2, configUnavailable) {
   if (mode !== "block") return "warn";
   const notRun = unavailable2 !== void 0 && "notRun" in unavailable2 || configUnavailable !== void 0 && "notRun" in configUnavailable;
-  const unreadable = unavailable2 !== void 0 && "files" in unavailable2 && unavailable2.files.some((f) => f.changeMadeUnreadable === true);
+  const unreadable = unavailable2 !== void 0 && "files" in unavailable2 && (unavailable2.files.some((f) => f.changeMadeUnreadable === true || f.failsClosed === true) || (unavailable2.added ?? []).some((f) => f.failsClosed === true));
   return notRun || unreadable ? "error" : "warn";
 }
 function indexUnavailableText(unavailable2, configUnavailable) {
@@ -27842,229 +27933,6 @@ function parseThreshold(value, label = "threshold") {
   return n;
 }
 
-// ../core/src/coverage/xml.ts
-var NO_ATTRS = /* @__PURE__ */ new Map();
-var ENTITY_WINDOW = 10;
-var NAMED_ENTITIES = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'" };
-function isSpace(char) {
-  return char === " " || char === "	" || char === "\n" || char === "\r";
-}
-function isQuote(char) {
-  return char === '"' || char === "'";
-}
-function decodeEntities(text) {
-  let amp = text.indexOf("&");
-  if (amp === -1) return text;
-  let out = "";
-  let from = 0;
-  while (amp !== -1) {
-    const decoded = decodeReference(text, amp);
-    if (decoded === void 0) {
-      amp = text.indexOf("&", amp + 1);
-      continue;
-    }
-    out += text.slice(from, amp) + decoded.value;
-    from = decoded.end;
-    amp = text.indexOf("&", from);
-  }
-  return out + text.slice(from);
-}
-function decodeReference(text, amp) {
-  const limit = Math.min(text.length, amp + 1 + ENTITY_WINDOW);
-  let semi = -1;
-  for (let i = amp + 1; i < limit; i++) {
-    if (text.charAt(i) === ";") {
-      semi = i;
-      break;
-    }
-  }
-  if (semi === -1) return void 0;
-  const body = text.slice(amp + 1, semi);
-  const named = Object.hasOwn(NAMED_ENTITIES, body) ? NAMED_ENTITIES[body] : void 0;
-  if (named !== void 0) return { value: named, end: semi + 1 };
-  if (body.charAt(0) !== "#") return void 0;
-  const hex = body.charAt(1) === "x";
-  const digits = body.slice(hex ? 2 : 1);
-  if (digits === "") return void 0;
-  let code2 = 0;
-  for (let i = 0; i < digits.length; i++) {
-    const digit = Number.parseInt(digits.charAt(i), hex ? 16 : 10);
-    if (Number.isNaN(digit)) return void 0;
-    code2 = code2 * (hex ? 16 : 10) + digit;
-  }
-  if (code2 < 1 || code2 > 1114111 || code2 >= 55296 && code2 <= 57343) return void 0;
-  return { value: String.fromCodePoint(code2), end: semi + 1 };
-}
-function parseTag(body) {
-  if (body.charAt(0) === "/") {
-    const name2 = readName(body, 1);
-    return name2 === "" ? void 0 : { type: "end", name: name2 };
-  }
-  let end = body.length;
-  while (end > 0 && isSpace(body.charAt(end - 1))) end--;
-  const selfClosing = end > 0 && body.charAt(end - 1) === "/";
-  if (selfClosing) end--;
-  const name = readName(body, 0);
-  if (name === "") return void 0;
-  return { type: "start", name, attrs: parseAttributes(body, name.length, end), selfClosing };
-}
-function readName(body, from) {
-  let i = from;
-  while (i < body.length && !isSpace(body.charAt(i)) && body.charAt(i) !== "/") i++;
-  return body.slice(from, i);
-}
-function parseAttributes(body, from, end) {
-  let attrs;
-  let i = from;
-  while (i < end) {
-    while (i < end && isSpace(body.charAt(i))) i++;
-    const nameStart = i;
-    while (i < end && !isSpace(body.charAt(i)) && body.charAt(i) !== "=") i++;
-    const name = body.slice(nameStart, i);
-    while (i < end && isSpace(body.charAt(i))) i++;
-    if (body.charAt(i) !== "=" || i >= end) {
-      continue;
-    }
-    i++;
-    while (i < end && isSpace(body.charAt(i))) i++;
-    const quote = body.charAt(i);
-    if (!isQuote(quote) || i >= end) {
-      while (i < end && !isSpace(body.charAt(i))) i++;
-      continue;
-    }
-    const close = body.indexOf(quote, i + 1);
-    if (close === -1 || close >= end) break;
-    if (name !== "") {
-      attrs ??= /* @__PURE__ */ new Map();
-      if (!attrs.has(name)) attrs.set(name, decodeEntities(body.slice(i + 1, close)));
-    }
-    i = close + 1;
-  }
-  return attrs ?? NO_ATTRS;
-}
-function findDeclarationEnd(text, from) {
-  let quote = "";
-  for (let i = from; i < text.length; i++) {
-    const char = text.charAt(i);
-    if (quote !== "") {
-      if (char === quote) quote = "";
-    } else if (isQuote(char)) {
-      quote = char;
-    } else if (char === ">") {
-      return i;
-    }
-  }
-  return -1;
-}
-function findTagEnd(text, start) {
-  let quote = "";
-  for (let i = start + 1; i < text.length; i++) {
-    const char = text.charAt(i);
-    if (char === "<") return -i - 2;
-    if (quote !== "") {
-      if (char === quote) quote = "";
-    } else if (isQuote(char)) {
-      quote = char;
-    } else if (char === ">") {
-      return i;
-    }
-  }
-  return -1;
-}
-function scanXml(text, onEvent, options = {}) {
-  const length = text.length;
-  let pos = text.charCodeAt(0) === 65279 ? 1 : 0;
-  while (pos < length) {
-    const lt = text.indexOf("<", pos);
-    const textEnd = lt === -1 ? length : lt;
-    if (textEnd > pos) onEvent({ type: "text", text: decodeEntities(text.slice(pos, textEnd)) });
-    if (lt === -1) return;
-    const next = text.charAt(lt + 1);
-    if (next === "<") {
-      pos = lt + 1;
-    } else if (next === "!" && text.startsWith("<!--", lt)) {
-      const close = text.indexOf("-->", lt + 4);
-      if (close === -1) return;
-      pos = close + 3;
-    } else if (next === "!" && text.startsWith("<![CDATA[", lt)) {
-      const close = text.indexOf("]]>", lt + 9);
-      if (close === -1) return;
-      if (options.cdataText === true && close > lt + 9) onEvent({ type: "text", text: text.slice(lt + 9, close) });
-      pos = close + 3;
-    } else if (next === "?") {
-      const close = text.indexOf("?>", lt + 2);
-      if (close === -1) return;
-      pos = close + 2;
-    } else if (next === "!") {
-      options.onDeclaration?.();
-      const close = findDeclarationEnd(text, lt + 2);
-      if (close === -1) return;
-      pos = close + 1;
-    } else {
-      const close = findTagEnd(text, lt);
-      if (close === -1) return;
-      if (close < -1) {
-        pos = -close - 2;
-        continue;
-      }
-      const event = parseTag(text.slice(lt + 1, close));
-      if (event !== void 0) onEvent(event);
-      pos = close + 1;
-    }
-  }
-}
-
-// ../core/src/coverage/detect.ts
-var DETECTION_WINDOW = 1024;
-var DETECTION_PREFIX = 1 + DETECTION_WINDOW + 1;
-function isSpace2(char) {
-  return char === " " || char === "	" || char === "\n" || char === "\r";
-}
-function detectCoverageFormat(text) {
-  const start = text.charCodeAt(0) === 65279 ? 1 : 0;
-  const end = start + DETECTION_WINDOW;
-  const window = text.slice(start, end);
-  let first = 0;
-  while (first < window.length && isSpace2(window.charAt(first))) first++;
-  if (first === window.length) return end >= text.length ? "empty" : "unknown";
-  if (window.startsWith("TN:", first) || window.startsWith("SF:", first)) return "lcov";
-  if (window.charAt(first) !== "<") return "unknown";
-  return detectXml(window.slice(first));
-}
-function detectXml(window) {
-  let decided;
-  let seenRoot = false;
-  scanXml(window, (event) => {
-    if (decided !== void 0) return;
-    if (!seenRoot) {
-      if (event.type === "text") {
-        if (event.text.trim() !== "") decided = "unknown";
-      } else if (event.type === "end") {
-        decided = "unknown";
-      } else if (event.name !== "coverage" || event.attrs.has("clover")) {
-        decided = "unknown";
-      } else if (event.selfClosing) {
-        decided = "cobertura";
-      } else {
-        seenRoot = true;
-      }
-      return;
-    }
-    if (event.type === "text") return;
-    decided = event.type === "start" && event.name === "project" ? "unknown" : "cobertura";
-  });
-  if (decided !== void 0) return decided;
-  return seenRoot ? "cobertura" : "unknown";
-}
-function chooseCoverageFormat(text, selection) {
-  if (selection === "auto") return { format: detectCoverageFormat(text), how: "auto-detected" };
-  return { format: selection, how: "configured" };
-}
-function coverageChoiceLine(choice, file) {
-  const prefix = file === void 0 ? "coverage: " : `coverage: ${file}: `;
-  return `${prefix}${choice.format} (${choice.how})`;
-}
-
 // ../core/src/coverage/match.ts
 var BACKSLASH_STAND_IN = "\0";
 function literalBackslashKey(raw, separated, resolve2) {
@@ -28115,230 +27983,6 @@ function suggestRoot(unmatched, repoFiles, coverageRoot) {
     }
   }
   return best;
-}
-
-// ../core/src/coverage/cobertura.ts
-function parseCoberturaCounted(text, options = {}) {
-  const sources = [];
-  let skipped = 0;
-  const perFile = /* @__PURE__ */ new Map();
-  let inSources = false;
-  let sourceText2;
-  let currentFile;
-  let methodDepth = 0;
-  scanXml(text, (event) => {
-    if (event.type === "text") {
-      if (sourceText2 !== void 0) sourceText2 += event.text;
-      return;
-    }
-    if (event.type === "end") {
-      switch (event.name) {
-        case "sources":
-          inSources = false;
-          sourceText2 = void 0;
-          break;
-        case "source": {
-          const source = sourceText2?.trim();
-          if (source) sources.push(source);
-          sourceText2 = void 0;
-          break;
-        }
-        case "class":
-          currentFile = void 0;
-          methodDepth = 0;
-          break;
-        case "methods":
-        case "method":
-          if (methodDepth > 0) methodDepth--;
-          break;
-      }
-      return;
-    }
-    switch (event.name) {
-      case "sources":
-        inSources = !event.selfClosing;
-        break;
-      case "source":
-        if (inSources && !event.selfClosing) sourceText2 = "";
-        break;
-      case "class": {
-        const filename = event.selfClosing ? "" : (event.attrs.get("filename") ?? "").trim();
-        currentFile = filename === "" ? void 0 : filename;
-        methodDepth = 0;
-        break;
-      }
-      case "methods":
-      case "method":
-        if (currentFile !== void 0 && !event.selfClosing) methodDepth++;
-        break;
-      case "line":
-        if (currentFile !== void 0 && methodDepth === 0) {
-          if (!addLine(perFile, currentFile, event.attrs.get("number"), event.attrs.get("hits"))) skipped++;
-        }
-        break;
-    }
-  });
-  const resolve2 = makeResolver([...new Set(sources)], options.repoRoot, options.coverageRoot);
-  const map = /* @__PURE__ */ new Map();
-  for (const [filename, lines] of perFile) {
-    const separated = resolve2(filename);
-    const key = options.literalBackslashes === true ? literalBackslashKey(filename, separated, resolve2) : separated;
-    let target = map.get(key);
-    if (!target) {
-      target = /* @__PURE__ */ new Map();
-      map.set(key, target);
-    }
-    for (const [lineNo, hits] of lines) {
-      target.set(lineNo, Math.max(target.get(lineNo) ?? 0, hits));
-    }
-  }
-  return { map, skipped };
-}
-function addLine(perFile, filename, number, hits) {
-  if (number === void 0) return false;
-  const lineNo = Number(number);
-  if (!Number.isInteger(lineNo) || lineNo < 1) return false;
-  let count2 = 0;
-  if (hits !== void 0) {
-    if (hits.trim() === "") return false;
-    count2 = Number(hits);
-    if (!Number.isFinite(count2) || count2 < 0) return false;
-  }
-  let lines = perFile.get(filename);
-  if (!lines) {
-    lines = /* @__PURE__ */ new Map();
-    perFile.set(filename, lines);
-  }
-  lines.set(lineNo, Math.max(lines.get(lineNo) ?? 0, count2));
-  return true;
-}
-var MAX_CLIMBING_JOIN_SOURCES = 16;
-function makeResolver(sources, repoRoot, coverageRoot) {
-  const direct = directSources(sources, repoRoot);
-  const climbing = sources.slice(0, MAX_CLIMBING_JOIN_SOURCES);
-  return (filename) => {
-    if (isAbsolutePath(filename)) return normalizePath(filename, repoRoot);
-    return resolvePath(filename, climbs(normalizePath(filename)) ? climbing : direct, repoRoot, coverageRoot);
-  };
-}
-function directSources(sources, repoRoot) {
-  const root = normalizeRoot(repoRoot);
-  const foldedRoot = foldForRoot(root, root);
-  const kept = [];
-  const seen = /* @__PURE__ */ new Set();
-  const keep = (source, key) => {
-    if (seen.has(key)) return;
-    seen.add(key);
-    kept.push(source);
-  };
-  for (const source of sources) {
-    const path = normalizePath(source);
-    if (!isAbsolutePath(source)) {
-      if (climbs(path)) continue;
-      if (path !== "") {
-        kept.push(source);
-        break;
-      }
-      keep(source, "relative:");
-      continue;
-    }
-    if (root === "") continue;
-    if (startsWithPath(path, root)) {
-      const rest = path.slice(root.length + 1);
-      if (rest !== "" && !isAbsolutePath(`${rest}/`)) {
-        kept.push(source);
-        break;
-      }
-      if (rest.length < 3) keep(source, `under:${rest}`);
-    } else if (path.length === root.length) {
-      if (startsWithPath(`${path}/`, root)) keep(source, "root:");
-    } else if (path.length < root.length) {
-      const folded = foldForRoot(path, root);
-      if (foldedRoot.startsWith(path.endsWith("/") ? folded : `${folded}/`)) {
-        keep(source, `ancestor:${path.length}:${folded}`);
-      }
-    }
-  }
-  return kept;
-}
-function resolvePath(filename, sources, repoRoot, coverageRoot) {
-  for (const source of sources) {
-    const joined = `${source}/${filename}`;
-    if (isAbsolutePath(source)) {
-      if (repoRoot === void 0) continue;
-      const key2 = normalizePath(joined, repoRoot);
-      if (!isAbsolutePath(key2) && !climbs(key2)) return key2;
-    } else {
-      const key2 = normalizePath(joined);
-      if (key2 !== "" && !climbs(key2)) return joinCoverageRoot(key2, coverageRoot);
-    }
-  }
-  const key = normalizePath(filename, repoRoot);
-  return isAbsolutePath(key) ? key : joinCoverageRoot(key, coverageRoot);
-}
-function climbs(path) {
-  return path === ".." || path.startsWith("../");
-}
-
-// ../core/src/coverage/lcov.ts
-function createLcovReader(options = {}) {
-  const map = /* @__PURE__ */ new Map();
-  let current;
-  let skipped = 0;
-  const resolve2 = (raw) => options.coverageRoot !== void 0 && !isAbsolutePath(raw.trim()) ? normalizePath(joinCoverageRoot(raw, options.coverageRoot), options.repoRoot) : normalizePath(raw, options.repoRoot);
-  return {
-    push(raw) {
-      const line = raw.trim();
-      if (line.startsWith("SF:")) {
-        const raw2 = line.slice(3);
-        const separated = resolve2(raw2);
-        const path = options.literalBackslashes === true ? literalBackslashKey(raw2, separated, resolve2) : separated;
-        current = map.get(path);
-        if (!current) {
-          current = /* @__PURE__ */ new Map();
-          map.set(path, current);
-        }
-      } else if (line.startsWith("DA:")) {
-        if (!current) {
-          skipped++;
-          return;
-        }
-        const [lineNo, hits] = line.slice(3).split(",");
-        const n = Number(lineNo);
-        const h = Number(hits);
-        if (!Number.isInteger(n) || n < 1 || !Number.isFinite(h) || h < 0) {
-          skipped++;
-          return;
-        }
-        current.set(n, (current.get(n) ?? 0) + h);
-      } else if (line === "end_of_record") {
-        current = void 0;
-      }
-    },
-    skipped() {
-      return skipped;
-    },
-    finish() {
-      for (const [path, hits] of map) {
-        if (hits.size === 0) map.delete(path);
-      }
-      return map;
-    }
-  };
-}
-
-// ../core/src/coverage/index.ts
-function parseCoverageCounted(text, format, options = {}) {
-  switch (format) {
-    case "lcov": {
-      const reader = createLcovReader(options);
-      for (const line of text.split(/\r?\n/)) reader.push(line);
-      const map = reader.finish();
-      return { map, skipped: reader.skipped() };
-    }
-    case "cobertura":
-      return parseCoberturaCounted(text, options);
-  }
 }
 
 // ../core/src/coverage/merge.ts
@@ -29679,7 +29323,8 @@ var TomlError = class extends Error {
 };
 var isBare = (c) => c >= "A" && c <= "Z" || c >= "a" && c <= "z" || c >= "0" && c <= "9" || c === "_" || c === "-";
 var newTable = (line) => ({ type: "table", entries: /* @__PURE__ */ new Map(), line });
-function parseTomlDocument(text) {
+function parseTomlDocument(text, origins) {
+  const record = (value2, kind) => origins?.set(value2, { kind });
   const src = text.charCodeAt(0) === 65279 ? text.slice(1) : text;
   const lineStarts2 = [0];
   for (let i = 0; i < src.length; i++) if (src[i] === "\n") lineStarts2.push(i + 1);
@@ -29846,6 +29491,12 @@ function parseTomlDocument(text) {
     target.entries.set(last, value2);
   };
   const value = (depth) => {
+    const start = pos;
+    const parsed = parseValue(depth);
+    origins?.set(parsed, { kind: "value", start, end: pos });
+    return parsed;
+  };
+  const parseValue = (depth) => {
     if (depth > MAX_DEPTH2) fail2();
     const line = lineAt(pos);
     const ch = src[pos];
@@ -29888,7 +29539,10 @@ function parseTomlDocument(text) {
           value(depth + 1),
           keyLine,
           (parent) => made.has(parent),
-          (child) => made.add(child)
+          (child) => {
+            made.add(child);
+            record(child, "dotted");
+          }
         );
         skipAll();
         if (src[pos] === ",") pos++;
@@ -29908,6 +29562,7 @@ function parseTomlDocument(text) {
       if (next === void 0) {
         next = newTable(line);
         origin.set(next, "implicit");
+        record(next, "implicit");
         table.entries.set(key, next);
       } else if (next.type === "array" && origin.get(next) === "array-table") {
         next = next.items[next.items.length - 1];
@@ -29922,24 +29577,28 @@ function parseTomlDocument(text) {
       if (list === void 0) {
         list = { type: "array", items: [], line };
         origin.set(list, "array-table");
+        record(list, "header");
         table.entries.set(last, list);
       } else if (list.type !== "array" || origin.get(list) !== "array-table") {
         fail2();
       }
       const element = newTable(line);
       origin.set(element, "defined");
+      record(element, "header");
       list.items.push(element);
       return element;
     }
     if (existing === void 0) {
       const created = newTable(line);
       origin.set(created, "defined");
+      record(created, "header");
       table.entries.set(last, created);
       return created;
     }
     if (existing.type !== "table" || origin.get(existing) !== "implicit") fail2();
     const defined = existing;
     origin.set(defined, "defined");
+    record(defined, "header");
     defined.line = line;
     return defined;
   };
@@ -29984,12 +29643,14 @@ function parseTomlDocument(text) {
           const from = origin.get(parent);
           if (from === "implicit") {
             origin.set(parent, "dotted");
+            record(parent, "dotted");
             dotted.push(parent);
           }
           return from === "implicit" || from === "dotted";
         },
         (child) => {
           origin.set(child, "dotted");
+          record(child, "dotted");
           dotted.push(child);
         }
       );
@@ -30978,6 +30639,277 @@ function binaryCoveredPaths(diff, coverage2) {
   return [...found].sort(byCodeUnit);
 }
 
+// ../core/src/setup/instructionLines.ts
+var SHELL_INFO = /* @__PURE__ */ new Set([
+  "",
+  "sh",
+  "bash",
+  "shell",
+  "zsh",
+  "fish",
+  "console",
+  "terminal",
+  "shell-session",
+  "shellsession",
+  "powershell",
+  "pwsh",
+  "ps1",
+  "cmd",
+  "bat"
+]);
+var SESSION_INFO = /* @__PURE__ */ new Set(["console", "terminal", "shell-session", "shellsession"]);
+var WRAPPER_WORDS = /* @__PURE__ */ new Set(["sudo", "time", "env"]);
+var MAX_PS_PROMPT = 64;
+var isSpaceCode = (code2) => code2 === 32 || code2 >= 9 && code2 <= 13 || code2 === 160;
+var isAsciiLetter3 = (code2) => code2 >= 65 && code2 <= 90 || code2 >= 97 && code2 <= 122;
+var isAsciiWordStart = (code2) => isAsciiLetter3(code2) || code2 === 95;
+var isAsciiNameChar = (code2) => isAsciiWordStart(code2) || code2 >= 48 && code2 <= 57;
+function isLetter(char) {
+  const code2 = char.charCodeAt(0);
+  if (code2 < 128) return isAsciiLetter3(code2);
+  return new RegExp("\\p{L}", "u").test(char);
+}
+function firstNonSpace(line, from = 0) {
+  let i = from;
+  while (i < line.length && (line.charCodeAt(i) === 32 || line.charCodeAt(i) === 9)) i++;
+  return i;
+}
+function normalizeWord(word) {
+  return word.split("\u2019").join("'").toLowerCase();
+}
+function hasCueWord(line, from, to, cueWords) {
+  let start = -1;
+  let i = from;
+  const flush = (end) => {
+    let word = normalizeWord(line.slice(start, end));
+    start = -1;
+    while (word.endsWith(".") || word.endsWith("'")) word = word.slice(0, -1);
+    return cueWords.has(word);
+  };
+  while (i < to) {
+    const char = String.fromCodePoint(line.codePointAt(i));
+    const inWord = char === "'" || char === "\u2019" || isLetter(char) || char === "." && start !== -1;
+    if (inWord && start === -1) start = i;
+    if (!inWord && start !== -1 && flush(i)) return true;
+    i += char.length;
+  }
+  return start !== -1 && flush(to);
+}
+function splitWords(text) {
+  const words = [];
+  let start = -1;
+  for (let i = 0; i < text.length; i++) {
+    const space = isSpaceCode(text.charCodeAt(i));
+    if (!space && start === -1) start = i;
+    if (space && start !== -1) {
+      words.push(text.slice(start, i));
+      start = -1;
+    }
+  }
+  if (start !== -1) words.push(text.slice(start));
+  return words;
+}
+function isAssignment(word) {
+  if (word.length === 0 || !isAsciiWordStart(word.charCodeAt(0))) return false;
+  let i = 1;
+  while (i < word.length && isAsciiNameChar(word.charCodeAt(i))) i++;
+  return i < word.length && word[i] === "=";
+}
+function commandSegments(text) {
+  const segments = [];
+  let from = 0;
+  let i = 0;
+  while (i < text.length) {
+    const char = text[i];
+    const next = text[i + 1];
+    if (char === "&" && next === "&" || char === "|" && next === "|") {
+      segments.push(text.slice(from, i));
+      i += 2;
+      from = i;
+    } else if (char === ";" || char === "|") {
+      segments.push(text.slice(from, i));
+      i += 1;
+      from = i;
+    } else {
+      i += 1;
+    }
+  }
+  segments.push(text.slice(from));
+  return segments;
+}
+function commandsOfLine(text) {
+  return commandSegments(text).map((segment) => {
+    let body = segment.trim();
+    if (body.startsWith("(")) body = body.slice(1);
+    if (body.endsWith(")")) body = body.slice(0, -1);
+    const words = splitWords(body);
+    let at = 0;
+    while (at < words.length) {
+      const word = words[at];
+      if (!isAssignment(word) && !WRAPPER_WORDS.has(word)) break;
+      at++;
+    }
+    return { words, at };
+  });
+}
+function backtickRuns(line) {
+  const runs = [];
+  let i = line.indexOf("`");
+  while (i !== -1) {
+    let end = i + 1;
+    while (end < line.length && line[end] === "`") end++;
+    runs.push([i, end - i]);
+    i = line.indexOf("`", end);
+  }
+  return runs;
+}
+function codeSpans(line) {
+  const runs = backtickRuns(line);
+  if (runs.length < 2) return [];
+  const partner = new Array(runs.length).fill(-1);
+  const nextOfLength = /* @__PURE__ */ new Map();
+  for (let i = runs.length - 1; i >= 0; i--) {
+    const length = runs[i][1];
+    partner[i] = nextOfLength.get(length) ?? -1;
+    nextOfLength.set(length, i);
+  }
+  const spans = [];
+  for (let i = 0; i < runs.length; ) {
+    const j = partner[i];
+    if (j === -1) {
+      i++;
+      continue;
+    }
+    const [openAt, length] = runs[i];
+    const [closeAt] = runs[j];
+    spans.push({ open: openAt, from: openAt + length, to: closeAt, close: closeAt + length });
+    i = j + 1;
+  }
+  return spans;
+}
+function withoutComments(line, state) {
+  let pos = 0;
+  if (state.open) {
+    const end = line.indexOf("-->");
+    if (end === -1) return null;
+    state.open = false;
+    pos = end + 3;
+  }
+  let out = "";
+  for (; ; ) {
+    const open3 = line.indexOf("<!--", pos);
+    if (open3 === -1) return out + line.slice(pos);
+    out += line.slice(pos, open3);
+    const close = line.indexOf("-->", open3 + 4);
+    if (close === -1) {
+      state.open = true;
+      return out;
+    }
+    out += " ";
+    pos = close + 3;
+  }
+}
+function fenceInfoWord(info2) {
+  let end = 0;
+  while (end < info2.length && !isSpaceCode(info2.charCodeAt(end)) && info2[end] !== "{") end++;
+  if (end > 0 || info2[0] !== "{") return info2.slice(0, end).toLowerCase();
+  const from = info2[1] === "." ? 2 : 1;
+  end = from;
+  while (end < info2.length && !isSpaceCode(info2.charCodeAt(end)) && info2[end] !== "}" && info2[end] !== ",") end++;
+  return info2.slice(from, end).toLowerCase();
+}
+function fenceRun(line, at) {
+  const char = line[at];
+  if (char !== "`" && char !== "~") return 0;
+  let run2 = 1;
+  while (line[at + run2] === char) run2++;
+  return run2;
+}
+function listItemContent(line, at) {
+  let end = at;
+  const char = line[at];
+  if (char === "-" || char === "+" || char === "*") {
+    end = at + 1;
+  } else {
+    while (end < line.length && end - at < 10 && line.charCodeAt(end) >= 48 && line.charCodeAt(end) <= 57) end++;
+    if (end === at || end - at > 9 || line[end] !== "." && line[end] !== ")") return -1;
+    end++;
+  }
+  if (end === line.length) return end + 1;
+  if (line[end] !== " " && line[end] !== "	") return -1;
+  const content = firstNonSpace(line, end);
+  return content === line.length || content - end > 4 ? end + 1 : content;
+}
+function blockReader() {
+  const comment = { open: false };
+  let fence = null;
+  const items = [];
+  let paragraph = false;
+  return (raw) => {
+    if (fence !== null) {
+      const at2 = firstNonSpace(raw);
+      let run3 = 0;
+      while (raw[at2 + run3] === fence.char) run3++;
+      if (run3 >= fence.length && firstNonSpace(raw, at2 + run3) === raw.length) {
+        fence = null;
+        return { kind: "skipped" };
+      }
+      return { kind: "fenced", shell: fence.shell, session: fence.session };
+    }
+    const line = withoutComments(raw, comment);
+    if (line === null) {
+      paragraph = false;
+      return { kind: "skipped" };
+    }
+    const at = firstNonSpace(line);
+    if (at >= line.length) {
+      paragraph = false;
+      return { kind: "text", line };
+    }
+    const char = line[at];
+    const content = listItemContent(line, at);
+    const lazy = paragraph && fenceRun(line, at) < 3 && content === -1 && char !== "#";
+    if (!lazy) while (items.length > 0 && items[items.length - 1] > at) items.pop();
+    const indent = at - (items.length > 0 ? items[items.length - 1] : 0);
+    if (indent >= 4) {
+      paragraph = paragraph && char !== "#";
+      return { kind: "text", line };
+    }
+    if (content !== -1) items.push(content);
+    const from = content !== -1 && content < line.length ? content : at;
+    const run2 = fenceRun(line, from);
+    if (run2 >= 3) {
+      const word = fenceInfoWord(line.slice(from + run2).trim());
+      const fenceChar = line[from];
+      fence = { char: fenceChar, length: run2, shell: SHELL_INFO.has(word), session: SESSION_INFO.has(word) };
+      paragraph = false;
+      return { kind: "skipped" };
+    }
+    paragraph = char !== "#";
+    return { kind: "text", line };
+  };
+}
+function shellLine(line, session) {
+  const start = firstNonSpace(line);
+  if (session) {
+    const rest2 = line.slice(start);
+    if (rest2.startsWith("$ ") || rest2.startsWith("% ") || rest2.startsWith("> ")) return rest2.slice(2);
+    if (rest2.startsWith("PS")) {
+      const limit = Math.min(rest2.length, 2 + MAX_PS_PROMPT + 1);
+      for (let i = 2; i < limit; i++) {
+        if (rest2[i] !== ">") continue;
+        return rest2[i + 1] === " " ? rest2.slice(i + 2) : null;
+      }
+    }
+    return null;
+  }
+  let rest = line.slice(start);
+  if (rest.startsWith("$ ") || rest.startsWith("% ") || rest.startsWith("> ")) rest = rest.slice(2);
+  const body = firstNonSpace(rest);
+  if (rest[body] === "#") return null;
+  return rest;
+}
+
 // ../core/src/setup/instructions.ts
 var INSTRUCTION_KINDS = [
   "claude-md",
@@ -31067,46 +30999,9 @@ var CUE_WORDS = /* @__PURE__ */ new Set([
 var AFTER_VERBS = /* @__PURE__ */ new Set(["is", "are", "was"]);
 var AFTER_NEGATIONS = /* @__PURE__ */ new Set(["not", "never", "deprecated", "forbidden", "unsupported"]);
 var AFTER_CONTRACTIONS = /* @__PURE__ */ new Set(["isn't", "aren't"]);
-var SHELL_INFO = /* @__PURE__ */ new Set([
-  "",
-  "sh",
-  "bash",
-  "shell",
-  "zsh",
-  "fish",
-  "console",
-  "terminal",
-  "shell-session",
-  "shellsession",
-  "powershell",
-  "pwsh",
-  "ps1",
-  "cmd",
-  "bat"
-]);
-var SESSION_INFO = /* @__PURE__ */ new Set(["console", "terminal", "shell-session", "shellsession"]);
-var WRAPPER_WORDS = /* @__PURE__ */ new Set(["sudo", "time", "env"]);
 var RUNNER_LAUNCHERS = /* @__PURE__ */ new Set(["npx", "bunx", "npm", "pnpm", "yarn", "bun"]);
 var RUNNER_SKIPPED = /* @__PURE__ */ new Set(["exec", "dlx", "run", "x", "--"]);
 var GLOBAL_FLAGS = /* @__PURE__ */ new Set(["-g", "--global", "--location=global"]);
-var MAX_PS_PROMPT = 64;
-var isSpaceCode = (code2) => code2 === 32 || code2 >= 9 && code2 <= 13 || code2 === 160;
-var isAsciiLetter3 = (code2) => code2 >= 65 && code2 <= 90 || code2 >= 97 && code2 <= 122;
-var isAsciiWordStart = (code2) => isAsciiLetter3(code2) || code2 === 95;
-var isAsciiNameChar = (code2) => isAsciiWordStart(code2) || code2 >= 48 && code2 <= 57;
-function isLetter(char) {
-  const code2 = char.charCodeAt(0);
-  if (code2 < 128) return isAsciiLetter3(code2);
-  return new RegExp("\\p{L}", "u").test(char);
-}
-function firstNonSpace(line, from = 0) {
-  let i = from;
-  while (i < line.length && (line.charCodeAt(i) === 32 || line.charCodeAt(i) === 9)) i++;
-  return i;
-}
-function normalizeWord(word) {
-  return word.split("\u2019").join("'").toLowerCase();
-}
 function wordsIn(line, from, to, limit) {
   const words = [];
   let start = -1;
@@ -31126,77 +31021,8 @@ function wordsIn(line, from, to, limit) {
   if (start !== -1 && words.length < limit) words.push(normalizeWord(line.slice(start, to)));
   return words;
 }
-function hasCueWord(line, from, to) {
-  let start = -1;
-  let i = from;
-  const flush = (end) => {
-    const word = normalizeWord(line.slice(start, end));
-    start = -1;
-    return CUE_WORDS.has(word);
-  };
-  while (i < to) {
-    const char = String.fromCodePoint(line.codePointAt(i));
-    const inWord = char === "'" || char === "\u2019" || isLetter(char);
-    if (inWord && start === -1) start = i;
-    if (!inWord && start !== -1 && flush(i)) return true;
-    i += char.length;
-  }
-  return start !== -1 && flush(to);
-}
-function splitWords(text) {
-  const words = [];
-  let start = -1;
-  for (let i = 0; i < text.length; i++) {
-    const space = isSpaceCode(text.charCodeAt(i));
-    if (!space && start === -1) start = i;
-    if (space && start !== -1) {
-      words.push(text.slice(start, i));
-      start = -1;
-    }
-  }
-  if (start !== -1) words.push(text.slice(start));
-  return words;
-}
-function isAssignment(word) {
-  if (word.length === 0 || !isAsciiWordStart(word.charCodeAt(0))) return false;
-  let i = 1;
-  while (i < word.length && isAsciiNameChar(word.charCodeAt(i))) i++;
-  return i < word.length && word[i] === "=";
-}
-function commandSegments(text) {
-  const segments = [];
-  let from = 0;
-  let i = 0;
-  while (i < text.length) {
-    const char = text[i];
-    const next = text[i + 1];
-    if (char === "&" && next === "&" || char === "|" && next === "|") {
-      segments.push(text.slice(from, i));
-      i += 2;
-      from = i;
-    } else if (char === ";" || char === "|") {
-      segments.push(text.slice(from, i));
-      i += 1;
-      from = i;
-    } else {
-      i += 1;
-    }
-  }
-  segments.push(text.slice(from));
-  return segments;
-}
 function declareCommand(commandLine, lineNumber, found) {
-  for (const segment of commandSegments(commandLine)) {
-    let text = segment.trim();
-    if (text.startsWith("(")) text = text.slice(1);
-    if (text.endsWith(")")) text = text.slice(0, -1);
-    const all = splitWords(text);
-    let at = 0;
-    while (at < all.length) {
-      const word = all[at];
-      if (!isAssignment(word) && !WRAPPER_WORDS.has(word)) break;
-      at++;
-    }
+  for (const { words: all, at } of commandsOfLine(commandLine)) {
     const first = all[at];
     if (first === void 0) continue;
     const manager = PACKAGE_MANAGERS.find((tool) => tool === first);
@@ -31219,37 +31045,6 @@ function declareCommand(commandLine, lineNumber, found) {
     }
   }
 }
-function shellLine(line, session) {
-  const start = firstNonSpace(line);
-  if (session) {
-    const rest2 = line.slice(start);
-    if (rest2.startsWith("$ ") || rest2.startsWith("% ") || rest2.startsWith("> ")) return rest2.slice(2);
-    if (rest2.startsWith("PS")) {
-      const limit = Math.min(rest2.length, 2 + MAX_PS_PROMPT + 1);
-      for (let i = 2; i < limit; i++) {
-        if (rest2[i] !== ">") continue;
-        return rest2[i + 1] === " " ? rest2.slice(i + 2) : null;
-      }
-    }
-    return null;
-  }
-  let rest = line.slice(start);
-  if (rest.startsWith("$ ") || rest.startsWith("% ") || rest.startsWith("> ")) rest = rest.slice(2);
-  const body = firstNonSpace(rest);
-  if (rest[body] === "#") return null;
-  return rest;
-}
-function backtickRuns(line) {
-  const runs = [];
-  let i = line.indexOf("`");
-  while (i !== -1) {
-    let end = i + 1;
-    while (end < line.length && line[end] === "`") end++;
-    runs.push([i, end - i]);
-    i = line.indexOf("`", end);
-  }
-  return runs;
-}
 function negatedAfter(line, from, to) {
   const [first, second] = wordsIn(line, from, to, 2);
   if (first === void 0) return false;
@@ -31257,31 +31052,11 @@ function negatedAfter(line, from, to) {
   return AFTER_VERBS.has(first) && second !== void 0 && AFTER_NEGATIONS.has(second);
 }
 function declareSpans(line, lineNumber, found) {
-  const runs = backtickRuns(line);
-  if (runs.length < 2) return;
-  const partner = new Array(runs.length).fill(-1);
-  const nextOfLength = /* @__PURE__ */ new Map();
-  for (let i = runs.length - 1; i >= 0; i--) {
-    const length = runs[i][1];
-    partner[i] = nextOfLength.get(length) ?? -1;
-    nextOfLength.set(length, i);
-  }
-  const spans = [];
-  for (let i = 0; i < runs.length; ) {
-    const j = partner[i];
-    if (j === -1) {
-      i++;
-      continue;
-    }
-    const [openAt, length] = runs[i];
-    const [closeAt] = runs[j];
-    spans.push({ from: openAt + length, to: closeAt, open: openAt, close: closeAt + length });
-    i = j + 1;
-  }
+  const spans = codeSpans(line);
   let gapStart = 0;
   spans.forEach((span2, index) => {
     const next = spans[index + 1];
-    const before = hasCueWord(line, gapStart, span2.open);
+    const before = hasCueWord(line, gapStart, span2.open, CUE_WORDS);
     const negated = before || negatedAfter(line, span2.close, next === void 0 ? line.length : next.open);
     gapStart = span2.close;
     if (!negated) declareCommand(line.slice(span2.from, span2.to).trim(), lineNumber, found);
@@ -31304,28 +31079,6 @@ function frontmatterScoped(lines, close) {
   }
   return false;
 }
-function withoutComments(line, state) {
-  let pos = 0;
-  if (state.open) {
-    const end = line.indexOf("-->");
-    if (end === -1) return null;
-    state.open = false;
-    pos = end + 3;
-  }
-  let out = "";
-  for (; ; ) {
-    const open3 = line.indexOf("<!--", pos);
-    if (open3 === -1) return out + line.slice(pos);
-    out += line.slice(pos, open3);
-    const close = line.indexOf("-->", open3 + 4);
-    if (close === -1) {
-      state.open = true;
-      return out;
-    }
-    out += " ";
-    pos = close + 3;
-  }
-}
 function instructionDeclarations(text) {
   const lines = (text.charCodeAt(0) === 65279 ? text.slice(1) : text).split("\n").map((line) => line.endsWith("\r") ? line.slice(0, -1) : line);
   const found = {
@@ -31344,52 +31097,31 @@ function instructionDeclarations(text) {
       break;
     }
   }
-  const comment = { open: false };
-  let fence = null;
+  const read = blockReader();
   let ignored = false;
   let previousBlank = true;
   let previousIndented = false;
   for (let index = start; index < lines.length; index++) {
     const raw = lines[index];
     const lineNumber = index + 1;
-    if (fence !== null) {
-      const at2 = firstNonSpace(raw);
-      let run2 = 0;
-      while (raw[at2 + run2] === fence.char) run2++;
-      if (run2 >= fence.length) {
-        fence = null;
-        previousBlank = false;
-        previousIndented = false;
-      } else if (fence.counted && !ignored) {
-        const command = shellLine(raw, fence.session);
+    const block = read(raw);
+    if (block.kind === "fenced") {
+      if (block.shell && !ignored) {
+        const command = shellLine(raw, block.session);
         if (command !== null) declareCommand(command, lineNumber, found);
       }
       continue;
     }
-    const line = withoutComments(raw, comment);
-    if (line === null) {
+    if (block.kind === "skipped") {
       previousBlank = false;
       previousIndented = false;
       continue;
     }
+    const line = block.line;
     const at = firstNonSpace(line);
     const char = line[at];
-    if (char === "`" || char === "~") {
-      let run2 = 0;
-      while (line[at + run2] === char) run2++;
-      if (run2 >= 3) {
-        const info2 = line.slice(at + run2).trim();
-        let end = 0;
-        while (end < info2.length && !isSpaceCode(info2.charCodeAt(end))) end++;
-        const word = info2.slice(0, end).toLowerCase();
-        fence = { char, length: run2, counted: SHELL_INFO.has(word), session: SESSION_INFO.has(word) };
-        previousBlank = false;
-        previousIndented = false;
-        continue;
-      }
-    }
     if (char === "#") {
-      ignored = hasCueWord(line, at, line.length);
+      ignored = hasCueWord(line, at, line.length, CUE_WORDS);
       previousBlank = false;
       previousIndented = false;
       if (ignored) continue;
@@ -31523,7 +31255,6 @@ function scanAgentSetup(paths) {
 // ../core/src/injection/paths.ts
 var DEFAULT_EXEMPT_DIRS = ["fixtures/**", "**/__fixtures__/**", "**/testdata/**"];
 var DEFAULT_EXEMPT_NAMES = ["**/*.test.*", "**/*.spec.*"];
-var DEFAULT_EXEMPT = [...DEFAULT_EXEMPT_DIRS, ...DEFAULT_EXEMPT_NAMES];
 var DEFAULT_PI03_EXEMPT = ["**/test/**"];
 var LOCALE_PATHS = [
   "**/locales/**",
@@ -31599,6 +31330,125 @@ function isProsePath(path) {
   return extension === "" || PROSE_EXTENSIONS.has(extension) || isMarkdownPath(path);
 }
 
+// ../core/src/injection/phrases.ts
+var w = (...words) => words.join(" ");
+var INJECTION_PHRASES = [
+  { id: "PH01", text: w("ignore", "previous", "instructions"), scope: "any" },
+  { id: "PH02", text: w("ignore", "all", "previous", "instructions"), scope: "any" },
+  { id: "PH03", text: w("ignore", "prior", "instructions"), scope: "any" },
+  { id: "PH04", text: w("ignore", "all", "prior", "instructions"), scope: "any" },
+  { id: "PH05", text: w("ignore", "the", "previous", "instructions"), scope: "any" },
+  // Perez and Ribeiro, "Ignore Previous Prompt: Attack Techniques For Language Models" (2022), goal hijacking.
+  { id: "PH06", text: w("ignore", "any", "previous", "and", "following", "instructions"), scope: "any" },
+  // The prompt-injection example Riley Goodside published in September 2022.
+  { id: "PH07", text: w("ignore", "the", "above", "directions"), scope: "any" },
+  { id: "PH08", text: w("disregard", "the", "above"), scope: "any" },
+  { id: "PH09", text: w("disregard", "previous", "instructions"), scope: "any" },
+  { id: "PH10", text: w("disregard", "all", "previous", "instructions"), scope: "any" },
+  { id: "PH11", text: w("forget", "all", "previous", "instructions"), scope: "any" },
+  { id: "PH12", text: w("forget", "your", "instructions"), scope: "any" },
+  { id: "PH13", text: w("you", "are", "now", "a"), scope: "any" },
+  { id: "PH14", text: w("you", "are", "now", "an"), scope: "any" },
+  { id: "PH15", text: w("new", "instructions:"), scope: "any" },
+  { id: "PH16", text: w("do", "not", "tell", "the", "user"), scope: "any" },
+  { id: "PH17", text: w("don't", "tell", "the", "user"), scope: "any" },
+  { id: "PH18", text: w("without", "telling", "the", "user"), scope: "any" },
+  { id: "PH19", text: w("developer", "mode", "enabled"), scope: "any" },
+  { id: "PH20", text: w("act", "as", "an", "unrestricted"), scope: "any" },
+  { id: "PH21", text: ["<|im", "_start|>"].join(""), scope: "any" },
+  { id: "PH22", text: ["system", ":"].join(""), scope: "line-start" },
+  { id: "PH23", text: w("if", "you", "are", "an", "ai"), scope: "hidden" },
+  { id: "PH24", text: w("if", "you", "are", "an", "llm"), scope: "hidden" },
+  { id: "PH25", text: w("if", "you", "are", "a", "language", "model"), scope: "hidden" },
+  { id: "PH26", text: w("ai", "agents", "must"), scope: "hidden" },
+  { id: "PH27", text: w("ai", "agents", "should"), scope: "hidden" },
+  { id: "PH28", text: w("ai", "assistants", "must"), scope: "hidden" },
+  { id: "PH29", text: w("instructions", "for", "ai"), scope: "hidden" },
+  { id: "PH30", text: w("instructions", "for", "the", "agent"), scope: "hidden" },
+  { id: "PH31", text: w("note", "to", "ai"), scope: "hidden" },
+  { id: "PH32", text: w("attention", "ai"), scope: "hidden" }
+];
+var MAX_POLICY_PHRASES = 100;
+function isDropped(code2) {
+  return code2 === 173 || code2 >= 8203 && code2 <= 8205 || code2 === 8288 || code2 === 65279;
+}
+function isSpace(code2) {
+  return code2 >= 9 && code2 <= 13 || code2 === 32 || code2 === 133 || code2 === 160 || code2 === 5760 || code2 >= 8192 && code2 <= 8202 || code2 === 8232 || code2 === 8233 || code2 === 8239 || code2 === 8287 || code2 === 12288;
+}
+function normalizeForPhrases(text) {
+  let out = "";
+  let pendingSpace = false;
+  for (let i = 0; i < text.length; i++) {
+    const code2 = text.charCodeAt(i);
+    if (isDropped(code2)) continue;
+    if (isSpace(code2)) {
+      pendingSpace = out.length > 0;
+      continue;
+    }
+    if (pendingSpace) {
+      out += " ";
+      pendingSpace = false;
+    }
+    out += code2 === 8216 || code2 === 8217 ? "'" : text[i];
+  }
+  return out.toLowerCase();
+}
+var WORD_CHAR = /^[\p{L}\p{N}]$/u;
+function wordAt(text, index, before) {
+  if (before) {
+    if (index <= 0) return false;
+    const low = text.charCodeAt(index - 1);
+    const start = low >= 56320 && low <= 57343 && index >= 2 ? index - 2 : index - 1;
+    const cp2 = text.codePointAt(start);
+    return cp2 !== void 0 && WORD_CHAR.test(String.fromCodePoint(cp2));
+  }
+  if (index >= text.length) return false;
+  const cp = text.codePointAt(index);
+  return cp !== void 0 && WORD_CHAR.test(String.fromCodePoint(cp));
+}
+function phraseMatcher(id, text, scope) {
+  return {
+    id,
+    text,
+    scope,
+    edgeStart: text.length > 0 && wordAt(text, 0, false),
+    edgeEnd: text.length > 0 && wordAt(text, text.length, true)
+  };
+}
+var BUILT_IN_MATCHERS = INJECTION_PHRASES.map(
+  (phrase) => phraseMatcher(phrase.id, phrase.text, phrase.scope)
+);
+function policyPhraseMatchers(phrases, preferred = []) {
+  const all = [...new Set(phrases.map(normalizeForPhrases).filter((text) => text !== ""))].sort(byCodeUnit);
+  const first = new Set(preferred.map(normalizeForPhrases));
+  const ordered = [...all.filter((text) => first.has(text)), ...all.filter((text) => !first.has(text))];
+  const texts = ordered.slice(0, MAX_POLICY_PHRASES).sort(byCodeUnit);
+  return texts.map((text, i) => phraseMatcher(`PX${String(i + 1).padStart(2, "0")}`, text, "any"));
+}
+function phraseOccurs(text, matcher) {
+  const needle = matcher.text;
+  if (needle === "") return false;
+  for (let at = text.indexOf(needle); at !== -1; at = text.indexOf(needle, at + 1)) {
+    if (matcher.edgeStart && wordAt(text, at, true)) continue;
+    if (matcher.edgeEnd && wordAt(text, at + needle.length, false)) continue;
+    return true;
+  }
+  return false;
+}
+function firstPhrase(text, matchers, options) {
+  for (const matcher of matchers) {
+    if (!options.scopes.includes(matcher.scope)) continue;
+    if (matcher.scope === "line-start" && options.lineStart) {
+      if (text.startsWith(matcher.text) && !(matcher.edgeEnd && wordAt(text, matcher.text.length, false))) {
+        return matcher;
+      }
+      continue;
+    }
+    if (phraseOccurs(text, matcher)) return matcher;
+  }
+  return null;
+}
+
 // ../core/src/injection/policy.ts
 var INJECTION_SIGNAL_IDS = ["PI01", "PI02", "PI03", "PI04", "PI05"];
 var DEFAULT_INJECTION_SEVERITIES = {
@@ -31623,29 +31473,41 @@ function injectionSettingsOf(policy, base) {
   const document2 = policy?.document;
   if (policy === void 0 || policy.source === "none" || document2 === null || document2 === void 0) return settings2;
   const injection2 = document2.injection;
-  if (injection2 === void 0) return settings2;
-  const wanted = injection2.signals ?? {};
   if (policy.source === "app") {
+    if (injection2 === void 0) return settings2;
+    const wanted2 = injection2.signals ?? {};
     settings2.exempt = tidy(injection2.exempt);
     settings2.phrases = tidy(injection2.phrases);
     for (const id of INJECTION_SIGNAL_IDS) {
-      const value = Object.hasOwn(wanted, id) ? wanted[id] : void 0;
+      const value = Object.hasOwn(wanted2, id) ? wanted2[id] : void 0;
       if (value !== void 0) severities[id] = value === "off" ? null : value;
     }
     return settings2;
   }
-  const basePhrases = base?.kind === "document" ? base.document.injection?.phrases : void 0;
-  settings2.phrases = tidy(injection2.phrases, basePhrases);
-  if (injection2.exempt !== void 0 && injection2.exempt.length > 0) {
-    settings2.ignored.push({ setting: "injection.exempt", layer: "policy-file", reason: "not-allowed" });
+  const baseInjection = base?.kind === "document" ? base.document.injection : void 0;
+  settings2.phrases = tidy(injection2?.phrases, baseInjection?.phrases);
+  if (settings2.phrases.length > MAX_POLICY_PHRASES) {
+    const basePhrases = tidy(baseInjection?.phrases, policy.copies?.base.injection?.phrases);
+    if (basePhrases.length > 0) settings2.basePhrases = basePhrases;
   }
+  if (injection2?.exempt !== void 0 && injection2.exempt.length > 0) {
+    settings2.ignored.push({ setting: "injection.exempt", reason: "not-allowed" });
+  }
+  const wanted = injection2?.signals ?? {};
+  const baseWanted = baseInjection?.signals ?? {};
+  const headWanted = policy.copies === void 0 ? wanted : policy.copies.head.injection?.signals ?? {};
   for (const id of INJECTION_SIGNAL_IDS) {
+    const fallback = DEFAULT_INJECTION_SEVERITIES[id];
+    const baseValue = Object.hasOwn(baseWanted, id) ? baseWanted[id] : void 0;
+    if (baseValue !== void 0 && RANK[baseValue] > RANK[fallback]) severities[id] = baseValue;
     const value = Object.hasOwn(wanted, id) ? wanted[id] : void 0;
     if (value === void 0) continue;
-    const fallback = DEFAULT_INJECTION_SEVERITIES[id];
-    if (RANK[value] > RANK[fallback]) severities[id] = value;
-    else if (RANK[value] < RANK[fallback]) {
-      settings2.ignored.push({ setting: `injection.signals.${id}`, layer: "policy-file", reason: "looser" });
+    const current = severities[id];
+    if (RANK[value] > RANK[current]) severities[id] = value;
+    const headValue = Object.hasOwn(headWanted, id) ? headWanted[id] : void 0;
+    const below = policy.copies === void 0 ? value : headValue;
+    if (below !== void 0 && RANK[below] < RANK[policy.copies === void 0 ? current : fallback]) {
+      settings2.ignored.push({ setting: `injection.signals.${id}`, reason: "looser" });
     }
   }
   return settings2;
@@ -31694,122 +31556,6 @@ function injectionMessages(signals, omitted, cut) {
     });
   }
   return messages;
-}
-
-// ../core/src/injection/phrases.ts
-var w = (...words) => words.join(" ");
-var INJECTION_PHRASES = [
-  { id: "PH01", text: w("ignore", "previous", "instructions"), scope: "any" },
-  { id: "PH02", text: w("ignore", "all", "previous", "instructions"), scope: "any" },
-  { id: "PH03", text: w("ignore", "prior", "instructions"), scope: "any" },
-  { id: "PH04", text: w("ignore", "all", "prior", "instructions"), scope: "any" },
-  { id: "PH05", text: w("ignore", "the", "previous", "instructions"), scope: "any" },
-  // Perez and Ribeiro, "Ignore Previous Prompt: Attack Techniques For Language Models" (2022), goal hijacking.
-  { id: "PH06", text: w("ignore", "any", "previous", "and", "following", "instructions"), scope: "any" },
-  // The prompt-injection example Riley Goodside published in September 2022.
-  { id: "PH07", text: w("ignore", "the", "above", "directions"), scope: "any" },
-  { id: "PH08", text: w("disregard", "the", "above"), scope: "any" },
-  { id: "PH09", text: w("disregard", "previous", "instructions"), scope: "any" },
-  { id: "PH10", text: w("disregard", "all", "previous", "instructions"), scope: "any" },
-  { id: "PH11", text: w("forget", "all", "previous", "instructions"), scope: "any" },
-  { id: "PH12", text: w("forget", "your", "instructions"), scope: "any" },
-  { id: "PH13", text: w("you", "are", "now", "a"), scope: "any" },
-  { id: "PH14", text: w("you", "are", "now", "an"), scope: "any" },
-  { id: "PH15", text: w("new", "instructions:"), scope: "any" },
-  { id: "PH16", text: w("do", "not", "tell", "the", "user"), scope: "any" },
-  { id: "PH17", text: w("don't", "tell", "the", "user"), scope: "any" },
-  { id: "PH18", text: w("without", "telling", "the", "user"), scope: "any" },
-  { id: "PH19", text: w("developer", "mode", "enabled"), scope: "any" },
-  { id: "PH20", text: w("act", "as", "an", "unrestricted"), scope: "any" },
-  { id: "PH21", text: ["<|im", "_start|>"].join(""), scope: "any" },
-  { id: "PH22", text: ["system", ":"].join(""), scope: "line-start" },
-  { id: "PH23", text: w("if", "you", "are", "an", "ai"), scope: "hidden" },
-  { id: "PH24", text: w("if", "you", "are", "an", "llm"), scope: "hidden" },
-  { id: "PH25", text: w("if", "you", "are", "a", "language", "model"), scope: "hidden" },
-  { id: "PH26", text: w("ai", "agents", "must"), scope: "hidden" },
-  { id: "PH27", text: w("ai", "agents", "should"), scope: "hidden" },
-  { id: "PH28", text: w("ai", "assistants", "must"), scope: "hidden" },
-  { id: "PH29", text: w("instructions", "for", "ai"), scope: "hidden" },
-  { id: "PH30", text: w("instructions", "for", "the", "agent"), scope: "hidden" },
-  { id: "PH31", text: w("note", "to", "ai"), scope: "hidden" },
-  { id: "PH32", text: w("attention", "ai"), scope: "hidden" }
-];
-var MAX_POLICY_PHRASES = 100;
-function isDropped(code2) {
-  return code2 === 173 || code2 >= 8203 && code2 <= 8205 || code2 === 8288 || code2 === 65279;
-}
-function isSpace3(code2) {
-  return code2 >= 9 && code2 <= 13 || code2 === 32 || code2 === 133 || code2 === 160 || code2 === 5760 || code2 >= 8192 && code2 <= 8202 || code2 === 8232 || code2 === 8233 || code2 === 8239 || code2 === 8287 || code2 === 12288;
-}
-function normalizeForPhrases(text) {
-  let out = "";
-  let pendingSpace = false;
-  for (let i = 0; i < text.length; i++) {
-    const code2 = text.charCodeAt(i);
-    if (isDropped(code2)) continue;
-    if (isSpace3(code2)) {
-      pendingSpace = out.length > 0;
-      continue;
-    }
-    if (pendingSpace) {
-      out += " ";
-      pendingSpace = false;
-    }
-    out += code2 === 8216 || code2 === 8217 ? "'" : text[i];
-  }
-  return out.toLowerCase();
-}
-var WORD_CHAR = /^[\p{L}\p{N}]$/u;
-function wordAt(text, index, before) {
-  if (before) {
-    if (index <= 0) return false;
-    const low = text.charCodeAt(index - 1);
-    const start = low >= 56320 && low <= 57343 && index >= 2 ? index - 2 : index - 1;
-    const cp2 = text.codePointAt(start);
-    return cp2 !== void 0 && WORD_CHAR.test(String.fromCodePoint(cp2));
-  }
-  if (index >= text.length) return false;
-  const cp = text.codePointAt(index);
-  return cp !== void 0 && WORD_CHAR.test(String.fromCodePoint(cp));
-}
-function phraseMatcher(id, text, scope) {
-  return {
-    id,
-    text,
-    scope,
-    edgeStart: text.length > 0 && wordAt(text, 0, false),
-    edgeEnd: text.length > 0 && wordAt(text, text.length, true)
-  };
-}
-var BUILT_IN_MATCHERS = INJECTION_PHRASES.map(
-  (phrase) => phraseMatcher(phrase.id, phrase.text, phrase.scope)
-);
-function policyPhraseMatchers(phrases) {
-  const texts = [...new Set(phrases.map(normalizeForPhrases).filter((text) => text !== ""))].sort(byCodeUnit).slice(0, MAX_POLICY_PHRASES);
-  return texts.map((text, i) => phraseMatcher(`PX${String(i + 1).padStart(2, "0")}`, text, "any"));
-}
-function phraseOccurs(text, matcher) {
-  const needle = matcher.text;
-  if (needle === "") return false;
-  for (let at = text.indexOf(needle); at !== -1; at = text.indexOf(needle, at + 1)) {
-    if (matcher.edgeStart && wordAt(text, at, true)) continue;
-    if (matcher.edgeEnd && wordAt(text, at + needle.length, false)) continue;
-    return true;
-  }
-  return false;
-}
-function firstPhrase(text, matchers, options) {
-  for (const matcher of matchers) {
-    if (!options.scopes.includes(matcher.scope)) continue;
-    if (matcher.scope === "line-start" && options.lineStart) {
-      if (text.startsWith(matcher.text) && !(matcher.edgeEnd && wordAt(text, matcher.text.length, false))) {
-        return matcher;
-      }
-      continue;
-    }
-    if (phraseOccurs(text, matcher)) return matcher;
-  }
-  return null;
 }
 
 // ../core/src/injection/unicode.ts
@@ -32044,7 +31790,10 @@ function pathRules(extraExempt) {
 var ALL_SCOPES = ["any", "line-start", "hidden"];
 function scanInjection(diff, options = {}) {
   const rules = pathRules(options.exempt ?? []);
-  const matchers = [...BUILT_IN_MATCHERS, ...policyPhraseMatchers(options.phrases ?? [])];
+  const matchers = [
+    ...BUILT_IN_MATCHERS,
+    ...policyPhraseMatchers(options.phrases ?? [], options.preferredPhrases ?? [])
+  ];
   const findings = [];
   const cut = /* @__PURE__ */ new Set();
   for (const file of diff) {
@@ -32117,7 +31866,11 @@ function sortFindings(findings) {
   return findings.sort((a, b) => byCodeUnit(a.id, b.id) || byCodeUnit(a.path, b.path) || (a.line ?? 0) - (b.line ?? 0));
 }
 function detectInjection(diff, settings2) {
-  const scan = scanInjection(diff, { exempt: settings2.exempt, phrases: settings2.phrases });
+  const scan = scanInjection(diff, {
+    exempt: settings2.exempt,
+    phrases: settings2.phrases,
+    ...settings2.basePhrases === void 0 ? {} : { preferredPhrases: settings2.basePhrases }
+  });
   const kept = [];
   const omitted = /* @__PURE__ */ new Map();
   const perFile = /* @__PURE__ */ new Map();
@@ -32234,18 +31987,33 @@ function resolveSeverity(policy, id, fallback) {
     return value === "off" ? { severity: null, lowered: false } : { severity: value, lowered: false };
   }
   if (policy.source === "file") {
-    if (RANK2[value] > RANK2[fallback]) return { severity: value, lowered: false };
-    if (RANK2[value] < RANK2[fallback]) return { severity: fallback, lowered: true };
-    return { severity: fallback, lowered: false };
+    const lowered = ruleLowered(policy, id, fallback);
+    if (RANK2[value] > RANK2[fallback]) return { severity: value, lowered };
+    return { severity: fallback, lowered };
   }
   return { severity: fallback, lowered: false };
 }
+function ruleOf(document2, id) {
+  const rules = document2?.policy?.rules;
+  return rules !== void 0 && Object.hasOwn(rules, id) ? rules[id] : void 0;
+}
+function effectiveRank(floor, value) {
+  return Math.max(RANK2[floor], value === void 0 ? -1 : RANK2[value]);
+}
+function ruleLowered(policy, id, fallback) {
+  const head = ruleOf(policy.copies?.head ?? policy.document ?? void 0, id);
+  if (head !== void 0 && RANK2[head] < RANK2[fallback]) return true;
+  if (policy.copies === void 0) return false;
+  return effectiveRank(fallback, head) < effectiveRank(fallback, ruleOf(policy.copies.base, id));
+}
 function resolveKeyedSeverity(policy, id, keyed) {
-  const { featureValue, featureSetting, fallback } = keyed;
+  const { feature, featureSetting, fallback } = keyed;
   const rules = policy.document?.policy?.rules;
   const ruleValue = rules !== void 0 && Object.hasOwn(rules, id) ? rules[id] : void 0;
   const none = { severity: fallback, ignored: [], lowered: false };
   if (policy.document === null || policy.document === void 0) return none;
+  const featureValue = feature(policy.document);
+  const headFeatureValue = feature(policy.copies?.head ?? policy.document);
   if (policy.source === "app") {
     const set = [featureValue, ruleValue].filter((value) => value !== void 0);
     if (set.length === 0) return none;
@@ -32261,9 +32029,8 @@ function resolveKeyedSeverity(policy, id, keyed) {
     for (const value of [featureValue, ruleValue]) {
       if (value !== void 0 && RANK2[value] > RANK2[severity2]) severity2 = value;
     }
-    const ignored = featureValue !== void 0 && RANK2[featureValue] < RANK2[fallback] ? [{ setting: featureSetting, layer: "policy-file", reason: "looser" }] : [];
-    const lowered = ruleValue !== void 0 && RANK2[ruleValue] < RANK2[fallback];
-    return { severity: severity2, ignored, lowered };
+    const ignored = headFeatureValue !== void 0 && RANK2[headFeatureValue] < RANK2[fallback] ? [{ setting: featureSetting, reason: "looser" }] : [];
+    return { severity: severity2, ignored, lowered: ruleValue !== void 0 && ruleLowered(policy, id, fallback) };
   }
   return none;
 }
@@ -32330,7 +32097,7 @@ function agentPolicyOf(policy, from) {
     return { ...empty, labels, extraLogins, listsIncomplete, policyFileEdited, maxFiles, maxChangedLines };
   }
   const resolved = resolveKeyedSeverity(policy, "P11", {
-    featureValue: head?.protected_paths_mode,
+    feature: (document2) => document2.agents?.protected_paths_mode,
     featureSetting: "agents.protected_paths_mode",
     fallback: "block"
   });
@@ -32348,6 +32115,175 @@ function agentPolicyOf(policy, from) {
   };
 }
 
+// ../core/src/policy/limits.ts
+var POLICY_MAX_CHARS = 262144;
+var POLICY_MAX_ERRORS = 50;
+var POLICY_MAX_LIST_ITEMS = 1e3;
+var POLICY_MAX_GLOB = 512;
+var POLICY_MAX_ROOT = 512;
+var POLICY_MAX_PERM = 512;
+var POLICY_MAX_NAME = 128;
+var POLICY_MAX_NAME_OR_GLOB = 512;
+var POLICY_MAX_LABEL = 50;
+var POLICY_MAX_LOGIN = 44;
+var POLICY_MAX_EVENT = 64;
+var POLICY_MAX_MATCHER = 512;
+var POLICY_MAX_HOST = 253;
+var POLICY_MAX_ALLOWED_HOSTS = 50;
+var POLICY_THRESHOLD_MIN = 0;
+var POLICY_THRESHOLD_MAX = 100;
+var POLICY_MAX_FILES_MIN = 1;
+var POLICY_MAX_FILES_MAX = 1e5;
+var POLICY_MAX_CHANGED_LINES_MIN = 1;
+var POLICY_MAX_CHANGED_LINES_MAX = 1e7;
+var POLICY_MIN_AGE_DAYS_MIN = 0;
+var POLICY_MIN_AGE_DAYS_MAX = 3650;
+var POLICY_MIN_WEEKLY_DOWNLOADS_MIN = 0;
+var POLICY_MIN_WEEKLY_DOWNLOADS_MAX = 1e9;
+var POLICY_SEVERITIES = ["block", "warn", "info", "off"];
+var POLICY_SIGNAL_IDS = TEST_INTEGRITY_SIGNAL_IDS;
+var POLICY_RULE_IDS = [
+  "P01",
+  "P02",
+  "P03",
+  "P04",
+  "P05",
+  "P06",
+  "P07",
+  "P08",
+  "P09",
+  "P10",
+  "P11",
+  "P12",
+  "P13",
+  "P14"
+];
+var POLICY_INJECTION_SIGNAL_IDS = [
+  "PI01",
+  "PI02",
+  "PI03",
+  "PI04",
+  "PI05"
+];
+var POLICY_REGISTRIES = ["npm", "pypi"];
+var POLICY_PROTECTED_PATHS_MODES = ["block", "warn"];
+
+// ../core/src/policy/errors.ts
+var MESSAGES = {
+  object: "must be an object",
+  required: "is required",
+  unknownKey: "is not a known key",
+  list: "must be a list",
+  tooManyItems: "must have at most 1000 items",
+  string: "must be a string",
+  empty: "must not be empty",
+  version: "must be 1",
+  number: "must be a number",
+  integer: "must be an integer",
+  boolean: "must be true or false",
+  stringOrNull: "must be a string or null",
+  plain: "must not contain a control character or start or end with white space",
+  glob: "is not a supported glob pattern",
+  root: "is not a repo-relative directory",
+  perm: "is not a permission rule such as Tool or Tool(pattern)",
+  login: "is not a GitHub login",
+  event: "must contain only the letters A-Z and a-z",
+  host: "is not a host name: use only the letters A-Z and a-z, digits, . and -, with no scheme, path, port, user name or wildcard",
+  textNotString: "policy text must be a string",
+  textNotJson: "policy text is not valid JSON"
+};
+function maxItemsMessage(max) {
+  return `must have at most ${String(max)} items`;
+}
+function maxCharsMessage(max) {
+  return `must be at most ${String(max)} characters`;
+}
+function rangeMessage(min, max) {
+  return `must be between ${String(min)} and ${String(max)}`;
+}
+function enumMessage(members) {
+  return `must be one of: ${members.join(", ")}`;
+}
+function textTooLongMessage(max) {
+  return `policy text must be at most ${String(max)} characters`;
+}
+var MAX_SEGMENT_CODE_POINTS = 64;
+function pointerSegment(key) {
+  let kept = "";
+  let count2 = 0;
+  let cut = false;
+  for (const ch of key) {
+    if (count2 === MAX_SEGMENT_CODE_POINTS) {
+      cut = true;
+      break;
+    }
+    const code2 = ch.charCodeAt(0);
+    kept += ch.length === 1 && (code2 <= 31 || code2 === 127) ? "?" : ch;
+    count2++;
+  }
+  if (cut) kept += "\u2026";
+  return kept.replace(/~/g, "~0").replace(/\//g, "~1");
+}
+var UNKNOWN_NAME_MAX_UNITS = 64;
+var UNKNOWN_NAMES_KEPT = 20;
+function unknownName(parent, key) {
+  const head = dottedPath(parent);
+  const shortKey = cutCodeUnits(key, UNKNOWN_NAME_MAX_UNITS + 1, { marker: false });
+  return cutCodeUnits(head === "" ? shortKey : `${head}.${shortKey}`, UNKNOWN_NAME_MAX_UNITS);
+}
+function unknownItemName(path, value) {
+  const list = dottedPath(path.slice(0, path.lastIndexOf("/")));
+  const shortValue = cutCodeUnits(value, UNKNOWN_NAME_MAX_UNITS + 1, { marker: false });
+  return cutCodeUnits(`${list}[${shortValue}]`, UNKNOWN_NAME_MAX_UNITS);
+}
+function dottedPath(pointer) {
+  return pointer.split("/").slice(1).map((segment) => /^\d+$/.test(segment) ? "[]" : `.${segment}`).join("").replace(/^\./, "");
+}
+var ErrorCollector = class {
+  constructor(skipUnknown = false) {
+    this.skipUnknown = skipUnknown;
+  }
+  skipUnknown;
+  stored = [];
+  count = 0;
+  skipped = /* @__PURE__ */ new Set();
+  /** The number of errors added so far. */
+  get total() {
+    return this.count;
+  }
+  add(path, message) {
+    this.count++;
+    if (this.stored.length < POLICY_MAX_ERRORS) this.stored.push({ path, message });
+  }
+  /** An unknown key under `parent`; the key's segment is built only when the error is kept. */
+  addUnknownKey(parent, key) {
+    if (this.skipUnknown) {
+      this.skipped.add(unknownName(parent, key));
+      return;
+    }
+    this.count++;
+    if (this.stored.length < POLICY_MAX_ERRORS) {
+      this.stored.push({ path: `${parent}/${pointerSegment(key)}`, message: MESSAGES.unknownKey });
+    }
+  }
+  /** A value this build does not know, by its name (`unknownItemName`); called only with `skipUnknown`. */
+  addUnknownName(name) {
+    this.skipped.add(cutCodeUnits(name, UNKNOWN_NAME_MAX_UNITS));
+  }
+  /** The unknown names skipped: the first `UNKNOWN_NAMES_KEPT` in code-unit order, and the count. */
+  unknown() {
+    const sorted = [...this.skipped].sort(byCodeUnit);
+    return { names: sorted.slice(0, UNKNOWN_NAMES_KEPT), total: sorted.length };
+  }
+  /** All errors when there are at most `POLICY_MAX_ERRORS`; else the first 49 and a line counting the rest. */
+  finish() {
+    if (this.count <= POLICY_MAX_ERRORS) return this.stored.slice();
+    const listed2 = this.stored.slice(0, POLICY_MAX_ERRORS - 1);
+    listed2.push({ path: "", message: `${String(this.count - (POLICY_MAX_ERRORS - 1))} more errors not listed` });
+    return listed2;
+  }
+};
+
 // ../core/src/policy/messages.ts
 var MAX_NAMED_SETTINGS = 20;
 function policyUnavailableMessage(unavailable2) {
@@ -32356,6 +32292,17 @@ function policyUnavailableMessage(unavailable2) {
   const head = `The org policy could not be used (${unavailable2.reason}${status}${requestId}).`;
   const text = unavailable2.required ? `${head} The workflow requires a policy (policy: required), so this check fails. It ran with the workflow inputs and .pharn/ci.yml.` : `${head} The check ran with the workflow inputs and .pharn/ci.yml.`;
   return { level: unavailable2.required ? "error" : "warn", code: "POLICY_UNAVAILABLE", text };
+}
+function policyKeysUnknownMessage(unknown) {
+  const unique = [...new Set(unknown.names.map((name) => cutCodeUnits(name, UNKNOWN_NAME_MAX_UNITS)))].sort(byCodeUnit);
+  const named = unique.slice(0, UNKNOWN_NAMES_KEPT).map(codeSpan);
+  const more = Math.max(unknown.total, unique.length) - named.length;
+  const list = more > 0 ? `${named.join(", ")}, and ${String(more)} more` : named.join(", ");
+  return {
+    level: "warn",
+    code: "POLICY_KEYS_UNKNOWN",
+    text: `The org policy holds keys this version of pharn-ci does not know, so they were skipped and the rest of the policy applies: ${list}. Update the pharn-ci pin to apply them.`
+  };
 }
 function agentPrIncompleteMessage(reason) {
   return {
@@ -32367,15 +32314,14 @@ function agentPrIncompleteMessage(reason) {
 function policyOverrideIgnoredMessage(ignored) {
   const seen = /* @__PURE__ */ new Set();
   const unique = ignored.filter((record) => {
-    const key = `${record.setting}\0${record.layer}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
+    if (seen.has(record.setting)) return false;
+    seen.add(record.setting);
     return true;
   });
-  unique.sort((a, b) => byCodeUnit(a.setting, b.setting) || byCodeUnit(a.layer, b.layer));
+  unique.sort((a, b) => byCodeUnit(a.setting, b.setting));
   const named = unique.slice(0, MAX_NAMED_SETTINGS).map((record) => {
     const numbers = record.given !== void 0 && record.applied !== void 0 ? ` ${formatNumber(record.given)} \u2192 ${formatNumber(record.applied)}` : "";
-    return `${record.setting} (${record.layer})${numbers}`;
+    return `${record.setting}${numbers}`;
   });
   const more = unique.length - MAX_NAMED_SETTINGS;
   const list = more > 0 ? `${named.join(", ")}, and ${String(more)} more` : named.join(", ");
@@ -33131,7 +33077,6 @@ function detectP02(model, forbidden) {
 // ../core/src/policy/rules/p03.ts
 function detectP03(model, required) {
   const findings = [];
-  const supplying = /* @__PURE__ */ new Set();
   const wanted = required.map((text) => ({ entry: preparePolicyEntry(text), family: ruleFamily(text) }));
   for (const unit of model.units) {
     const byFamily = /* @__PURE__ */ new Map();
@@ -33144,13 +33089,9 @@ function detectP03(model, required) {
     }
     for (const need of wanted) {
       const candidates = byFamily.get(need.family) ?? [];
-      let satisfied = false;
-      for (const candidate of candidates) {
-        if (coversPrepared(candidate.entry, need.entry, "p03")) {
-          satisfied = true;
-          supplying.add(candidate.path);
-        }
-      }
+      const satisfied = candidates.some(
+        (candidate) => coversPrepared(candidate.entry, need.entry, "p03")
+      );
       if (!satisfied) {
         findings.push({
           id: "P03",
@@ -33162,7 +33103,7 @@ function detectP03(model, required) {
       }
     }
   }
-  return { findings, supplying: [...supplying] };
+  return findings;
 }
 
 // ../core/src/policy/rules/p04.ts
@@ -33195,15 +33136,13 @@ function detectP04(model, allowed) {
 // ../core/src/policy/rules/p06.ts
 function detectP06(model, required) {
   const findings = [];
-  const supplying = /* @__PURE__ */ new Set();
   for (const unit of model.units) {
     const missing = [];
     for (const need of required) {
-      const hits = unit.hookGroups.filter(
+      const met = unit.hookGroups.some(
         (group) => group.counting && group.event === need.event && matcherCovers(group.matcher, need.matcher)
       );
-      for (const hit of hits) supplying.add(hit.path);
-      if (hits.length > 0) continue;
+      if (met) continue;
       const any = need.matcher === void 0 || need.matcher === "" || need.matcher === "*";
       missing.push({
         id: "P06",
@@ -33224,7 +33163,7 @@ function detectP06(model, required) {
       });
     } else findings.push(...missing);
   }
-  return { findings, supplying: [...supplying] };
+  return findings;
 }
 
 // ../core/src/policy/rules/p07.ts
@@ -33243,7 +33182,7 @@ function consistencySeverity(policy) {
     return { severity: null, ignored: [], lowered: false };
   }
   return resolveKeyedSeverity(policy, "P07", {
-    featureValue: policy.document.setup?.consistency,
+    feature: (document2) => document2.setup?.consistency,
     featureSetting: "setup.consistency",
     fallback: "warn"
   });
@@ -33424,15 +33363,6 @@ function detectP09(input, view) {
         path,
         line: null,
         detail: "this change edits a file the policy could not check"
-      });
-    } else if (guarded) {
-      const supplies = view.supplying.has(path);
-      findings.push({
-        id: "P09",
-        fallback: supplies ? "warn" : "info",
-        path,
-        line: null,
-        detail: supplies ? "this change edits a file that supplies a required deny rule or hook; a reviewer should confirm it" : "this change edits a file the policy checks; it complies"
       });
     }
   }
@@ -33663,6 +33593,18 @@ function mcpWidenings(path, base, head) {
   return MCP_WIDENINGS.filter((word) => found.has(word));
 }
 
+// ../core/src/sourceLanguage.ts
+var EXTENSION_LANGUAGE = new Map([
+  ...JS_TS_EXTENSIONS.map((extension) => [extension, jsTsFlavor(extension)]),
+  ["py", "py"]
+]);
+function sourceLanguage(path) {
+  const basename = path.slice(path.lastIndexOf("/") + 1);
+  const dot = basename.lastIndexOf(".");
+  if (dot === -1) return null;
+  return EXTENSION_LANGUAGE.get(basename.slice(dot + 1)) ?? null;
+}
+
 // ../core/src/signals/pythonAliases.ts
 var isIdentStart = (code2) => code2 >= 65 && code2 <= 90 || code2 >= 97 && code2 <= 122 || code2 === 95;
 var isIdentChar = (code2) => isIdentStart(code2) || code2 >= 48 && code2 <= 57;
@@ -33840,15 +33782,13 @@ function resolvePythonName(name, aliases) {
 }
 
 // ../core/src/signals/testLines.ts
-var JS_EXTENSIONS = JS_TS_EXTENSIONS.map((extension) => `.${extension}`);
 function testLanguage(path) {
   if (path.endsWith("_test.go")) return "go";
-  if (path.endsWith(".py")) return "python";
-  for (const extension of JS_EXTENSIONS) if (path.endsWith(extension)) return "jsts";
-  return null;
+  const language = sourceLanguage(path);
+  return language === null ? null : language === "py" ? "python" : "jsts";
 }
 var MAX_NAME = 120;
-var isSpace4 = (c) => c === " " || c === "	";
+var isSpace2 = (c) => c === " " || c === "	";
 function isWordCode(code2) {
   return code2 >= 48 && code2 <= 57 || // 0-9
   code2 >= 65 && code2 <= 90 || // A-Z
@@ -33920,7 +33860,7 @@ function parseJsTestCall(text) {
   if (head === "this") {
     if (!line.startsWith(".skip", i)) return null;
     i += ".skip".length;
-    while (isSpace4(line.charAt(i))) i++;
+    while (isSpace2(line.charAt(i))) i++;
     if (line.charAt(i) !== "(") return null;
     const arg = scanArg(line, i + 1).text;
     return { kind: "this-skip", token: "skip", arg, named: false, name: argName(arg), condition: "" };
@@ -33935,12 +33875,12 @@ function parseJsTestCall(text) {
     if (token === "none") token = tokenOf(line.slice(i + 1, end));
     i = end;
   }
-  while (isSpace4(line.charAt(i))) i++;
+  while (isSpace2(line.charAt(i))) i++;
   if (line.charAt(i) !== "(") return null;
   const first = scanArg(line, i + 1);
   if ((token === "skipIf" || token === "runIf") && first.terminator === ")") {
     let j = first.end + 1;
-    while (isSpace4(line.charAt(j))) j++;
+    while (isSpace2(line.charAt(j))) j++;
     const arg = line.charAt(j) === "(" ? scanArg(line, j + 1).text : "";
     return {
       kind: "call",
@@ -33989,7 +33929,7 @@ function isKeywordArg(arg) {
   const end = wordEnd(arg, 0);
   if (end === 0) return false;
   let i = end;
-  while (isSpace4(arg.charAt(i))) i++;
+  while (isSpace2(arg.charAt(i))) i++;
   return arg.charAt(i) === "=" && arg.charAt(i + 1) !== "=";
 }
 function isConditional(rule2, arg) {
@@ -33998,13 +33938,13 @@ function isConditional(rule2, arg) {
 function parsePytestmark(line, aliases) {
   let i = PYTESTMARK.length;
   if (i < line.length && isWordCode(line.charCodeAt(i))) return null;
-  while (isSpace4(line.charAt(i))) i++;
+  while (isSpace2(line.charAt(i))) i++;
   if (line.charAt(i) !== "=" || line.charAt(i + 1) === "=") return null;
   i++;
-  while (isSpace4(line.charAt(i))) i++;
+  while (isSpace2(line.charAt(i))) i++;
   if (line.charAt(i) === "[" || line.charAt(i) === "(") {
     i++;
-    while (isSpace4(line.charAt(i))) i++;
+    while (isSpace2(line.charAt(i))) i++;
   }
   const end = dottedEnd(line, i);
   if (end === i) return null;
@@ -34012,7 +33952,7 @@ function parsePytestmark(line, aliases) {
   const rule2 = token === null ? void 0 : PYTHON_DECORATORS.get(token);
   if (token === null || rule2 === void 0) return null;
   let j = end;
-  while (isSpace4(line.charAt(j))) j++;
+  while (isSpace2(line.charAt(j))) j++;
   const arg = line.charAt(j) === "(" ? scanArg(line, j + 1).text : "";
   return { kind: "mark", token, name: argName(arg, true), conditional: isConditional(rule2, arg) };
 }
@@ -34025,19 +33965,19 @@ function parsePythonSkip(text, aliases) {
     const rule2 = PYTHON_DECORATORS.get(token);
     if (rule2 === void 0) return null;
     let i2 = end;
-    while (isSpace4(line.charAt(i2))) i2++;
+    while (isSpace2(line.charAt(i2))) i2++;
     const arg = line.charAt(i2) === "(" ? scanArg(line, i2 + 1).text : "";
     return { kind: "decorator", token, name: argName(arg, true), conditional: isConditional(rule2, arg) };
   }
   if (line.startsWith(PYTESTMARK)) return parsePytestmark(line, aliases);
   const raised = line.startsWith(RAISE);
   let start = raised ? RAISE.length : 0;
-  while (raised && isSpace4(line.charAt(start))) start++;
+  while (raised && isSpace2(line.charAt(start))) start++;
   const callEnd = dottedEnd(line, start);
   const call = canonicalPython(line.slice(start, callEnd), raised ? PYTHON_RAISES : PYTHON_CALLS, aliases);
   if (call === null) return null;
   let i = callEnd;
-  while (isSpace4(line.charAt(i))) i++;
+  while (isSpace2(line.charAt(i))) i++;
   if (line.charAt(i) !== "(") return null;
   return { kind: "call", token: call, name: argName(scanArg(line, i + 1).text, true), conditional: false };
 }
@@ -34048,7 +33988,7 @@ function parseGoSkip(text) {
   const token = line.slice(0, end);
   if (!GO_SKIPS.has(token)) return null;
   let i = end;
-  while (isSpace4(line.charAt(i))) i++;
+  while (isSpace2(line.charAt(i))) i++;
   if (line.charAt(i) !== "(") return null;
   return { token, name: argName(scanArg(line, i + 1).text) };
 }
@@ -34074,17 +34014,12 @@ function isSnapshotFile(path) {
   if (basename.endsWith(".snap") || basename.endsWith(".ambr")) return true;
   return segments.slice(0, -1).includes("__snapshots__");
 }
-var JS_TS_EXTENSION_SET = new Set(JS_TS_EXTENSIONS);
 function isPackageJsonFile(path) {
   return path.slice(path.lastIndexOf("/") + 1) === "package.json";
 }
 function coverageSourceLanguage(path) {
-  const basename = path.slice(path.lastIndexOf("/") + 1);
-  const dot = basename.lastIndexOf(".");
-  if (dot <= 0) return null;
-  const extension = basename.slice(dot + 1);
-  if (extension === "py") return "python";
-  return JS_TS_EXTENSION_SET.has(extension) ? "jsts" : null;
+  const language = sourceLanguage(path);
+  return language === null ? null : language === "py" ? "python" : "jsts";
 }
 function keepSignalFileText(configPath, repoRoot) {
   const config = configRepoPath(configPath, repoRoot);
@@ -34525,7 +34460,6 @@ function evaluatePolicyRules(input) {
   const settingsFindings = [];
   let settings2;
   let view = null;
-  const supplying = /* @__PURE__ */ new Set();
   const sources = input.settingsSources;
   if (inForce && sources !== void 0) {
     const setup2 = document2.setup;
@@ -34552,18 +34486,10 @@ function evaluatePolicyRules(input) {
       const model = readSettingsModel(sources, document2);
       const over = compareUnits(model, setup2, { p02: active.P02, p03: active.P03, p05: active.P05 }) > COMPARE_BUDGET;
       if (active.P02 && !over) settingsFindings.push(...detectP02(model, setup2?.forbidden_permissions ?? []));
-      if (active.P03 && !over) {
-        const p03 = detectP03(model, setup2?.required_permissions_deny ?? []);
-        settingsFindings.push(...p03.findings);
-        for (const path of p03.supplying) supplying.add(path);
-      }
+      if (active.P03 && !over) settingsFindings.push(...detectP03(model, setup2?.required_permissions_deny ?? []));
       if (active.P04) settingsFindings.push(...detectP04(model, setup2?.allowed_mcp_servers ?? []));
       if (active.P05 && !over) settingsFindings.push(...detectP05(model, setup2?.forbidden_mcp_servers ?? []));
-      if (active.P06) {
-        const p06 = detectP06(model, setup2?.required_hooks ?? []);
-        settingsFindings.push(...p06.findings);
-        for (const path of p06.supplying) supplying.add(path);
-      }
+      if (active.P06) settingsFindings.push(...detectP06(model, setup2?.required_hooks ?? []));
       const readers = new Set(SETTINGS_READERS.filter((id) => active[id]));
       const problems = reportedProblems(model.problems, setup2, readers);
       if (over) problems.unshift({ path: null, line: null, reason: "compare-budget", level: "error" });
@@ -34571,7 +34497,7 @@ function evaluatePolicyRules(input) {
       const uncheckable = /* @__PURE__ */ new Set();
       for (const problem of problems)
         if (problem.path !== null && problem.level === "error") uncheckable.add(problem.path);
-      view = { failing: /* @__PURE__ */ new Map(), uncheckable, supplying };
+      view = { failing: /* @__PURE__ */ new Map(), uncheckable };
     }
   }
   const first = resolve2([
@@ -34917,13 +34843,13 @@ function shannonEntropy(text) {
 }
 var isKeyChar = (c) => c !== void 0 && (isUpper2(c) || isLower2(c) || isDigit2(c) || c === "_" || c === "." || c === "-");
 var isBlank3 = (c) => c === " " || c === "	";
-var isQuote2 = (c) => c === '"' || c === "'";
+var isQuote = (c) => c === '"' || c === "'";
 var isLineBreak = (c) => c === "\n" || c === "\r";
 var BARE_STOPS = /* @__PURE__ */ new Set([" ", "	", ",", ";", "#", "}", '"', "'"]);
 function readValue(text, from) {
   const first = text[from];
   if (first === void 0 || isLineBreak(first)) return null;
-  if (isQuote2(first)) {
+  if (isQuote(first)) {
     const limit2 = Math.min(text.length, from + 1 + MAX_VALUE_CHARS);
     for (let i = from + 1; i < limit2; i++) {
       const c = text[i];
@@ -35003,7 +34929,7 @@ function secretKeyValues(text) {
       const key = text.slice(i, nameEnd);
       if (!isSecretKey(key)) continue;
       let p = nameEnd;
-      if (isQuote2(text[p])) p++;
+      if (isQuote(text[p])) p++;
       let separated = false;
       if (text[p] === ",") {
         separated = true;
@@ -35664,19 +35590,6 @@ var MAX_PATH_TOKEN = 200;
 var MAX_COMMAND_NAME = 100;
 var MAX_MAKE_TARGETS = 10;
 var MAX_FRONTMATTER_LINE2 = 50;
-var SHELL_INFO2 = /* @__PURE__ */ new Set([
-  "",
-  "sh",
-  "bash",
-  "shell",
-  "zsh",
-  "fish",
-  "console",
-  "terminal",
-  "shell-session",
-  "shellsession"
-]);
-var SESSION_INFO2 = /* @__PURE__ */ new Set(["console", "terminal", "shell-session", "shellsession"]);
 var CUE_WORDS2 = /* @__PURE__ */ new Set([
   "not",
   "never",
@@ -35701,7 +35614,6 @@ var CUE_WORDS2 = /* @__PURE__ */ new Set([
   "examples",
   "e.g"
 ]);
-var WRAPPER_WORDS2 = /* @__PURE__ */ new Set(["sudo", "time", "env"]);
 var DIRECTORY_WORDS = /* @__PURE__ */ new Set(["cd", "pushd"]);
 var PNPM_BUILTINS = /* @__PURE__ */ new Set([
   "add",
@@ -35954,11 +35866,9 @@ var GENERATED_DIRS = /* @__PURE__ */ new Set([
   "tmp",
   ".tmp"
 ]);
-var isSpaceCode3 = (code2) => code2 === 32 || code2 >= 9 && code2 <= 13 || code2 === 160;
-var isAsciiLetter4 = (code2) => code2 >= 65 && code2 <= 90 || code2 >= 97 && code2 <= 122;
 var isDigit3 = (code2) => code2 >= 48 && code2 <= 57;
 function isPathChar(code2) {
-  return isAsciiLetter4(code2) || isDigit3(code2) || code2 === 46 || code2 === 95 || code2 === 45 || code2 === 43 || code2 === 47;
+  return isAsciiLetter3(code2) || isDigit3(code2) || code2 === 46 || code2 === 95 || code2 === 45 || code2 === 43 || code2 === 47;
 }
 function allChars(text, extra) {
   for (let i = 0; i < text.length; i++) {
@@ -35977,74 +35887,6 @@ function isSafeTargetName(name) {
 }
 function isSafePathToken(token) {
   return token.length > 0 && token.length <= MAX_PATH_TOKEN && allChars(token, false);
-}
-function firstNonSpace2(line, from = 0) {
-  let i = from;
-  while (i < line.length && (line.charCodeAt(i) === 32 || line.charCodeAt(i) === 9)) i++;
-  return i;
-}
-function hasCueWord2(text) {
-  let start = -1;
-  const flush = (end) => {
-    let word = text.slice(start, end).split("\u2019").join("'").toLowerCase();
-    start = -1;
-    while (word.endsWith(".") || word.endsWith("'")) word = word.slice(0, -1);
-    return CUE_WORDS2.has(word);
-  };
-  for (let i = 0; i < text.length; i++) {
-    const code2 = text.charCodeAt(i);
-    const inWord = isAsciiLetter4(code2) || code2 === 39 || code2 === 8217 || code2 === 46 && start !== -1;
-    if (inWord && start === -1) start = i;
-    if (!inWord && start !== -1 && flush(i)) return true;
-  }
-  return start !== -1 && flush(text.length);
-}
-function splitWords2(text) {
-  const words = [];
-  let start = -1;
-  for (let i = 0; i < text.length; i++) {
-    const space = isSpaceCode3(text.charCodeAt(i));
-    if (!space && start === -1) start = i;
-    if (space && start !== -1) {
-      words.push(text.slice(start, i));
-      start = -1;
-    }
-  }
-  if (start !== -1) words.push(text.slice(start));
-  return words;
-}
-function isAssignment2(word) {
-  const first = word.charCodeAt(0);
-  if (!(isAsciiLetter4(first) || first === 95)) return false;
-  let i = 1;
-  while (i < word.length) {
-    const code2 = word.charCodeAt(i);
-    if (!(isAsciiLetter4(code2) || isDigit3(code2) || code2 === 95)) break;
-    i++;
-  }
-  return i < word.length && word[i] === "=";
-}
-function commandSegments2(text) {
-  const segments = [];
-  let from = 0;
-  let i = 0;
-  while (i < text.length) {
-    const char = text[i];
-    const next = text[i + 1];
-    if (char === "&" && next === "&" || char === "|" && next === "|") {
-      segments.push(text.slice(from, i));
-      i += 2;
-      from = i;
-    } else if (char === ";" || char === "|") {
-      segments.push(text.slice(from, i));
-      i += 1;
-      from = i;
-    } else {
-      i += 1;
-    }
-  }
-  segments.push(text.slice(from));
-  return segments;
 }
 function scriptOf(manager, words, at) {
   let i = at + 1;
@@ -36085,17 +35927,7 @@ function makeTargetsOf(words, at) {
   return targets;
 }
 function commandsIn(text, line, out) {
-  for (const segment of commandSegments2(text)) {
-    let body = segment.trim();
-    if (body.startsWith("(")) body = body.slice(1);
-    if (body.endsWith(")")) body = body.slice(0, -1);
-    const words = splitWords2(body);
-    let at = 0;
-    while (at < words.length) {
-      const word = words[at];
-      if (!isAssignment2(word) && !WRAPPER_WORDS2.has(word)) break;
-      at++;
-    }
+  for (const { words, at } of commandsOfLine(text)) {
     const first = words[at];
     if (first === void 0) continue;
     if (DIRECTORY_WORDS.has(first)) return;
@@ -36107,63 +35939,6 @@ function commandsIn(text, line, out) {
       const name = scriptOf(first, words, at);
       if (name !== null) out.push({ manager: first, name, line });
     }
-  }
-}
-function backtickRuns2(line) {
-  const runs = [];
-  let i = line.indexOf("`");
-  while (i !== -1) {
-    let end = i + 1;
-    while (end < line.length && line[end] === "`") end++;
-    runs.push([i, end - i]);
-    i = line.indexOf("`", end);
-  }
-  return runs;
-}
-function codeSpans(line) {
-  const runs = backtickRuns2(line);
-  if (runs.length < 2) return [];
-  const partner = new Array(runs.length).fill(-1);
-  const nextOfLength = /* @__PURE__ */ new Map();
-  for (let i = runs.length - 1; i >= 0; i--) {
-    const length = runs[i][1];
-    partner[i] = nextOfLength.get(length) ?? -1;
-    nextOfLength.set(length, i);
-  }
-  const spans = [];
-  for (let i = 0; i < runs.length; ) {
-    const j = partner[i];
-    if (j === -1) {
-      i++;
-      continue;
-    }
-    const [openAt, length] = runs[i];
-    const [closeAt] = runs[j];
-    spans.push({ open: openAt, from: openAt + length, to: closeAt, close: closeAt + length });
-    i = j + 1;
-  }
-  return spans;
-}
-function withoutComments2(line, state) {
-  let pos = 0;
-  if (state.open) {
-    const end = line.indexOf("-->");
-    if (end === -1) return null;
-    state.open = false;
-    pos = end + 3;
-  }
-  let out = "";
-  for (; ; ) {
-    const open3 = line.indexOf("<!--", pos);
-    if (open3 === -1) return out + line.slice(pos);
-    out += line.slice(pos, open3);
-    const close = line.indexOf("-->", open3 + 4);
-    if (close === -1) {
-      state.open = true;
-      return out;
-    }
-    out += " ";
-    pos = close + 3;
   }
 }
 function isVersion(token) {
@@ -36233,19 +36008,19 @@ function linkTargets(text) {
       if (end === -1) break;
       target = text.slice(start, end).trim();
       let cut = 0;
-      while (cut < target.length && !isSpaceCode3(target.charCodeAt(cut))) cut++;
+      while (cut < target.length && !isSpaceCode(target.charCodeAt(cut))) cut++;
       target = target.slice(0, cut);
     }
     targets.push(target);
     from = end + 1;
   }
-  const lead = firstNonSpace2(text);
+  const lead = firstNonSpace(text);
   if (lead <= 3 && text[lead] === "[") {
     const close = text.indexOf("]:", lead + 1);
     if (close !== -1) {
       const rest = text.slice(close + 2).trim();
       let cut = 0;
-      while (cut < rest.length && !isSpaceCode3(rest.charCodeAt(cut))) cut++;
+      while (cut < rest.length && !isSpaceCode(rest.charCodeAt(cut))) cut++;
       let target = rest.slice(0, cut);
       if (target.startsWith("<") && target.endsWith(">")) target = target.slice(1, -1);
       if (target !== "") targets.push(target);
@@ -36268,9 +36043,9 @@ function importPaths(text, line, out) {
     const at = text.indexOf("@", from);
     if (at === -1) return;
     from = at + 1;
-    if (at > 0 && !isSpaceCode3(text.charCodeAt(at - 1))) continue;
+    if (at > 0 && !isSpaceCode(text.charCodeAt(at - 1))) continue;
     let end = at + 1;
-    while (end < text.length && !isSpaceCode3(text.charCodeAt(end))) end++;
+    while (end < text.length && !isSpaceCode(text.charCodeAt(end))) end++;
     let word = text.slice(at + 1, end);
     while (word.length > 0 && ".,;:!?)".includes(word[word.length - 1])) word = word.slice(0, -1);
     from = end;
@@ -36279,13 +36054,6 @@ function importPaths(text, line, out) {
     if (reference.extensionless && !reference.relative) continue;
     out.push(reference);
   }
-}
-function shellLine2(line, session) {
-  const rest = line.slice(firstNonSpace2(line));
-  if (rest.startsWith("$ ") || rest.startsWith("% ") || rest.startsWith("> ")) return rest.slice(2);
-  if (session) return null;
-  if (rest.startsWith("#")) return null;
-  return rest;
 }
 function scanInstructionTokens(text) {
   const source = text.length > MAX_SCAN_CHARS ? text.slice(0, MAX_SCAN_CHARS) : text;
@@ -36302,52 +36070,31 @@ function scanInstructionTokens(text) {
       }
     }
   }
-  const comment = { open: false };
-  let fence = null;
+  const read = blockReader();
   let ignored = false;
   let previousBlank = true;
   let previousIndented = false;
   for (let index = start; index < lines.length && !full(); index++) {
     const raw = lines[index];
     const lineNumber = index + 1;
-    if (fence !== null) {
-      const at2 = firstNonSpace2(raw);
-      let run2 = 0;
-      while (raw[at2 + run2] === fence.char) run2++;
-      if (run2 >= fence.length && raw.slice(at2 + run2).trim() === "") {
-        fence = null;
-        previousBlank = false;
-        previousIndented = false;
-      } else if (fence.shell && !ignored) {
-        const command = shellLine2(raw, fence.session);
+    const block = read(raw);
+    if (block.kind === "fenced") {
+      if (block.shell && !ignored) {
+        const command = shellLine(raw, block.session);
         if (command !== null) commandsIn(command, lineNumber, commands);
       }
       continue;
     }
-    const line = withoutComments2(raw, comment);
-    if (line === null) {
+    if (block.kind === "skipped") {
       previousBlank = false;
       previousIndented = false;
       continue;
     }
-    const at = firstNonSpace2(line);
+    const line = block.line;
+    const at = firstNonSpace(line);
     const char = line[at];
-    if ((char === "`" || char === "~") && at < 4) {
-      let run2 = 0;
-      while (line[at + run2] === char) run2++;
-      if (run2 >= 3) {
-        const info2 = line.slice(at + run2).trim();
-        let end = 0;
-        while (end < info2.length && !isSpaceCode3(info2.charCodeAt(end)) && info2[end] !== "{") end++;
-        const word = info2.slice(0, end).toLowerCase();
-        fence = { char, length: run2, shell: SHELL_INFO2.has(word), session: SESSION_INFO2.has(word) };
-        previousBlank = false;
-        previousIndented = false;
-        continue;
-      }
-    }
     if (char === "#") {
-      ignored = hasCueWord2(line);
+      ignored = hasCueWord(line, 0, line.length, CUE_WORDS2);
       previousBlank = false;
       previousIndented = false;
       if (ignored) continue;
@@ -36365,12 +36112,12 @@ function scanInstructionTokens(text) {
       pos = span2.close;
     }
     outside += line.slice(pos);
-    if (hasCueWord2(outside)) continue;
+    if (hasCueWord(outside, 0, outside.length, CUE_WORDS2)) continue;
     for (const span2 of spans) {
       const content = line.slice(span2.from, span2.to).trim();
       if (content === "") continue;
       let space = false;
-      for (let i = 0; i < content.length && !space; i++) space = isSpaceCode3(content.charCodeAt(i));
+      for (let i = 0; i < content.length && !space; i++) space = isSpaceCode(content.charCodeAt(i));
       if (space) {
         commandsIn(content.startsWith("$ ") ? content.slice(2) : content, lineNumber, commands);
       } else {
@@ -36394,8 +36141,6 @@ function scanInstructionTokens(text) {
 var MAX_INSTRUCTION_FILES = 50;
 var MAX_STALE_PER_FILE = 20;
 var MAX_STALE_FINDINGS = 100;
-var MAX_TIMESTAMP_FILES = 20;
-var STALE_AGE_SECONDS = 90 * 24 * 60 * 60;
 function staleInstructionFiles(inventory) {
   return inventory.files.filter(isInstructionFile).sort((a, b) => byCodeUnit(a.path, b.path)).slice(0, MAX_INSTRUCTION_FILES);
 }
@@ -36506,29 +36251,6 @@ function targetsAt(text) {
   return typeof text === "string" ? parseMakeTargets(text) : null;
 }
 var directoryOf = (path) => path.slice(0, path.lastIndexOf("/") + 1);
-function staleTimestampPaths(input) {
-  const texts = textsOf(input.instructions);
-  if (texts.size === 0) return [];
-  const index = indexRepo(input.repoFiles);
-  const facts = diffFacts(input.diff, index);
-  const out = [];
-  for (const file of staleInstructionFiles(input.agentSetup)) {
-    if (out.length >= MAX_TIMESTAMP_FILES) break;
-    const text = texts.get(file.path);
-    if (text === void 0 || facts.touched.has(file.path)) continue;
-    if (namedChange(scanInstructionTokens(text).references, directoryOf(file.path), index, facts) !== null) {
-      out.push(file.path);
-    }
-  }
-  return out;
-}
-function namedChange(references, dir, index, facts) {
-  for (const reference of references) {
-    if (reference.bare) continue;
-    if (candidatesOf(reference, dir).some((path) => index.files.has(path) && facts.touched.has(path))) return reference;
-  }
-  return null;
-}
 function referenceToken(reference, candidates) {
   const token = reference.relative ? candidates[0] : reference.token;
   return token !== void 0 && isSafePathToken(token) ? token : void 0;
@@ -36548,9 +36270,6 @@ function detectStaleInstructions(input) {
   const headTargets = targetsAt(sources.makefile?.head);
   const baseTargets = targetsAt(sources.makefile?.base);
   const dependencies2 = headScripts?.binaries ?? /* @__PURE__ */ new Set();
-  const times = sources.commitTimes;
-  const timeOf = /* @__PURE__ */ new Map();
-  if (times !== void 0) for (const entry of times.files) timeOf.set(entry.path, entry.time);
   const found = [];
   for (const file of staleInstructionFiles(input.agentSetup)) {
     const text = texts.get(file.path);
@@ -36597,20 +36316,6 @@ function detectStaleInstructions(input) {
         ...token === void 0 ? {} : { token }
       });
     }
-    const time = timeOf.get(file.path);
-    if (times !== void 0 && time !== void 0 && !fileTouched && times.head - time > STALE_AGE_SECONDS) {
-      const reference = namedChange(tokens2.references, dir, index, facts);
-      if (reference !== null) {
-        const token = referenceToken(reference, candidatesOf(reference, dir));
-        found.push({
-          id: "SI04",
-          path: file.path,
-          line: reference.line,
-          kind: reference.kind,
-          ...token === void 0 ? {} : { token }
-        });
-      }
-    }
   }
   return capStale(found);
 }
@@ -36640,7 +36345,7 @@ function capStale(found) {
   }
   return { findings, omitted };
 }
-var STALE_IDS = ["SI01", "SI02", "SI03", "SI04"];
+var STALE_IDS = ["SI01", "SI02", "SI03"];
 var MAX_NAMED_LOCATIONS = 5;
 function span(text) {
   return `\`${replaceUnsafeChars(text, "\uFFFD").replace(/`/g, "'")}\``;
@@ -36663,12 +36368,6 @@ var STALE_TEXT = {
     level: "warn",
     text: "Agent instruction files tell the agent to read files that are not in the repository",
     after: "Fix the link or import, or restore the file."
-  },
-  SI04: {
-    code: "SETUP_STALE_SI04",
-    level: "info",
-    text: "Agent instruction files last changed more than 90 days before this commit name files this change edits",
-    after: "Check that the instructions still describe the code."
   }
 };
 function staleInstructionMessages(findings, omitted) {
@@ -37559,16 +37258,7 @@ function indexTestFileWithImports(path, text) {
 }
 
 // ../core/src/signals/testPairs.ts
-var EXTENSION_LANGUAGE = new Map([
-  ...JS_TS_EXTENSIONS.map((extension) => [extension, jsTsFlavor(extension)]),
-  ["py", "py"]
-]);
-function languageOf(path) {
-  const basename = path.slice(path.lastIndexOf("/") + 1);
-  const dot = basename.lastIndexOf(".");
-  if (dot <= 0) return null;
-  return EXTENSION_LANGUAGE.get(basename.slice(dot + 1)) ?? null;
-}
+var languageOf = sourceLanguage;
 function lookupOf(side) {
   const texts = /* @__PURE__ */ new Map();
   const dropped = /* @__PURE__ */ new Map();
@@ -37585,7 +37275,7 @@ function testsOf(result, imports) {
     groups: result.tests.filter((block) => block.kind === "describe"),
     mocks: result.mocks,
     imports
-  } : { ok: false, reason: result.reason };
+  } : { ok: false, reason: result.reason, hadText: true, fromPythonIndex: false };
 }
 function pythonLookupOf(index) {
   const mapOf = (files) => new Map(files.map((file) => [file.path, file]));
@@ -37601,7 +37291,7 @@ function touchedTestEntries(diff) {
     if (language === null || !isTestFile(file.path)) continue;
     if (file.status === "modified" || file.status === "renamed" && isTestFile(file.oldPath)) {
       compared2.set(`${file.oldPath}\0${file.path}`, { basePath: file.oldPath, headPath: file.path, language });
-    } else if (file.status === "added") {
+    } else if (file.status === "added" || file.status === "renamed") {
       added.set(file.path, language);
     }
   }
@@ -37615,7 +37305,7 @@ function binaryTouchedTestFiles(diff) {
     if (file.binary !== true) continue;
     if (compared2.has(`${file.oldPath}\0${file.path}`)) {
       modified.push({ path: file.path, reason: BINARY_DIFF_REASON, changeMadeUnreadable: true });
-    } else if (file.status === "added" && addedPaths.has(file.path)) {
+    } else if (addedPaths.has(file.path)) {
       added.push({ path: file.path, reason: BINARY_DIFF_REASON });
     }
   }
@@ -37627,11 +37317,13 @@ function mergeEntries(existing, extra) {
   for (const entry of [...existing, ...extra]) {
     const key = `${entry.path}\0${entry.reason}`;
     const before = merged.get(key);
-    const flagged = before?.changeMadeUnreadable === true || entry.changeMadeUnreadable === true;
+    const unreadable = before?.changeMadeUnreadable === true || entry.changeMadeUnreadable === true;
+    const closed = before?.failsClosed === true || entry.failsClosed === true;
     merged.set(key, {
       path: entry.path,
       reason: entry.reason,
-      ...flagged ? { changeMadeUnreadable: true } : {}
+      ...unreadable ? { changeMadeUnreadable: true } : {},
+      ...closed ? { failsClosed: true } : {}
     });
   }
   return [...merged.values()].sort((a, b) => byCodeUnit(a.path, b.path) || byCodeUnit(a.reason, b.reason));
@@ -37681,15 +37373,21 @@ function indexTouchedTestFiles(diff, sources, python) {
   const indexSide2 = (side, path, language) => {
     const lookup2 = side === "base" ? baseSide : headSide;
     const text = lookup2.texts.get(path);
-    if (text === void 0) return { ok: false, reason: lookup2.dropped.get(path) ?? "missing" };
+    if (text === void 0) {
+      return { ok: false, reason: lookup2.dropped.get(path) ?? "missing", hadText: false, fromPythonIndex: false };
+    }
     let result;
     let imports;
+    let fromPython = false;
     if (language === "py") {
-      if (pythonSide.unavailable !== null) return { ok: false, reason: pythonSide.unavailable };
+      if (pythonSide.unavailable !== null) {
+        return { ok: false, reason: pythonSide.unavailable, hadText: true, fromPythonIndex: python !== void 0 };
+      }
       const found = pythonSide[side].get(path);
-      if (found === void 0) return { ok: false, reason: "missing" };
+      if (found === void 0) return { ok: false, reason: "missing", hadText: true, fromPythonIndex: false };
       result = found.result;
       imports = found.imports ?? [];
+      fromPython = !result.parsed && PYTHON_FILE_REFUSAL_REASONS.includes(result.reason);
     } else {
       const indexed2 = indexTestFileWithImports(path, text);
       result = indexed2.result;
@@ -37697,7 +37395,7 @@ function indexTouchedTestFiles(diff, sources, python) {
     }
     const indexed = testsOf(result, imports);
     if (indexed.ok) languages.add(language);
-    return indexed;
+    return indexed.ok ? indexed : { ...indexed, fromPythonIndex: fromPython };
   };
   const pairs = [];
   const unavailable2 = [];
@@ -37723,7 +37421,13 @@ function indexTouchedTestFiles(diff, sources, python) {
       const headReason = head.ok ? null : head.reason;
       const reason = base.ok ? headReason : base.reason;
       const unreadable = headReason !== null && changeMadeUnreadable(base, headReason);
-      unavailable2.push({ path: file.headPath, reason, ...unreadable ? { changeMadeUnreadable: true } : {} });
+      const closed = sourcesDropFailsClosed(base, head) || file.language === "py" && pythonHeadFailsClosed(head);
+      unavailable2.push({
+        path: file.headPath,
+        reason,
+        ...unreadable ? { changeMadeUnreadable: true } : {},
+        ...closed ? { failsClosed: true } : {}
+      });
     }
   }
   unavailable2.sort((a, b) => byCodeUnit(a.path, b.path));
@@ -37740,7 +37444,8 @@ function indexTouchedTestFiles(diff, sources, python) {
         ...head.imports === void 0 ? {} : { headImports: head.imports }
       });
     } else {
-      unreadAdded.push({ path: headPath, reason: head.reason });
+      const closed = language === "py" && pythonHeadFailsClosed(head);
+      unreadAdded.push({ path: headPath, reason: head.reason, ...closed ? { failsClosed: true } : {} });
     }
   }
   return {
@@ -37851,7 +37556,8 @@ function detectUnexercisedChanges(diff, touched, repoFiles, excluded, python = t
 // ../core/src/signals/findingCap.ts
 var MAX_FINDINGS_PER_FILE = 20;
 var RANK3 = { block: 0, warn: 1, info: 2 };
-function capFindings(signals, limit = MAX_FINDINGS_PER_FILE) {
+var bySeverity = (signal2) => RANK3[signal2.severity];
+function capFindings(signals, limit = MAX_FINDINGS_PER_FILE, rank = bySeverity) {
   const groups = /* @__PURE__ */ new Map();
   for (const signal2 of signals) {
     const key = `${signal2.id}\0${signal2.path}`;
@@ -37864,7 +37570,7 @@ function capFindings(signals, limit = MAX_FINDINGS_PER_FILE) {
   for (const group of groups.values()) {
     if (group.length <= limit) continue;
     const ranked = group.map((signal2, index) => ({ signal: signal2, index })).sort(
-      (a, b) => RANK3[a.signal.severity] - RANK3[b.signal.severity] || (a.signal.line ?? Number.POSITIVE_INFINITY) - (b.signal.line ?? Number.POSITIVE_INFINITY) || a.index - b.index
+      (a, b) => rank(a.signal) - rank(b.signal) || (a.signal.line ?? Number.POSITIVE_INFINITY) - (b.signal.line ?? Number.POSITIVE_INFINITY) || a.index - b.index
     );
     for (const { signal: signal2 } of ranked.slice(limit)) dropped.add(signal2);
     const first = group[0];
@@ -37889,10 +37595,21 @@ function applySignalOverrides(signals, omitted, overrides, mode) {
     if (wanted !== void 0) {
       if (overrides.kind === "replace") {
         severity2 = wanted;
-      } else if (RANK4[wanted] > RANK4[severity2]) {
-        severity2 = wanted;
-      } else if (RANK4[wanted] < RANK4[severity2]) {
-        lowered.add(signal2.id);
+      } else {
+        if (RANK4[wanted] > RANK4[severity2]) severity2 = wanted;
+        const copies = overrides.copies;
+        if (copies === void 0) {
+          if (RANK4[wanted] < RANK4[signal2.severity]) lowered.add(signal2.id);
+        } else {
+          const head = copies.head;
+          const base = copies.base;
+          const headValue = Object.hasOwn(head, signal2.id) ? head[signal2.id] : void 0;
+          const baseValue = Object.hasOwn(base, signal2.id) ? base[signal2.id] : void 0;
+          const effective2 = (value) => Math.max(RANK4[signal2.severity], value === void 0 ? -1 : RANK4[value]);
+          if (headValue !== void 0 && RANK4[headValue] < RANK4[signal2.severity] || effective2(headValue) < effective2(baseValue)) {
+            lowered.add(signal2.id);
+          }
+        }
       }
     }
     if (mode === "warn" && severity2 === "block") severity2 = "warn";
@@ -38067,9 +37784,6 @@ function tokenSetMemo() {
 var FOUR_FIFTHS = { num: 4, den: 5 };
 var HALF = { num: 1, den: 2 };
 var THREE_QUARTERS = { num: 3, den: 4 };
-function ceilRatio(n, ratio) {
-  return Math.floor((ratio.num * n + ratio.den - 1) / ratio.den);
-}
 function overlap(a, b) {
   const [small, large] = a.size <= b.size ? [a, b] : [b, a];
   let both = 0;
@@ -38078,6 +37792,9 @@ function overlap(a, b) {
 }
 function jaccardAtLeast(a, b, ratio = FOUR_FIFTHS) {
   if (a.size === 0 && b.size === 0) return true;
+  const small = Math.min(a.size, b.size);
+  const large = Math.max(a.size, b.size);
+  if (ratio.den * small < ratio.num * large) return false;
   const both = overlap(a, b);
   return ratio.den * both >= ratio.num * (a.size + b.size - both);
 }
@@ -38085,125 +37802,6 @@ function containsAtLeast(old, fresh, ratio) {
   if (old.size === 0) return true;
   return ratio.den * overlap(old, fresh) >= ratio.num * old.size;
 }
-var CursorHeap = class {
-  list = [];
-  at = [];
-  key = [];
-  get size() {
-    return this.key.length;
-  }
-  push(list, at, key) {
-    this.list.push(list);
-    this.at.push(at);
-    this.key.push(key);
-    let i = this.key.length - 1;
-    while (i > 0) {
-      const parent = i - 1 >> 1;
-      if (this.key[parent] <= this.key[i]) break;
-      this.swap(i, parent);
-      i = parent;
-    }
-  }
-  /** The smallest cursor, removed. */
-  pop() {
-    const top = { list: this.list[0], at: this.at[0], key: this.key[0] };
-    const last = this.key.length - 1;
-    this.swap(0, last);
-    this.list.pop();
-    this.at.pop();
-    this.key.pop();
-    let i = 0;
-    for (; ; ) {
-      const left = 2 * i + 1;
-      const right = left + 1;
-      let smallest = i;
-      if (left < this.key.length && this.key[left] < this.key[smallest]) smallest = left;
-      if (right < this.key.length && this.key[right] < this.key[smallest]) smallest = right;
-      if (smallest === i) break;
-      this.swap(i, smallest);
-      i = smallest;
-    }
-    return top;
-  }
-  swap(a, b) {
-    for (const column of [this.list, this.at, this.key]) {
-      const held = column[a];
-      column[a] = column[b];
-      column[b] = held;
-    }
-  }
-};
-var SimilarityIndex = class {
-  constructor(heads, candidates, ratio = FOUR_FIFTHS) {
-    this.heads = heads;
-    this.ratio = ratio;
-    for (const set of heads) this.count(set);
-    for (const set of candidates) this.count(set);
-    heads.forEach((set, index) => {
-      if (set.size === 0) {
-        this.empty.push(index);
-        return;
-      }
-      for (const token of this.prefix(set)) {
-        const list = this.postings.get(token);
-        if (list === void 0) this.postings.set(token, [index]);
-        else list.push(index);
-      }
-    });
-  }
-  heads;
-  ratio;
-  frequency = /* @__PURE__ */ new Map();
-  postings = /* @__PURE__ */ new Map();
-  empty = [];
-  count(set) {
-    for (const token of set) this.frequency.set(token, (this.frequency.get(token) ?? 0) + 1);
-  }
-  prefix(set) {
-    const frequency = this.frequency;
-    const ordered = [...set].sort((a, b) => (frequency.get(a) ?? 0) - (frequency.get(b) ?? 0) || byCodeUnit(a, b));
-    return ordered.slice(0, set.size - ceilRatio(set.size, this.ratio) + 1);
-  }
-  /**
-   * The index of the first head set similar to `candidate`, below `below`, not skipped and accepted, or -1 when there
-   * is none. `bounded` is true when the probe stopped at the bound without finding one, so a similar head set may exist.
-   */
-  find(candidate, isSkipped, below = Number.POSITIVE_INFINITY, accept = () => true) {
-    if (candidate.size === 0) {
-      for (const index of this.empty) {
-        if (index >= below) break;
-        if (!isSkipped(index) && accept(index)) return { index, bounded: false };
-      }
-      return { index: -1, bounded: false };
-    }
-    const lists = [];
-    const heap = new CursorHeap();
-    for (const token of this.prefix(candidate)) {
-      const list = this.postings.get(token);
-      if (list === void 0) continue;
-      lists.push(list);
-      heap.push(lists.length - 1, 0, list[0]);
-    }
-    const least = ceilRatio(candidate.size, this.ratio);
-    const most = Math.floor(this.ratio.den * candidate.size / this.ratio.num);
-    let probes = 0;
-    let previous = -1;
-    while (heap.size > 0) {
-      const { list, at, key } = heap.pop();
-      const entries = lists[list];
-      if (at + 1 < entries.length) heap.push(list, at + 1, entries[at + 1]);
-      if (key >= below) break;
-      if (key === previous) continue;
-      previous = key;
-      if (++probes > MAX_SIMILARITY_PROBES) return { index: -1, bounded: true };
-      if (isSkipped(key)) continue;
-      const head = this.heads[key];
-      if (head.size < least || head.size > most) continue;
-      if (jaccardAtLeast(candidate, head, this.ratio) && accept(key)) return { index: key, bounded: false };
-    }
-    return { index: -1, bounded: false };
-  }
-};
 
 // ../core/src/signals/nameWords.ts
 var WORD = /[\p{L}\p{N}]+/gu;
@@ -38249,10 +37847,10 @@ function holdsBody(before, after, tokensOf) {
   return jaccardAtLeast(old, fresh, FOUR_FIFTHS) || containsAtLeast(old, fresh, FOUR_FIFTHS) && holdsEveryChain(assertionChains(before), assertionChains(after));
 }
 var MAX_EACH_SCAN = 256;
-function groupItems(items, keyOf4) {
+function groupItems(items, keyOf3) {
   const groups = /* @__PURE__ */ new Map();
   for (const item of items) {
-    const key = keyOf4(item);
+    const key = keyOf3(item);
     const list = groups.get(key);
     if (list === void 0) groups.set(key, [item]);
     else list.push(item);
@@ -38323,45 +37921,62 @@ function eachReplacements(candidates, fresh) {
 // ../core/src/signals/testMatch.ts
 var byLine = (a, b) => a.line - b.line;
 var leafName = (block) => block.path[block.path.length - 1] ?? "";
-var OtherFileList = class {
+var FreeList = class {
   constructor(entries) {
     this.entries = entries;
-    const n = entries.length;
-    this.next = new Int32Array(n + 1);
-    this.blockEnd = new Int32Array(n + 1);
-    for (let i = 0; i <= n; i++) this.next[i] = i;
-    this.blockEnd[n] = n;
-    for (let i = n - 1; i >= 0; i--) {
-      const following = entries[i + 1];
-      this.blockEnd[i] = following !== void 0 && following.fileIndex === entries[i].fileIndex ? this.blockEnd[i + 1] : i + 1;
-    }
   }
   entries;
   next;
-  blockEnd;
-  find(from) {
+  runEnd;
+  build() {
+    if (this.next === void 0 || this.runEnd === void 0) {
+      const n = this.entries.length;
+      const next = new Int32Array(n + 1);
+      const runEnd = new Int32Array(n + 1);
+      for (let i = 0; i <= n; i++) next[i] = i;
+      runEnd[n] = n;
+      for (let i = n - 1; i >= 0; i--) {
+        const following = this.entries[i + 1];
+        runEnd[i] = following !== void 0 && following.fileIndex === this.entries[i].fileIndex ? runEnd[i + 1] : i + 1;
+      }
+      this.next = next;
+      this.runEnd = runEnd;
+    }
+    return { next: this.next, runEnd: this.runEnd };
+  }
+  /** The first index at or after `from` whose entry is not used (the length of the list when there is none). */
+  find(next, from) {
     const n = this.entries.length;
     let root = from;
-    while (root < n && (this.next[root] !== root || this.entries[root].used)) {
-      if (this.next[root] === root) this.next[root] = root + 1;
-      root = this.next[root];
+    while (root < n && (next[root] !== root || this.entries[root].used)) {
+      if (next[root] === root) next[root] = root + 1;
+      root = next[root];
     }
     let step = from;
     while (step < root) {
-      const following = this.next[step];
-      this.next[step] = root;
+      const following = next[step];
+      next[step] = root;
       step = following;
     }
     return root;
   }
-  /** The first unused entry that is not in file `fileIndex`, or null. */
-  firstOutside(fileIndex) {
+  walk(options) {
     const n = this.entries.length;
-    let at = this.find(0);
-    while (at < n) {
+    if (n === 0) return null;
+    const { next, runEnd } = this.build();
+    const before = Math.min(options.before ?? n, n);
+    const limit = options.limit ?? MAX_SIMILARITY_PROBES;
+    let offered = 0;
+    let at = this.find(next, 0);
+    while (at < before) {
       const entry = this.entries[at];
-      if (entry.fileIndex !== fileIndex) return entry;
-      at = this.find(this.blockEnd[at]);
+      if (entry.fileIndex === options.own) {
+        at = this.find(next, runEnd[at]);
+        continue;
+      }
+      if (++offered > limit) return null;
+      if (!options.held?.has(entry) && options.test(entry)) return entry;
+      at = this.find(next, at + 1);
     }
     return null;
   }
@@ -38371,7 +37986,84 @@ function push(map, key, value) {
   if (list === void 0) map.set(key, [value]);
   else list.push(value);
 }
-function matchTests(touched) {
+function memoOf(compute) {
+  const memo = /* @__PURE__ */ new Map();
+  return (block) => {
+    let found = memo.get(block);
+    if (found === void 0) {
+      found = compute(block);
+      memo.set(block, found);
+    }
+    return found;
+  };
+}
+var NO_WORDS = /* @__PURE__ */ new Set();
+function matchDeletedFiles(touched, deleted, tokensOf) {
+  const result = {
+    moved: /* @__PURE__ */ new Set(),
+    compared: new Set(deleted.files.map((file) => file.path)),
+    pairs: []
+  };
+  if (!deleted.files.some((file) => file.tests.length > 0)) return result;
+  const pool = [];
+  for (const file of touched.added) {
+    for (const block of file.head) {
+      if (block.assertionCount >= 1) pool.push({ fileIndex: 0, path: file.headPath, block, used: false });
+    }
+  }
+  for (const file of touched.pairs) {
+    const known2 = new Set(file.base.map(fullTestName));
+    for (const block of file.head) {
+      if (block.assertionCount >= 1 && !known2.has(fullTestName(block))) {
+        pool.push({ fileIndex: 0, path: file.headPath, block, used: false });
+      }
+    }
+  }
+  if (pool.length === 0) return result;
+  pool.sort((a, b) => byCodeUnit(a.path, b.path) || a.block.line - b.block.line);
+  const leaves = /* @__PURE__ */ new Map();
+  const groups = /* @__PURE__ */ new Set();
+  for (const entry of pool) {
+    push(leaves, leafName(entry.block), entry);
+    for (const group of entry.block.path.slice(0, -1)) groups.add(group);
+  }
+  const list = new FreeList(pool);
+  for (const file of deleted.files) {
+    if (file.tests.length === 0) continue;
+    if (!deleted.stemLinked.has(file.path) && !file.tests.every(
+      (block) => leaves.has(leafName(block)) && block.path.slice(0, -1).every((group) => groups.has(group))
+    )) {
+      continue;
+    }
+    const taken = /* @__PURE__ */ new Set();
+    const found = [];
+    for (const block of file.tests) {
+      let pick = null;
+      const sameLeaf = leaves.get(leafName(block)) ?? [];
+      const scan = Math.min(sameLeaf.length, MAX_SIMILARITY_PROBES);
+      for (let at = 0; at < scan; at++) {
+        const entry = sameLeaf[at];
+        if (!entry.used && !taken.has(entry) && holdsBody(block, entry.block, tokensOf)) {
+          pick = entry;
+          break;
+        }
+      }
+      if (pick === null) {
+        const tokens2 = tokensOf(block);
+        pick = list.walk({ held: taken, test: (entry) => jaccardAtLeast(tokens2, tokensOf(entry.block), FOUR_FIFTHS) });
+      }
+      if (pick === null) break;
+      taken.add(pick);
+      found.push({ basePath: file.path, headPath: pick.path, base: block, head: pick.block });
+    }
+    if (found.length !== file.tests.length) continue;
+    for (const entry of taken) entry.used = true;
+    result.moved.add(file.path);
+    result.pairs.push(...found);
+  }
+  return result;
+}
+function matchTests(touched, deleted) {
   const pairs = [];
   const replaced = [];
   const fresh = [];
@@ -38425,10 +38117,7 @@ function matchTests(touched) {
     const byHash = /* @__PURE__ */ new Map();
     for (let at = 0; at < entries.length; at++) push(byHash, entries[at].block.bodyHash, at);
     const cursor = /* @__PURE__ */ new Map();
-    const similar = candidates.length > 0 && entries.length > 0 ? new SimilarityIndex(
-      entries.map((entry) => tokensOf(entry.block)),
-      candidates.map(tokensOf)
-    ) : null;
+    const own = new FreeList(entries);
     const fileLeft = [];
     for (const block of candidates) {
       let pick = -1;
@@ -38439,20 +38128,17 @@ function matchTests(touched) {
         cursor.set(block.bodyHash, at);
         if (at < bucket.length) pick = bucket[at];
       }
-      if (similar !== null) {
-        const found = similar.find(
-          tokensOf(block),
-          (at) => entries[at].used,
-          pick === -1 ? Number.POSITIVE_INFINITY : pick
-        );
-        if (found.index !== -1) pick = found.index;
-      }
-      if (pick === -1) {
+      const tokens2 = tokensOf(block);
+      const similar = own.walk({
+        ...pick === -1 ? {} : { before: pick },
+        test: (entry) => jaccardAtLeast(tokens2, tokensOf(entry.block), FOUR_FIFTHS)
+      });
+      const chosen = similar ?? (pick === -1 ? null : entries[pick]);
+      if (chosen === null) {
         fileLeft.push({ fileIndex: index, path: file.basePath, block });
       } else {
-        const entry = entries[pick];
-        entry.used = true;
-        pairs.push({ basePath: file.basePath, headPath: file.headPath, base: block, head: entry.block });
+        chosen.used = true;
+        pairs.push({ basePath: file.basePath, headPath: file.headPath, base: block, head: chosen.block });
       }
     }
     const renamed = /* @__PURE__ */ new Set();
@@ -38507,13 +38193,13 @@ function matchTests(touched) {
     push(hashEntries, entry.block.bodyHash, entry);
   }
   const hashLists = /* @__PURE__ */ new Map();
-  const listFor = (lists, entries, key) => {
-    let list = lists.get(key);
+  const hashList = (key) => {
+    let list = hashLists.get(key);
     if (list === void 0) {
-      const found = entries.get(key);
+      const found = hashEntries.get(key);
       if (found === void 0) return null;
-      list = new OtherFileList(found);
-      lists.set(key, list);
+      list = new FreeList(found);
+      hashLists.set(key, list);
     }
     return list;
   };
@@ -38532,7 +38218,11 @@ function matchTests(touched) {
         }
       }
     }
-    const byBody = listFor(hashLists, hashEntries, candidate.block.bodyHash)?.firstOutside(candidate.fileIndex) ?? null;
+    const byBody = hashList(candidate.block.bodyHash)?.walk({
+      own: candidate.fileIndex,
+      limit: Number.POSITIVE_INFINITY,
+      test: () => true
+    }) ?? null;
     const pick = byLeaf !== null && (byBody === null || byLeaf.order < byBody.order) ? byLeaf : byBody;
     if (pick === null) afterNames.push(candidate);
     else {
@@ -38541,49 +38231,36 @@ function matchTests(touched) {
     }
   }
   const afterSimilarity = [];
-  const pool = fresh.filter((entry) => !entry.used);
-  if (afterNames.length > 0 && pool.length > 0) {
-    const poolBodies = pool.map((entry) => tokensOf(entry.block));
-    const poolNames = pool.map((entry) => entry.block.nameDynamic ? /* @__PURE__ */ new Set() : fullNameWords(entry.block));
-    const candidateNames = afterNames.map(
-      (candidate) => candidate.block.nameDynamic ? /* @__PURE__ */ new Set() : fullNameWords(candidate.block)
-    );
-    const candidateBodies = afterNames.map((candidate) => tokensOf(candidate.block));
-    const bodyIndex = new SimilarityIndex(poolBodies, candidateBodies, FOUR_FIFTHS);
-    const nameIndex = new SimilarityIndex(poolNames, candidateNames, HALF);
-    afterNames.forEach((candidate, at) => {
-      const skipped = (index) => {
-        const entry = pool[index];
-        return entry.used || entry.fileIndex === candidate.fileIndex;
-      };
-      const bodies = candidateBodies[at];
-      let found = bodyIndex.find(bodies, skipped).index;
-      const words = candidateNames[at];
-      if (found === -1 && words.size > 0) {
-        const chains = assertionChains(candidate.block);
-        found = nameIndex.find(
-          words,
-          skipped,
-          Number.POSITIVE_INFINITY,
-          (index) => containsAtLeast(bodies, poolBodies[index], FOUR_FIFTHS) && holdsEveryChain(chains, assertionChains(pool[index].block))
-        ).index;
-      }
-      if (found === -1) {
-        afterSimilarity.push(candidate);
-      } else {
-        const pick = pool[found];
-        pick.used = true;
-        moved.push({ basePath: candidate.path, headPath: pick.path, base: candidate.block, head: pick.block });
-      }
+  const wordsOf = memoOf((block) => block.nameDynamic ? NO_WORDS : fullNameWords(block));
+  const chainsOf = memoOf(assertionChains);
+  const all = new FreeList(fresh);
+  for (const candidate of afterNames) {
+    const bodies = tokensOf(candidate.block);
+    let pick = all.walk({
+      own: candidate.fileIndex,
+      test: (entry) => jaccardAtLeast(bodies, tokensOf(entry.block), FOUR_FIFTHS)
     });
-  } else {
-    afterSimilarity.push(...afterNames);
+    const words = wordsOf(candidate.block);
+    if (pick === null && words.size > 0) {
+      const chains = chainsOf(candidate.block);
+      pick = all.walk({
+        own: candidate.fileIndex,
+        test: (entry) => jaccardAtLeast(words, wordsOf(entry.block), HALF) && containsAtLeast(bodies, tokensOf(entry.block), FOUR_FIFTHS) && holdsEveryChain(chains, chainsOf(entry.block))
+      });
+    }
+    if (pick === null) {
+      afterSimilarity.push(candidate);
+    } else {
+      pick.used = true;
+      moved.push({ basePath: candidate.path, headPath: pick.path, base: candidate.block, head: pick.block });
+    }
   }
+  const movedFiles = deleted === void 0 ? { moved: /* @__PURE__ */ new Set(), compared: /* @__PURE__ */ new Set(), pairs: [] } : matchDeletedFiles(touched, deleted, tokensOf);
   const unmatched = afterSimilarity.map((candidate) => ({
     path: candidate.path,
     block: candidate.block
   }));
-  return { unmatched, pairs, moved, replaced };
+  return { unmatched, pairs, moved, replaced, movedFiles };
 }
 
 // ../core/src/binaryDetails.ts
@@ -38595,8 +38272,8 @@ function isBinaryDetail(detail) {
   return BINARY_DETAILS.includes(detail);
 }
 
-// ../core/src/signals/ti01Moved.ts
-var leafOf = (block) => block.path[block.path.length - 1] ?? "";
+// ../core/src/signals/ti01.ts
+var MAX_DETAIL3 = 300;
 function sameStemDeletions(diff) {
   const stems = /* @__PURE__ */ new Map();
   for (const file of diff) {
@@ -38620,22 +38297,16 @@ function sameStemDeletions(diff) {
   }
   return linked;
 }
-function movedTestFiles(diff, sources, python, touched) {
-  const describes = /* @__PURE__ */ new Map();
-  const moved = {
-    files: /* @__PURE__ */ new Set(),
-    compared: /* @__PURE__ */ new Set(),
-    unparsed: /* @__PURE__ */ new Set(),
-    pairs: [],
-    groups: describes
-  };
-  if (touched.notRun !== null || "unavailable" in sources.base) return moved;
+function indexDeletedTestFiles(diff, sources, python) {
+  const indexed = { files: [], unparsed: /* @__PURE__ */ new Set(), stemLinked: /* @__PURE__ */ new Set() };
+  if ("unavailable" in sources.base) return indexed;
   const deleted = diff.filter((file) => file.status === "deleted" && isTestFile(file.path) && file.binary !== true).map((file) => file.path).sort(byCodeUnit);
-  if (deleted.length === 0) return moved;
+  if (deleted.length === 0) return indexed;
   const texts = new Map(sources.base.files.map((file) => [file.path, file.text]));
   const pythonBase = python?.available ? new Map(python.base.map((file) => [file.path, file.result])) : null;
-  const indexed = [];
-  for (const path of [...new Set(deleted)]) {
+  const files = [];
+  const unparsed = /* @__PURE__ */ new Set();
+  for (const path of new Set(deleted)) {
     const language = languageOf(path);
     let result;
     if (language === "py") result = pythonBase?.get(path);
@@ -38645,78 +38316,17 @@ function movedTestFiles(diff, sources, python, touched) {
     }
     if (result === void 0) continue;
     if (!result.parsed) {
-      moved.unparsed.add(path);
+      unparsed.add(path);
       continue;
     }
-    moved.compared.add(path);
-    describes.set(
+    files.push({
       path,
-      result.tests.filter((block) => block.kind === "describe")
-    );
-    const tests = result.tests.filter((block) => block.kind === "test").sort((a, b) => a.line - b.line);
-    if (tests.length > 0) indexed.push({ path, tests });
+      tests: result.tests.filter((block) => block.kind === "test").sort((a, b) => a.line - b.line),
+      groups: result.tests.filter((block) => block.kind === "describe")
+    });
   }
-  const fresh = [];
-  for (const file of touched.added) {
-    for (const block of file.head)
-      if (block.assertionCount >= 1) fresh.push({ path: file.headPath, block, used: false });
-  }
-  for (const file of touched.pairs) {
-    const known2 = new Set(file.base.map(fullTestName));
-    for (const block of file.head) {
-      if (block.assertionCount >= 1 && !known2.has(fullTestName(block))) {
-        fresh.push({ path: file.headPath, block, used: false });
-      }
-    }
-  }
-  if (fresh.length === 0) return moved;
-  fresh.sort((a, b) => byCodeUnit(a.path, b.path) || a.block.line - b.block.line);
-  const leaves = /* @__PURE__ */ new Map();
-  const groups = /* @__PURE__ */ new Set();
-  for (const entry of fresh) {
-    const leaf = leafOf(entry.block);
-    const list = leaves.get(leaf);
-    if (list === void 0) leaves.set(leaf, [entry]);
-    else list.push(entry);
-    for (const group of entry.block.path.slice(0, -1)) groups.add(group);
-  }
-  const stemLinked = sameStemDeletions(diff);
-  const named = indexed.filter(
-    (file) => stemLinked.has(file.path) || file.tests.every(
-      (block) => leaves.has(leafOf(block)) && block.path.slice(0, -1).every((group) => groups.has(group))
-    )
-  );
-  if (named.length === 0) return moved;
-  const tokensOf = tokenSetMemo();
-  const bodies = new SimilarityIndex(
-    fresh.map((entry) => tokensOf(entry.block)),
-    named.flatMap((file) => file.tests.map((block) => tokensOf(block))),
-    FOUR_FIFTHS
-  );
-  for (const file of named) {
-    const taken = /* @__PURE__ */ new Set();
-    const found = [];
-    for (const block of file.tests) {
-      const free = (entry) => !entry.used && !taken.has(entry);
-      let pick = (leaves.get(leafOf(block)) ?? []).slice(0, MAX_SIMILARITY_PROBES).find((entry) => free(entry) && holdsBody(block, entry.block, tokensOf)) ?? null;
-      if (pick === null) {
-        const at = bodies.find(tokensOf(block), (index) => !free(fresh[index])).index;
-        if (at !== -1) pick = fresh[at];
-      }
-      if (pick === null) break;
-      taken.add(pick);
-      found.push({ basePath: file.path, headPath: pick.path, base: block, head: pick.block });
-    }
-    if (found.length !== file.tests.length) continue;
-    for (const entry of taken) entry.used = true;
-    moved.files.add(file.path);
-    moved.pairs.push(...found);
-  }
-  return moved;
+  return { files, unparsed, stemLinked: sameStemDeletions(diff) };
 }
-
-// ../core/src/signals/ti01.ts
-var MAX_DETAIL3 = 300;
 function removedTests(file) {
   if (file.hunks === void 0) return "unknown";
   for (const hunk of file.hunks) {
@@ -38802,7 +38412,6 @@ function detectTI02(match, mode) {
 }
 
 // ../core/src/signals/ti03.ts
-var MAX_PER_FILE = 20;
 var DETAILS = {
   existing: "An unconditional skip was added to a test that the diff shows existed before this change, so that test no longer runs.",
   conditional: "A conditional skip was added; the test is skipped only where its condition holds.",
@@ -38962,11 +38571,9 @@ function detectTI03(diff, mode, sources, pairs = []) {
     }
   }
   for (const { path, line, category } of pairs) note(path, line, category);
-  const rank = (category) => category === "existing" ? 0 : 1;
   const signals = [];
   for (const [path, lines] of byPath) {
-    const found = [...lines].map(([line, category]) => ({ line, category })).sort((a, b) => rank(a.category) - rank(b.category) || a.line - b.line);
-    for (const { line, category } of found.slice(0, MAX_PER_FILE)) {
+    for (const [line, category] of lines) {
       signals.push({
         id: "TI03",
         severity: category === "existing" ? mode : "warn",
@@ -38976,7 +38583,10 @@ function detectTI03(diff, mode, sources, pairs = []) {
       });
     }
   }
-  return signals.sort((a, b) => byCodeUnit(a.path, b.path) || (a.line ?? 0) - (b.line ?? 0));
+  const existingFirst = (signal2) => signal2.detail === DETAILS.existing ? 0 : 1;
+  return capFindings(signals, MAX_FINDINGS_PER_FILE, existingFirst).kept.sort(
+    (a, b) => byCodeUnit(a.path, b.path) || (a.line ?? 0) - (b.line ?? 0)
+  );
 }
 
 // ../core/src/signals/ti03Pairs.ts
@@ -39186,7 +38796,6 @@ function detectTI03Pairs(input) {
 }
 
 // ../core/src/signals/ti04.ts
-var MAX_PER_FILE2 = 20;
 var DETAIL = "A focused-run marker (`.only`, `fit` or `fdescribe`) was added, so the runner may skip the other tests of this file or of the whole run.";
 function detectTI04(diff, mode) {
   const signals = [];
@@ -39200,20 +38809,17 @@ function detectTI04(diff, mode) {
         if (parsed !== null && parsed.kind === "call" && parsed.token === "only") removed.add(parsed.name);
       }
     }
-    const lines = [];
     for (const hunk of file.hunks) {
       for (const entry of hunk.added) {
         const parsed = parseJsTestCall(entry.text);
         if (parsed === null || parsed.kind !== "call" || parsed.token !== "only") continue;
-        if (!removed.has(parsed.name)) lines.push(entry.line);
+        if (!removed.has(parsed.name)) {
+          signals.push({ id: "TI04", severity: mode, path: file.path, line: entry.line, detail: DETAIL });
+        }
       }
     }
-    lines.sort((a, b) => a - b);
-    for (const line of lines.slice(0, MAX_PER_FILE2)) {
-      signals.push({ id: "TI04", severity: mode, path: file.path, line, detail: DETAIL });
-    }
   }
-  return signals.sort((a, b) => byCodeUnit(a.path, b.path) || (a.line ?? 0) - (b.line ?? 0));
+  return capFindings(signals).kept.sort((a, b) => byCodeUnit(a.path, b.path) || (a.line ?? 0) - (b.line ?? 0));
 }
 
 // ../core/src/signals/ti05.ts
@@ -39739,10 +39345,10 @@ function labelledAssertions(block, language) {
 var MAX_LITERAL = 200;
 var isWord = (code2) => code2 >= 48 && code2 <= 57 || code2 >= 65 && code2 <= 90 || code2 >= 97 && code2 <= 122 || code2 === 95 || code2 === 36;
 var isDigit4 = (code2) => code2 >= 48 && code2 <= 57;
-var isSpace5 = (code2) => code2 === 32 || code2 === 9 || code2 === 10 || code2 === 13;
+var isSpace3 = (code2) => code2 === 32 || code2 === 9 || code2 === 10 || code2 === 13;
 function skipSpaces(text, at) {
   let i = at;
-  while (i < text.length && isSpace5(text.charCodeAt(i))) i++;
+  while (i < text.length && isSpace3(text.charCodeAt(i))) i++;
   return i;
 }
 function digitsEnd(text, at) {
@@ -39875,7 +39481,7 @@ function endsAssert(text, at) {
 }
 function pyAssert(text, p) {
   const after = p + "assert".length;
-  if (after >= text.length || !isSpace5(text.charCodeAt(after))) return false;
+  if (after >= text.length || !isSpace3(text.charCodeAt(after))) return false;
   const start = skipSpaces(text, after);
   const firstEnd = literalEnd(text, start, "py");
   if (firstEnd === -1) return false;
@@ -40560,7 +40166,6 @@ function readPackageScripts(text) {
 }
 
 // ../core/src/signals/ti10.ts
-var MAX_PER_FILE3 = 20;
 var DETAILS2 = {
   "or-true": "A test script now ignores the exit status of a command, so it passes even when the tests fail.",
   echo: "A test script now prints a message in place of running the tests, or after a failing run, so it can pass without the tests passing.",
@@ -40715,11 +40320,12 @@ function detectTI10(diff, options) {
       continue;
     }
     found.sort((a, b) => (a.line ?? 0) - (b.line ?? 0) || byCodeUnit(DETAILS2[a.kind], DETAILS2[b.kind]));
-    for (const { line, kind } of found.slice(0, MAX_PER_FILE3)) {
+    for (const { line, kind } of found) {
       signals.push({ id: "TI10", severity: options.mode, path: file.path, line, detail: DETAILS2[kind] });
     }
   }
-  return signals.sort(
+  const lineless = (signal2) => signal2.line === null ? 0 : 1;
+  return capFindings(signals, MAX_FINDINGS_PER_FILE, lineless).kept.sort(
     (a, b) => byCodeUnit(a.path, b.path) || (a.line ?? 0) - (b.line ?? 0) || byCodeUnit(a.detail, b.detail)
   );
 }
@@ -40947,9 +40553,9 @@ function detectTI08(diff) {
 }
 
 // ../core/src/testConfig/kinds.ts
-var JS_EXTENSIONS2 = /* @__PURE__ */ new Set(["ts", "mts", "cts", "js", "mjs", "cjs"]);
+var JS_EXTENSIONS = /* @__PURE__ */ new Set(["ts", "mts", "cts", "js", "mjs", "cjs"]);
 function hasJsName(basename, prefix) {
-  return basename.startsWith(`${prefix}.`) && JS_EXTENSIONS2.has(basename.slice(prefix.length + 1));
+  return basename.startsWith(`${prefix}.`) && JS_EXTENSIONS.has(basename.slice(prefix.length + 1));
 }
 function testConfigKind(path) {
   const basename = path.slice(path.lastIndexOf("/") + 1);
@@ -41259,11 +40865,9 @@ function readJs(path, text) {
 }
 
 // ../core/src/testConfig/readToml.ts
-var TABLE2 = /^\[\s*tool\s*\.\s*pytest\s*\.\s*ini_options\s*\]\s*(?:#.*)?$/;
-var NATIVE_TABLE = /^\[\s*tool\s*\.\s*pytest\s*\]\s*(?:#.*)?$/;
-var HEADER_LINE = /^\[\[?[A-Za-z0-9_.\s-]+\]\]?\s*(?:#.*)?$/;
-var KEY_LINE = /^([A-Za-z0-9_.-]+|"(?:[^"\\]|\\.)*"|'[^']*')\s*=([\s\S]*)$/;
 var NUMBER3 = /^[-+]?\d[\d_]*(?:\.\d[\d_]*)?(?:[eE][-+]?\d+)?$/;
+var INI_OPTIONS = ["tool", "pytest", "ini_options"];
+var NATIVE = ["tool", "pytest"];
 function stringEnd2(text, open3) {
   const quote = text[open3];
   for (let i = open3 + 1; i < text.length; i++) {
@@ -41271,27 +40875,6 @@ function stringEnd2(text, open3) {
     else if (text[i] === quote) return i;
   }
   return -1;
-}
-function closesMultiLine(line, from, delimiter) {
-  if (delimiter === "'''") return line.includes(delimiter, from);
-  for (let i = from; i < line.length; i++) {
-    if (line[i] === "\\") i++;
-    else if (line.startsWith(delimiter, i)) return true;
-  }
-  return false;
-}
-function stripTomlComment(line) {
-  for (let i = 0; i < line.length; i++) {
-    const ch = line[i];
-    if (ch === '"' || ch === "'") {
-      const end = stringEnd2(line, i);
-      if (end === -1) return line.trim();
-      i = end;
-    } else if (ch === "#") {
-      return line.slice(0, i).trim();
-    }
-  }
-  return line.trim();
 }
 function scalar(text) {
   if (text.startsWith('"') || text.startsWith("'")) {
@@ -41311,179 +40894,60 @@ function scalar(text) {
   if (NUMBER3.test(text)) return { type: "number", value: Number(text.replace(/_/g, "")) };
   return { type: "opaque", text: normalizeOpaque(text) };
 }
-function scanBrackets(text, from, depth) {
-  let open3 = depth;
-  for (let i = from; i < text.length; i++) {
+function withoutComments2(text) {
+  let out = "";
+  let from = 0;
+  for (let i = 0; i < text.length; i++) {
     const ch = text[i];
     if (ch === '"' || ch === "'") {
-      const end = stringEnd2(text, i);
-      if (end === -1) return null;
-      i = end;
-    } else if (ch === "[" || ch === "{") {
-      open3++;
-    } else if (ch === "]" || ch === "}") {
-      open3--;
-      if (open3 === 0) return { close: i, depth: 0 };
+      const delimiter = text.startsWith(ch.repeat(3), i) ? ch.repeat(3) : ch;
+      let j = i + delimiter.length;
+      while (j < text.length && !text.startsWith(delimiter, j)) j += ch === '"' && text[j] === "\\" ? 2 : 1;
+      i = j + delimiter.length - 1;
+    } else if (ch === "#") {
+      out += text.slice(from, i);
+      while (i < text.length && text[i] !== "\n") i++;
+      from = i;
     }
   }
-  return { close: -1, depth: open3 };
+  return out + text.slice(from);
 }
-function closeOf2(text, open3) {
-  return scanBrackets(text, open3, 0)?.close ?? -1;
+function configValue(value, origins, src, nested2) {
+  const origin = origins.get(value);
+  const raw = origin?.kind === "value" ? src.slice(origin.start, origin.end) : "";
+  if (value.type === "table" || value.type === "array" && nested2) {
+    return { type: "opaque", text: normalizeOpaque(withoutComments2(raw)) };
+  }
+  if (value.type === "array")
+    return { type: "array", items: value.items.map((item) => configValue(item, origins, src, true)) };
+  return scalar(raw.trim());
 }
-function arrayValue(text) {
-  const items = [];
-  let i = 1;
-  while (i < text.length) {
-    const ch = text[i];
-    if (ch === "]") break;
-    if (/\s/.test(ch) || ch === ",") {
-      i++;
-    } else if (ch === '"' || ch === "'") {
-      const end = stringEnd2(text, i);
-      if (end === -1) break;
-      items.push(scalar(text.slice(i, end + 1)));
-      i = end + 1;
-    } else if (ch === "[" || ch === "{") {
-      const end = closeOf2(text, i);
-      if (end === -1) break;
-      items.push({ type: "opaque", text: normalizeOpaque(text.slice(i, end + 1)) });
-      i = end + 1;
-    } else {
-      let end = i;
-      while (end < text.length && text[end] !== "," && text[end] !== "]") end++;
-      items.push(scalar(text.slice(i, end).trim()));
-      i = end;
-    }
+function collect(table, prefix, origins, src, into, skip) {
+  for (const [key, value] of table.entries) {
+    if (key === skip) continue;
+    const kind = origins.get(value)?.kind;
+    if (kind === "value") into.set(prefix + key, { value: configValue(value, origins, src, false), line: value.line });
+    else if (kind === "dotted" && value.type === "table") collect(value, `${prefix}${key}.`, origins, src, into, null);
   }
-  return { type: "array", items };
-}
-function breakAt(text, from) {
-  for (let i = from; i < text.length; i++) {
-    const code2 = text.charCodeAt(i);
-    if (code2 === 10 || code2 === 13) return i;
-  }
-  return -1;
-}
-var afterBreak = (text, at) => at + (text.charCodeAt(at) === 13 && text.charCodeAt(at + 1) === 10 ? 2 : 1);
-var Lines = class {
-  constructor(text, from, first) {
-    this.text = text;
-    this.first = first;
-    this.pos = from;
-    this.done = from > text.length;
-  }
-  text;
-  first;
-  pos;
-  done;
-  cache = [];
-  /** The line with index `i`, or undefined past the end of the text. */
-  at(i) {
-    const k = i - this.first;
-    while (this.cache.length <= k && !this.done) {
-      const end = breakAt(this.text, this.pos);
-      if (end === -1) {
-        this.cache.push(this.text.slice(this.pos));
-        this.done = true;
-      } else {
-        this.cache.push(this.text.slice(this.pos, end));
-        this.pos = afterBreak(this.text, end);
-      }
-    }
-    return this.cache[k];
-  }
-};
-function headerAt(text, needle, header2) {
-  let from = 0;
-  for (; ; ) {
-    const hit = text.indexOf(needle, from);
-    if (hit === -1) return null;
-    let start = hit;
-    while (start > 0 && text.charCodeAt(start - 1) !== 10 && text.charCodeAt(start - 1) !== 13) start--;
-    const end = breakAt(text, hit);
-    if (header2.test(text.slice(start, end === -1 ? text.length : end).trim())) {
-      let line = 0;
-      for (let i = 0; i < start; i++) {
-        const code2 = text.charCodeAt(i);
-        if (code2 === 10 || code2 === 13 && text.charCodeAt(i + 1) !== 10) line++;
-      }
-      return { line, next: end === -1 ? text.length + 1 : afterBreak(text, end) };
-    }
-    if (end === -1) return null;
-    from = end;
-  }
-}
-function readTable(lines, headerAt2) {
-  const entries = /* @__PURE__ */ new Map();
-  let i = headerAt2 + 1;
-  for (let raw = lines.at(i); raw !== void 0; raw = lines.at(i)) {
-    const line = stripTomlComment(raw);
-    if (line === "") {
-      i++;
-      continue;
-    }
-    if (line.startsWith("[")) break;
-    const match = KEY_LINE.exec(line);
-    if (match === null) return null;
-    const rawKey = match[1];
-    let key = rawKey.replace(/^'|'$/g, "");
-    if (rawKey.startsWith('"')) {
-      try {
-        key = JSON.parse(rawKey);
-      } catch {
-        return null;
-      }
-    }
-    const rest = match[2].trim();
-    const first = i;
-    const multi = rest.startsWith('"""') ? '"""' : rest.startsWith("'''") ? "'''" : null;
-    if (multi !== null) {
-      let closed = closesMultiLine(rest, 3, multi);
-      while (!closed) {
-        i++;
-        const more = lines.at(i);
-        if (more === void 0) return null;
-        closed = closesMultiLine(more, 0, multi);
-      }
-      entries.set(key, { value: { type: "opaque", text: normalizeOpaque(rest) }, line: first + 1 });
-      i++;
-      continue;
-    }
-    let value;
-    if (rest.startsWith("[")) {
-      const parts = [rest];
-      let scan = scanBrackets(rest, 0, 0);
-      while (scan !== null && scan.close === -1) {
-        i++;
-        const next = lines.at(i);
-        if (next === void 0 || HEADER_LINE.test(next.trim())) return null;
-        const added = stripTomlComment(next);
-        parts.push(added);
-        scan = scanBrackets(added, 0, scan.depth);
-      }
-      if (scan === null) return null;
-      value = arrayValue(parts.join(" "));
-    } else {
-      value = scalar(rest);
-    }
-    entries.set(key, { value, line: first + 1 });
-    i++;
-  }
-  return entries;
 }
 function readToml(text) {
   if (text.length > MAX_CONFIG_CHARS) return { ok: false, reason: "too-large" };
-  const starts = [headerAt(text, "ini_options", TABLE2), headerAt(text, "pytest", NATIVE_TABLE)];
-  if (starts[0] === null && starts[1] === null) return { ok: true, root: null };
+  const origins = /* @__PURE__ */ new Map();
+  const document2 = parseTomlDocument(text, origins);
+  if (document2 === null) return { ok: false, reason: "invalid-toml" };
+  const src = text.charCodeAt(0) === 65279 ? text.slice(1) : text;
   const entries = /* @__PURE__ */ new Map();
-  for (const start of starts) {
-    if (start === null) continue;
-    const table = readTable(new Lines(text, start.next, start.line + 1), start.line);
-    if (table === null) return { ok: false, reason: "invalid-toml" };
-    for (const [key, entry] of table) entries.set(key, entry);
+  let present = false;
+  for (const [path, skip] of [
+    [INI_OPTIONS, null],
+    [NATIVE, "ini_options"]
+  ]) {
+    const table = valueAt(document2.root, path);
+    if (table?.type !== "table" || origins.get(table)?.kind === "implicit") continue;
+    present = true;
+    collect(table, "", origins, src, entries, skip);
   }
-  return { ok: true, root: { type: "object", entries, open: false, extras: [] } };
+  return { ok: true, root: present ? { type: "object", entries, open: false, extras: [] } : null };
 }
 
 // ../core/src/testConfig/readYaml.ts
@@ -42826,7 +42290,6 @@ function detectTI12(touched, diff) {
 }
 
 // ../core/src/signals/ti13.ts
-var MAX_PER_FILE4 = 20;
 var DETAILS3 = {
   istanbul: "An Istanbul coverage hint was added, so the code it marks leaves the coverage this check grades.",
   v8: "A V8 coverage hint was added, so the code it marks leaves the coverage this check grades.",
@@ -42892,12 +42355,12 @@ function detectTI13(diff, mode) {
       else fresh.push(entry);
     }
     const newFile = file.status === "added";
-    for (const { line, family, lineLevel } of fresh.slice(0, MAX_PER_FILE4)) {
+    for (const { line, family, lineLevel } of fresh) {
       const severity2 = newFile && lineLevel ? "warn" : mode;
       signals.push({ id: "TI13", severity: severity2, path: file.path, line, detail: DETAILS3[family] });
     }
   }
-  return signals.sort(
+  return capFindings(signals, MAX_FINDINGS_PER_FILE, () => 0).kept.sort(
     (a, b) => byCodeUnit(a.path, b.path) || (a.line ?? 0) - (b.line ?? 0) || byCodeUnit(a.detail, b.detail)
   );
 }
@@ -43039,271 +42502,6 @@ function detectTI14(diff, options) {
   return signals.sort((a, b) => byCodeUnit(a.path, b.path) || (a.line ?? 0) - (b.line ?? 0));
 }
 
-// ../core/src/signals/ti15.ts
-var MAX_PER_CHANGE = 10;
-var MAX_DETAIL6 = 300;
-var MIN_STRING_LENGTH = 6;
-var MIN_SIGNIFICANT_DIGITS = 4;
-var EXCLUDED_DIRS = /* @__PURE__ */ new Set(["examples", "benchmarks", "bench", "docs", "fixtures"]);
-function inExcludedDir(path) {
-  const segments = path.split("/");
-  for (let i = 0; i < segments.length - 1; i++) if (EXCLUDED_DIRS.has(segments[i])) return true;
-  return false;
-}
-var MANIFEST_NAMES = /* @__PURE__ */ new Set(["package.json", "pyproject.toml"]);
-function manifestDirs(diff, repoFiles) {
-  const dirs = /* @__PURE__ */ new Set();
-  const note = (path) => {
-    const slash = path.lastIndexOf("/");
-    if (MANIFEST_NAMES.has(path.slice(slash + 1))) dirs.add(slash === -1 ? "" : path.slice(0, slash));
-  };
-  for (const path of repoFiles) note(path);
-  for (const file of diff) if (file.status === "added") note(file.path);
-  return dirs;
-}
-function packageRoot(path, manifests) {
-  if (manifests.size === 0) {
-    const segments = path.split("/");
-    return segments.length >= 3 && (segments[0] === "packages" || segments[0] === "apps") ? `${segments[0]}/${segments[1]}` : "";
-  }
-  let slash = path.lastIndexOf("/");
-  while (slash > 0) {
-    const dir = path.slice(0, slash);
-    if (manifests.has(dir)) return dir;
-    slash = path.lastIndexOf("/", slash - 1);
-  }
-  return "";
-}
-var STOP_LIST = /* @__PURE__ */ new Set([
-  "string",
-  "number",
-  "boolean",
-  "object",
-  "function",
-  "symbol",
-  "bigint",
-  "true",
-  "false",
-  "null",
-  "none",
-  "undefined",
-  "test",
-  "error",
-  "default",
-  "get",
-  "post",
-  "put",
-  "patch",
-  "delete",
-  "head",
-  "options",
-  "utf-8",
-  "utf8"
-]);
-var isDigit5 = (c) => c >= "0" && c <= "9";
-var isWordChar = (c) => c >= "0" && c <= "9" || c >= "A" && c <= "Z" || c >= "a" && c <= "z" || c === "_";
-var isBlank6 = (c) => c === " " || c === "	";
-function digitsEnd2(text, start) {
-  let i = start;
-  while (i < text.length && isDigit5(text.charAt(i))) i++;
-  return i;
-}
-function scanLiterals(text) {
-  const found = [];
-  let i = 0;
-  while (i < text.length) {
-    const c = text.charAt(i);
-    if (c === "'" || c === '"' || c === "`") {
-      let j = i + 1;
-      let closed = false;
-      while (j < text.length) {
-        const d = text.charAt(j);
-        if (d === "\\") j += 2;
-        else if (d === c) {
-          closed = true;
-          break;
-        } else j++;
-      }
-      if (!closed) break;
-      const value = text.slice(i + 1, j);
-      if (!(c === "`" && value.includes("${"))) found.push({ kind: "string", value, start: i, end: j + 1 });
-      i = j + 1;
-    } else if (isDigit5(c)) {
-      let end = digitsEnd2(text, i);
-      if (text.charAt(end) === "." && isDigit5(text.charAt(end + 1))) end = digitsEnd2(text, end + 1);
-      const before = i === 0 ? "" : text.charAt(i - 1);
-      const after = text.charAt(end);
-      const clear = (n) => n === "" || !(isWordChar(n) || n === ".");
-      if (clear(before) && clear(after)) found.push({ kind: "number", value: text.slice(i, end), start: i, end });
-      i = end;
-    } else if (isWordChar(c)) {
-      let j = i + 1;
-      while (j < text.length && isWordChar(text.charAt(j))) j++;
-      i = j;
-    } else {
-      i++;
-    }
-  }
-  return found;
-}
-function significantDigits(value) {
-  const hasPoint = value.includes(".");
-  let digits = value.replace(".", "").replace(/^0+/, "");
-  if (!hasPoint) digits = digits.replace(/0+$/, "");
-  return digits.length;
-}
-function isEligible(literal2) {
-  if (literal2.kind === "number") return significantDigits(literal2.value) >= MIN_SIGNIFICANT_DIGITS;
-  return literal2.value.length >= MIN_STRING_LENGTH && !STOP_LIST.has(literal2.value.toLowerCase());
-}
-var keyOf3 = (literal2) => `${literal2.kind === "string" ? "s" : "n"}${literal2.value}`;
-var isOperatorChar = (c) => c === "=" || c === "!" || c === "<" || c === ">";
-function operatorBefore(text, at) {
-  let end = at;
-  while (end > 0 && isBlank6(text.charAt(end - 1))) end--;
-  let start = end;
-  while (start > 0 && isOperatorChar(text.charAt(start - 1))) start--;
-  return text.slice(start, end);
-}
-function operatorAfter(text, at) {
-  let start = at;
-  while (start < text.length && isBlank6(text.charAt(start))) start++;
-  let end = start;
-  while (end < text.length && isOperatorChar(text.charAt(end))) end++;
-  return text.slice(start, end);
-}
-var EQUALITY = /* @__PURE__ */ new Set(["===", "!==", "==", "!="]);
-function isCaseLabel(trimmed, offset, literal2) {
-  if (!trimmed.startsWith("case") || !isBlank6(trimmed.charAt(4))) return false;
-  let i = 4;
-  while (isBlank6(trimmed.charAt(i))) i++;
-  if (literal2.start - offset !== i) return false;
-  let j = literal2.end - offset;
-  while (isBlank6(trimmed.charAt(j))) j++;
-  return trimmed.charAt(j) === ":";
-}
-var CLOSERS3 = { "(": ")", "[": "]", "{": "}" };
-function inGroups(text, literals) {
-  const groups = [];
-  const strings2 = literals.filter((l) => l.kind === "string");
-  let next = 0;
-  let i = 0;
-  while (i < text.length) {
-    while (next < strings2.length && strings2[next].end <= i) next++;
-    const inside = strings2[next];
-    if (inside !== void 0 && i >= inside.start) {
-      i = inside.end;
-      continue;
-    }
-    if (!isWordChar(text.charAt(i))) {
-      i++;
-      continue;
-    }
-    let j = i + 1;
-    while (j < text.length && isWordChar(text.charAt(j))) j++;
-    if (text.slice(i, j) === "in") {
-      let k = j;
-      while (isBlank6(text.charAt(k))) k++;
-      const closer = CLOSERS3[text.charAt(k)];
-      if (closer !== void 0) {
-        const close = text.indexOf(closer, k + 1);
-        if (close !== -1) groups.push([k, close]);
-      }
-    }
-    i = j;
-  }
-  return groups;
-}
-function conditionLiterals(text, language) {
-  const literals = scanLiterals(text);
-  if (literals.length === 0) return [];
-  const trimmed = text.trimStart();
-  const offset = text.length - trimmed.length;
-  const forLoop = trimmed.startsWith("for ") || trimmed.startsWith("async for ");
-  const groups = language === "python" && !forLoop ? inGroups(text, literals) : [];
-  return literals.filter((literal2) => {
-    if (!isEligible(literal2)) return false;
-    if (EQUALITY.has(operatorBefore(text, literal2.start))) return true;
-    if (EQUALITY.has(operatorAfter(text, literal2.end))) return true;
-    if (isCaseLabel(trimmed, offset, literal2)) return true;
-    return groups.some(([open3, close]) => literal2.start > open3 && literal2.end <= close);
-  });
-}
-function testLiterals(diff, manifests) {
-  const found = /* @__PURE__ */ new Map();
-  for (const file of diff) {
-    if (file.hunks === void 0 || file.binary === true || file.status === "deleted") continue;
-    if (!isTestFile(file.path) || inExcludedDir(file.path)) continue;
-    const language = testLanguage(file.path);
-    if (language !== "jsts" && language !== "python") continue;
-    const root = packageRoot(file.path, manifests);
-    for (const hunk of file.hunks) {
-      for (const entry of hunk.added) {
-        for (const literal2 of scanLiterals(entry.text)) {
-          if (!isEligible(literal2)) continue;
-          const key = keyOf3(literal2);
-          const roots = found.get(key) ?? /* @__PURE__ */ new Map();
-          const first = roots.get(root);
-          if (first === void 0 || byCodeUnit(file.path, first) < 0) roots.set(root, file.path);
-          found.set(key, roots);
-        }
-      }
-    }
-  }
-  return found;
-}
-function detailOf3(literal2, sourcePath, line, testPath) {
-  const what = `a ${literal2.value.length}-character ${literal2.kind} literal`;
-  const tail = "so the code may special-case the test's input.";
-  const at = `The condition at "${escapeDetailText(`${sourcePath}:${line}`)}" compares with ${what}`;
-  const full = `${at} that the test file "${escapeDetailText(testPath)}" also adds, ${tail}`;
-  if (full.length <= MAX_DETAIL6) return full;
-  const noTest = `${at} that a test file in this change also adds, ${tail}`;
-  if (noTest.length <= MAX_DETAIL6) return noTest;
-  return `This condition compares with ${what} that a test file in this change also adds, ${tail}`;
-}
-function detectTI15(diff, options) {
-  const manifests = manifestDirs(diff, options.repoFiles);
-  const tests = testLiterals(diff, manifests);
-  if (tests.size === 0) return { signals: [], omitted: [] };
-  const findings = [];
-  for (const file of diff) {
-    if (file.hunks === void 0 || file.binary === true || file.status === "deleted") continue;
-    if (isTestFile(file.path) || inExcludedDir(file.path)) continue;
-    const language = coverageSourceLanguage(file.path);
-    if (language === null) continue;
-    const root = packageRoot(file.path, manifests);
-    const removed = /* @__PURE__ */ new Set();
-    for (const hunk of file.hunks) {
-      for (const entry of hunk.removed) for (const literal2 of scanLiterals(entry.text)) removed.add(keyOf3(literal2));
-    }
-    for (const hunk of file.hunks) {
-      for (const entry of hunk.added) {
-        const seen = /* @__PURE__ */ new Set();
-        for (const literal2 of conditionLiterals(entry.text, language)) {
-          const key = keyOf3(literal2);
-          if (seen.has(key)) continue;
-          seen.add(key);
-          if (removed.has(key)) continue;
-          const testPath = tests.get(key)?.get(root);
-          if (testPath === void 0) continue;
-          findings.push({
-            path: file.path,
-            line: entry.line,
-            detail: detailOf3(literal2, file.path, entry.line, testPath)
-          });
-        }
-      }
-    }
-  }
-  findings.sort((a, b) => byCodeUnit(a.path, b.path) || a.line - b.line || byCodeUnit(a.detail, b.detail));
-  const signals = findings.slice(0, MAX_PER_CHANGE).map(({ path, line, detail }) => ({ id: "TI15", severity: "info", path, line, detail }));
-  const counts2 = /* @__PURE__ */ new Map();
-  for (const { path } of findings.slice(MAX_PER_CHANGE)) counts2.set(path, (counts2.get(path) ?? 0) + 1);
-  const omitted = [...counts2].map(([path, count2]) => ({ id: "TI15", path, count: count2 }));
-  return { signals, omitted };
-}
-
 // ../core/src/signals/ti16.ts
 var SLASH = "/";
 var STAR2 = "*";
@@ -43337,14 +42535,14 @@ var PYLINT_WORD = ["py", "lint:"].join("");
 var DISABLE_WORD = ["dis", "able"].join("");
 var PYRIGHT_WORD = ["py", "right:"].join("");
 var MAX_LINE2 = 400;
-var isBlank7 = (c) => c === " " || c === "	";
-var isWordChar2 = (c) => c >= "0" && c <= "9" || c >= "A" && c <= "Z" || c >= "a" && c <= "z" || c === "_";
-var isTokenChar = (c) => isWordChar2(c) || c === "@" || c === "-";
-var endsWord = (text, at) => at >= text.length || !isWordChar2(text.charAt(at));
+var isBlank6 = (c) => c === " " || c === "	";
+var isWordChar = (c) => c >= "0" && c <= "9" || c >= "A" && c <= "Z" || c >= "a" && c <= "z" || c === "_";
+var isTokenChar = (c) => isWordChar(c) || c === "@" || c === "-";
+var endsWord = (text, at) => at >= text.length || !isWordChar(text.charAt(at));
 var normalize2 = (text) => text.replace(/\s+/g, " ").trim();
 function skipBlanks4(text, from) {
   let i = from;
-  while (i < text.length && isBlank7(text.charAt(i))) i++;
+  while (i < text.length && isBlank6(text.charAt(i))) i++;
   return i;
 }
 function jsMarker(text) {
@@ -43372,14 +42570,14 @@ function startsPythonMarker(text, at) {
   }
   if (text.slice(at, at + NOQA_WORD.length).toLowerCase() === NOQA_WORD) {
     const next = at + NOQA_WORD.length;
-    return next >= text.length || text.charAt(next) === ":" || !isWordChar2(text.charAt(next));
+    return next >= text.length || text.charAt(next) === ":" || !isWordChar(text.charAt(next));
   }
   if (text.startsWith(PYLINT_WORD, at)) {
     const word = skipBlanks4(text, at + PYLINT_WORD.length);
     for (const name of [`${DISABLE_WORD}-next`, DISABLE_WORD]) {
       if (!text.startsWith(name, word)) continue;
       const next = word + name.length;
-      if (next >= text.length || text.charAt(next) === "=" || !isWordChar2(text.charAt(next))) return true;
+      if (next >= text.length || text.charAt(next) === "=" || !isWordChar(text.charAt(next))) return true;
     }
     return false;
   }
@@ -43442,17 +42640,17 @@ function detectTI16(diff) {
 
 // ../core/src/signals/alwaysTrue.ts
 var MAX_ALWAYS_TRUE_NAMES = 50;
-var isBlank8 = (c) => c === " " || c === "	";
-var isWordChar3 = (c) => c >= "0" && c <= "9" || c >= "A" && c <= "Z" || c >= "a" && c <= "z" || c === "_" || c === "$";
-var isWordStart = (c) => isWordChar3(c) && !(c >= "0" && c <= "9");
+var isBlank7 = (c) => c === " " || c === "	";
+var isWordChar2 = (c) => c >= "0" && c <= "9" || c >= "A" && c <= "Z" || c >= "a" && c <= "z" || c === "_" || c === "$";
+var isWordStart = (c) => isWordChar2(c) && !(c >= "0" && c <= "9");
 function skipBlanks5(text, from) {
   let i = from;
-  while (i < text.length && isBlank8(text.charAt(i))) i++;
+  while (i < text.length && isBlank7(text.charAt(i))) i++;
   return i;
 }
 function wordEnd2(text, from) {
   let i = from;
-  while (i < text.length && isWordChar3(text.charAt(i))) i++;
+  while (i < text.length && isWordChar2(text.charAt(i))) i++;
   return i;
 }
 function addedLinesOf(file) {
@@ -43484,7 +42682,7 @@ var EXTEND_CALL = ["expect", "extend("].join(".");
 function isTrueValue(text, at) {
   if (!text.startsWith("true", at)) return false;
   const after = at + 4;
-  if (after < text.length && isWordChar3(text.charAt(after))) return false;
+  if (after < text.length && isWordChar2(text.charAt(after))) return false;
   const next = skipBlanks5(text, after);
   if (next >= text.length) return true;
   const c = text.charAt(next);
@@ -43521,11 +42719,11 @@ function readLine(text, from, state, found) {
       i++;
       continue;
     }
-    if (isBlank8(c)) {
+    if (isBlank7(c)) {
       i++;
       continue;
     }
-    if (isWordChar3(c)) {
+    if (isWordChar2(c)) {
       const end = wordEnd2(text, i);
       const word = text.slice(i, end);
       const afterDot = i > 0 && text.charAt(i - 1) === ".";
@@ -43693,7 +42891,7 @@ function hasWord(text, word) {
   for (let i = text.indexOf(word); i !== -1; i = text.indexOf(word, i + 1)) {
     const before = i === 0 ? "" : text.charAt(i - 1);
     const after = text.charAt(i + word.length);
-    if ((before === "" || !isWordChar3(before)) && (after === "" || !isWordChar3(after))) return true;
+    if ((before === "" || !isWordChar2(before)) && (after === "" || !isWordChar2(after))) return true;
   }
   return false;
 }
@@ -43701,12 +42899,12 @@ function afterKeyword(text, word) {
   const start = skipBlanks5(text, 0);
   if (!text.startsWith(word, start)) return -1;
   const end = start + word.length;
-  if (end < text.length && isWordChar3(text.charAt(end))) return -1;
+  if (end < text.length && isWordChar2(text.charAt(end))) return -1;
   return end;
 }
 function defName(text) {
   const end = afterKeyword(text, "def");
-  if (end === -1 || end >= text.length || !isBlank8(text.charAt(end))) return null;
+  if (end === -1 || end >= text.length || !isBlank7(text.charAt(end))) return null;
   const start = skipBlanks5(text, end);
   const nameEnd = wordEnd2(text, start);
   if (nameEnd === start || !isWordStart(text.charAt(start))) return null;
@@ -43781,7 +42979,7 @@ function alwaysTrueHelperLines(file) {
   for (const entry of lines) {
     const text = entry.text;
     const assertEnd = afterKeyword(text, "assert");
-    if (assertEnd !== -1 && assertEnd < text.length && isBlank8(text.charAt(assertEnd))) {
+    if (assertEnd !== -1 && assertEnd < text.length && isBlank7(text.charAt(assertEnd))) {
       const closed2 = helperCall(text, assertEnd, helpers);
       if (closed2 !== -1 && endsCondition(text.slice(closed2))) out.push(entry.line);
       continue;
@@ -43888,7 +43086,7 @@ function secondArgument(text, open3) {
 }
 function pyEquality(text) {
   const start = skipBlanks5(text, 0);
-  if (text.startsWith("assert", start) && isBlank8(text.charAt(start + 6))) {
+  if (text.startsWith("assert", start) && isBlank7(text.charAt(start + 6))) {
     const equals = topLevelEquals(text, start + 6);
     if (equals === -1) return null;
     return { wildcard: PY_WILDCARDS.has(operandFrom(text, equals + 2, false)) };
@@ -44002,15 +43200,15 @@ function check(input) {
   const testPaths = parsedDiff === null ? [] : deletedTestFiles(parsedDiff);
   const testIntegrity2 = resolveTestIntegrityMode(input.testIntegrityMode);
   const touched = parsedDiff !== null && testIntegrity2.mode !== "off" && input.testSources !== void 0 ? indexTouchedTestFiles(parsedDiff, input.testSources, input.pythonTestIndex) : null;
-  const movedTests = touched === null || parsedDiff === null || input.testSources === void 0 ? void 0 : movedTestFiles(parsedDiff, input.testSources, input.pythonTestIndex, touched);
-  const sourceMatches = parsedDiff === null || testIntegrity2.mode === "off" ? { signals: [], omitted: [] } : detectTI15(parsedDiff, { repoFiles: input.repoFiles });
+  const deletedFiles = touched === null || touched.notRun !== null || parsedDiff === null || input.testSources === void 0 ? void 0 : indexDeletedTestFiles(parsedDiff, input.testSources, input.pythonTestIndex);
+  const match = touched === null || touched.notRun !== null ? void 0 : matchTests(touched, deletedFiles);
   const testIntegritySignals = parsedDiff === null || testIntegrity2.mode === "off" ? [] : sortSignals2([
     ...detectTI01(
       parsedDiff,
       testIntegrity2.mode,
-      movedTests?.files,
-      movedTests?.compared,
-      movedTests?.unparsed,
+      match?.movedFiles.moved,
+      match?.movedFiles.compared,
+      deletedFiles?.unparsed,
       input.repoFiles
     ),
     ...detectTI04(parsedDiff, testIntegrity2.mode),
@@ -44028,7 +43226,6 @@ function check(input) {
       exclude: [...input.exclude ?? [], ...input.headConfigExclude ?? []],
       mode: testIntegrity2.mode
     }),
-    ...sourceMatches.signals,
     ...detectTI16(parsedDiff),
     ...detectTI17(parsedDiff)
   ]);
@@ -44048,16 +43245,15 @@ function check(input) {
         unavailable: { notRun: touched.notRun },
         configUnavailable
       };
-    } else {
-      const match = matchTests(touched);
+    } else if (match !== void 0) {
       testChanges = summarizeTestChanges(touched, match) ?? void 0;
       const matchedHeads = new Set([...match.pairs, ...match.moved, ...match.replaced].map((pair) => pair.head));
-      const movedPairs = (movedTests?.pairs ?? []).filter((pair) => !matchedHeads.has(pair.head));
+      const movedPairs = match.movedFiles.pairs.filter((pair) => !matchedHeads.has(pair.head));
       const judged = movedPairs.length === 0 ? match : { ...match, pairs: [...match.pairs, ...movedPairs] };
       ti03Pairs = detectTI03Pairs({
         match: judged,
         touched,
-        ...movedTests?.groups === void 0 ? {} : { movedGroups: movedTests.groups },
+        ...deletedFiles === void 0 ? {} : { movedGroups: new Map(deletedFiles.files.map((file) => [file.path, file.groups])) },
         diff: parsedDiff,
         sources: input.testSources
       });
@@ -44095,23 +43291,7 @@ function check(input) {
   const textTruncatedFiles = parsedDiff === null || testIntegrity2.mode === "off" ? [] : textCutSignalFiles(parsedDiff, input.configPath, input.repoRoot);
   const textTruncatedTestFiles = parsedDiff === null || testIntegrity2.mode === "off" ? [] : textCutModifiedTestFiles(parsedDiff);
   const coverageInput = input.coverage;
-  let files;
-  let selection;
-  if ("files" in coverageInput) {
-    files = coverageInput.files;
-    selection = coverageInput.format;
-  } else if ("missingFile" in coverageInput) {
-    files = [coverageInput];
-    selection = "auto";
-  } else if ("kind" in coverageInput) {
-    files = [];
-    selection = "auto";
-  } else {
-    files = [
-      coverageInput.file === void 0 ? { text: coverageInput.text } : { text: coverageInput.text, file: coverageInput.file }
-    ];
-    selection = coverageInput.format;
-  }
+  const files = "files" in coverageInput ? coverageInput.files : "missingFile" in coverageInput ? [coverageInput] : [];
   let trackedCoverage = null;
   let trackedCoverageChanged = false;
   for (const file of files) {
@@ -44127,7 +43307,7 @@ function check(input) {
   }
   const bytes = input.repoFileBytes;
   const emptyAgentSetupFiles = bytes === void 0 ? [] : agentSetup.files.filter((file) => bytes.get(file.path) === 0).map((file) => file.path);
-  const omittedBeforePolicy = [...comparison?.omitted ?? [], ...sourceMatches.omitted];
+  const omittedBeforePolicy = [...comparison?.omitted ?? []];
   const overridden = input.signalOverrides === void 0 || testIntegrity2.mode === "off" ? void 0 : applySignalOverrides(testIntegritySignals, omittedBeforePolicy, input.signalOverrides, testIntegrity2.mode);
   const finalSignals = overridden?.signals ?? testIntegritySignals;
   const omittedSignals = overridden?.omitted ?? omittedBeforePolicy;
@@ -44160,16 +43340,18 @@ function check(input) {
     ...input.policyIgnored ?? [],
     ...injectionSettings.ignored,
     ...(overridden?.lowered ?? []).map(
-      (id) => ({ setting: `test_integrity.signals.${id}`, layer: "policy-file", reason: "looser" })
+      (id) => ({ setting: `test_integrity.signals.${id}`, reason: "looser" })
     ),
     ...(policyEvaluation?.lowered ?? []).map(
-      (id) => ({ setting: `policy.rules.${id}`, layer: "policy-file", reason: "looser" })
+      (id) => ({ setting: `policy.rules.${id}`, reason: "looser" })
     ),
     ...policyEvaluation?.ignored ?? []
   ];
   const incompleteMessage = agentFacts?.pr !== null && agentFacts?.pr !== void 0 && detection?.incomplete !== null && detection?.incomplete !== void 0 && agentPolicy !== void 0 && agentPolicy.severity !== null && agentPolicy.protectedPaths.length > 0 ? [agentPrIncompleteMessage(detection.incomplete)] : [];
   const policyMessages = [
     ...input.policy?.unavailable === void 0 ? [] : [policyUnavailableMessage(input.policy.unavailable)],
+    // Only an app policy can carry keys this build skipped: a file: policy with an unknown key never validates.
+    ...input.policy?.source === "app" && input.policy.unknownKeys !== void 0 && input.policy.unknownKeys.total > 0 ? [policyKeysUnknownMessage(input.policy.unknownKeys)] : [],
     ...policyEvaluation === null ? [] : policyRuleMessages(policyEvaluation),
     ...incompleteMessage,
     ...policyIgnored.length === 0 ? [] : [policyOverrideIgnoredMessage(policyIgnored)]
@@ -44178,8 +43360,8 @@ function check(input) {
   const noFilesViolation = p01.find((violation) => violation.detail === NO_SETUP_DETAIL);
   const expectedViolations = p01.filter((violation) => violation.detail !== NO_SETUP_DETAIL);
   const agentSetupLevels = {
-    ...noFilesViolation === void 0 ? {} : { noFiles: levelOf(noFilesViolation.severity) },
-    ...expectedViolations.length === 0 ? {} : { expectedMissing: levelOf(strongest(expectedViolations.map((violation) => violation.severity))) }
+    noFiles: noFilesViolation === void 0 ? void 0 : levelOf(noFilesViolation.severity),
+    expectedMissing: expectedViolations.length === 0 ? void 0 : levelOf(strongest(expectedViolations.map((violation) => violation.severity)))
   };
   const reportedTools = agentSetupLevels.expectedMissing === void 0 ? expectedAgentTools : [.../* @__PURE__ */ new Set([...expectedAgentTools, ...input.policy?.document?.setup?.expect ?? []])];
   const policySource = input.policy?.source;
@@ -44216,41 +43398,41 @@ function check(input) {
   const testIndexUnavailable = parsedDiff === null || testIntegrity2.mode === "off" ? comparison?.unavailable : withBinaryTestFiles(comparison?.unavailable, binaryTouchedTestFiles(parsedDiff));
   const base = {
     version: input.version,
+    diffCoverage: null,
     threshold: input.threshold,
-    ...input.configPath === void 0 ? {} : { configRepoPath: configRepoPath(input.configPath, input.repoRoot) },
+    configRepoPath: input.configPath === void 0 ? void 0 : configRepoPath(input.configPath, input.repoRoot),
     agentSetup,
     requireAgentSetup: input.requireAgentSetup === true,
-    ...reportedTools.length > 0 ? { expectedAgentTools: reportedTools } : {},
-    ...Object.keys(agentSetupLevels).length > 0 ? { agentSetupLevels } : {},
-    ...reportPolicy === void 0 ? {} : { policy: reportPolicy },
-    ...configPaths.length > 0 ? { changedConfigPaths: configPaths } : {},
-    ...configPaths.length > 0 && input.configSource !== void 0 ? { configSource: input.configSource } : {},
-    ...testPaths.length > 0 ? { deletedTestFiles: testPaths } : {},
-    ...trackedCoverage === null ? {} : { trackedCoverageFile: trackedCoverage },
-    ...trackedCoverageChanged ? { trackedCoverageChanged: true } : {},
-    ...emptyAgentSetupFiles.length > 0 ? { emptyAgentSetupFiles } : {},
-    ...input.meta === void 0 ? {} : {
-      meta: detection === void 0 || agentFacts === void 0 ? input.meta : { ...input.meta, ...agentPrMetaFields(detection, agentFacts) }
-    },
+    expectedAgentTools: reportedTools,
+    agentSetupLevels,
+    policy: reportPolicy,
+    changedConfigPaths: configPaths,
+    // Only read when the change touches the config in use.
+    configSource: input.configSource,
+    deletedTestFiles: testPaths,
+    trackedCoverageFile: trackedCoverage ?? void 0,
+    trackedCoverageChanged,
+    emptyAgentSetupFiles,
+    meta: input.meta === void 0 || detection === void 0 || agentFacts === void 0 ? input.meta : { ...input.meta, ...agentPrMetaFields(detection, agentFacts) },
     testIntegrity: testIntegrity2,
-    ...finalSignals.length > 0 ? { testIntegritySignals: finalSignals } : {},
-    ...textTruncatedFiles.length > 0 ? { textTruncatedFiles } : {},
-    ...textTruncatedTestFiles.length > 0 ? { textTruncatedTestFiles } : {},
-    ...comparison === null || comparison.languages.length === 0 ? {} : { testIntegrityLanguages: comparison.languages },
-    ...omittedSignals.length === 0 ? {} : { omittedSignals },
-    ...testIndexUnavailable === void 0 ? {} : { testIndexUnavailable },
-    ...testChanges === void 0 ? {} : { testChanges },
-    ...testExercise === void 0 ? {} : { testExercise },
-    ...comparison?.configUnavailable === void 0 ? {} : { testConfigUnavailable: comparison.configUnavailable },
-    ...stale === null || stale.findings.length === 0 ? {} : { staleInstructions: stale.findings },
-    ...staleMessages.length === 0 ? {} : { staleInstructionMessages: staleMessages },
-    ...agentConfigMessages.length === 0 ? {} : { agentConfigSecretMessages: agentConfigMessages },
-    ...injectionMessageList.length === 0 ? {} : { injectionMessages: injectionMessageList },
-    ...injection2 === null || injection2.signals.length === 0 ? {} : { injectionSignals: injection2.signals },
-    ...dependencyResult === void 0 ? {} : { dependencies: dependencyResult },
-    ...policyMessages.length === 0 ? {} : { policyMessages },
-    ...junit?.flaky === void 0 ? {} : { flaky: junit.flaky },
-    ...junit === null || junit.messages.length === 0 ? {} : { flakyMessages: junit.messages }
+    testIntegritySignals: finalSignals,
+    textTruncatedFiles,
+    textTruncatedTestFiles,
+    testIntegrityLanguages: comparison?.languages,
+    omittedSignals,
+    testIndexUnavailable,
+    testChanges,
+    testExercise,
+    testConfigUnavailable: comparison?.configUnavailable,
+    staleInstructions: stale?.findings,
+    staleInstructionMessages: staleMessages,
+    agentConfigSecretMessages: agentConfigMessages,
+    injectionMessages: injectionMessageList,
+    injectionSignals: injection2?.signals,
+    dependencies: dependencyResult,
+    policyMessages,
+    flaky: junit?.flaky,
+    flakyMessages: junit?.messages
   };
   if ("unavailable" in input.diff) {
     return buildReport({
@@ -44278,36 +43460,24 @@ function check(input) {
   for (const file of files) {
     if ("missingFile" in file) continue;
     const coverageFile = file.file ?? null;
-    const choice = "parsed" in file ? { format: file.format } : chooseCoverageFormat(file.text, selection);
-    if (choice.format === "empty") {
+    const { format } = file;
+    if (format === "empty") {
       return buildReport({
         ...base,
         diffCoverage: null,
         missing: { reason: "coverage-file-empty", coverageFile }
       });
     }
-    if (choice.format === "unknown") {
+    if (format === "unknown") {
       return buildReport({
         ...base,
         diffCoverage: null,
         missing: { reason: "coverage-format-unsupported", coverageFile }
       });
     }
-    let parsed;
-    if ("parsed" in file) {
-      parsed = file.parsed;
-      const count2 = file.skipped;
-      if (count2 !== void 0 && Number.isSafeInteger(count2) && count2 > 0) skippedLines += count2;
-    } else {
-      const counted2 = parseCoverageCounted(file.text, choice.format, {
-        ...input.repoRoot === void 0 ? {} : { repoRoot: input.repoRoot },
-        ...coverageRoot === void 0 ? {} : { coverageRoot },
-        literalBackslashes: true
-      });
-      parsed = counted2.map;
-      skippedLines += counted2.skipped;
-    }
-    parsed = resolveBackslashPaths(parsed, tracked, choice.format === "lcov" ? (a, b) => a + b : Math.max);
+    const count2 = file.skipped;
+    if (count2 !== void 0 && Number.isSafeInteger(count2) && count2 > 0) skippedLines += count2;
+    const parsed = resolveBackslashPaths(file.parsed, tracked, format === "lcov" ? (a, b) => a + b : Math.max);
     if (parsed.size === 0) {
       return buildReport({
         ...base,
@@ -44315,7 +43485,7 @@ function check(input) {
         missing: { reason: "coverage-file-empty", coverageFile }
       });
     }
-    formats.add(choice.format);
+    formats.add(format);
     maps.push(parsed);
   }
   if (maps.length === 0) {
@@ -44332,30 +43502,477 @@ function check(input) {
   const binaryPaths = binaryCoveredPaths(diff, coverage2);
   let untrackedCoveragePaths = 0;
   if (input.repoFiles.length > 0) {
-    const match = matchCoveragePaths(coverage2, input.repoFiles, coverageRoot);
-    if (match.unmatched.length === match.total) {
+    const match2 = matchCoveragePaths(coverage2, input.repoFiles, coverageRoot);
+    if (match2.unmatched.length === match2.total) {
       return buildReport({
         ...base,
         diffCoverage: null,
         missing: {
           reason: "coverage-paths-unmatched",
-          total: match.total,
-          example: match.unmatched[0] ?? "",
-          suggestedRoot: match.suggestedRoot
+          total: match2.total,
+          example: match2.unmatched[0] ?? "",
+          suggestedRoot: match2.suggestedRoot
         },
-        ...binaryPaths.length > 0 ? { binaryCoveredPaths: binaryPaths } : {}
+        binaryCoveredPaths: binaryPaths
       });
     }
-    untrackedCoveragePaths = match.unmatched.length;
+    untrackedCoveragePaths = match2.unmatched.length;
   }
   return buildReport({
     ...base,
-    ...coverageFormat === void 0 ? {} : { coverageFormat },
+    coverageFormat,
     diffCoverage: computeDiffCoverage(diff, coverage2, input.threshold, isExcluded),
-    ...untrackedCoveragePaths > 0 ? { untrackedCoveragePaths } : {},
-    ...skippedLines > 0 ? { skippedCoverageLines: skippedLines } : {},
-    ...binaryPaths.length > 0 ? { binaryCoveredPaths: binaryPaths } : {}
+    untrackedCoveragePaths,
+    skippedCoverageLines: skippedLines,
+    binaryCoveredPaths: binaryPaths
   });
+}
+
+// ../core/src/coverage/xml.ts
+var NO_ATTRS = /* @__PURE__ */ new Map();
+var ENTITY_WINDOW = 10;
+var NAMED_ENTITIES = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'" };
+function isSpace4(char) {
+  return char === " " || char === "	" || char === "\n" || char === "\r";
+}
+function isQuote2(char) {
+  return char === '"' || char === "'";
+}
+function decodeEntities(text) {
+  let amp = text.indexOf("&");
+  if (amp === -1) return text;
+  let out = "";
+  let from = 0;
+  while (amp !== -1) {
+    const decoded = decodeReference(text, amp);
+    if (decoded === void 0) {
+      amp = text.indexOf("&", amp + 1);
+      continue;
+    }
+    out += text.slice(from, amp) + decoded.value;
+    from = decoded.end;
+    amp = text.indexOf("&", from);
+  }
+  return out + text.slice(from);
+}
+function decodeReference(text, amp) {
+  const limit = Math.min(text.length, amp + 1 + ENTITY_WINDOW);
+  let semi = -1;
+  for (let i = amp + 1; i < limit; i++) {
+    if (text.charAt(i) === ";") {
+      semi = i;
+      break;
+    }
+  }
+  if (semi === -1) return void 0;
+  const body = text.slice(amp + 1, semi);
+  const named = Object.hasOwn(NAMED_ENTITIES, body) ? NAMED_ENTITIES[body] : void 0;
+  if (named !== void 0) return { value: named, end: semi + 1 };
+  if (body.charAt(0) !== "#") return void 0;
+  const hex = body.charAt(1) === "x";
+  const digits = body.slice(hex ? 2 : 1);
+  if (digits === "") return void 0;
+  let code2 = 0;
+  for (let i = 0; i < digits.length; i++) {
+    const digit = Number.parseInt(digits.charAt(i), hex ? 16 : 10);
+    if (Number.isNaN(digit)) return void 0;
+    code2 = code2 * (hex ? 16 : 10) + digit;
+  }
+  if (code2 < 1 || code2 > 1114111 || code2 >= 55296 && code2 <= 57343) return void 0;
+  return { value: String.fromCodePoint(code2), end: semi + 1 };
+}
+function parseTag(body) {
+  if (body.charAt(0) === "/") {
+    const name2 = readName(body, 1);
+    return name2 === "" ? void 0 : { type: "end", name: name2 };
+  }
+  let end = body.length;
+  while (end > 0 && isSpace4(body.charAt(end - 1))) end--;
+  const selfClosing = end > 0 && body.charAt(end - 1) === "/";
+  if (selfClosing) end--;
+  const name = readName(body, 0);
+  if (name === "") return void 0;
+  return { type: "start", name, attrs: parseAttributes(body, name.length, end), selfClosing };
+}
+function readName(body, from) {
+  let i = from;
+  while (i < body.length && !isSpace4(body.charAt(i)) && body.charAt(i) !== "/") i++;
+  return body.slice(from, i);
+}
+function parseAttributes(body, from, end) {
+  let attrs;
+  let i = from;
+  while (i < end) {
+    while (i < end && isSpace4(body.charAt(i))) i++;
+    const nameStart = i;
+    while (i < end && !isSpace4(body.charAt(i)) && body.charAt(i) !== "=") i++;
+    const name = body.slice(nameStart, i);
+    while (i < end && isSpace4(body.charAt(i))) i++;
+    if (body.charAt(i) !== "=" || i >= end) {
+      continue;
+    }
+    i++;
+    while (i < end && isSpace4(body.charAt(i))) i++;
+    const quote = body.charAt(i);
+    if (!isQuote2(quote) || i >= end) {
+      while (i < end && !isSpace4(body.charAt(i))) i++;
+      continue;
+    }
+    const close = body.indexOf(quote, i + 1);
+    if (close === -1 || close >= end) break;
+    if (name !== "") {
+      attrs ??= /* @__PURE__ */ new Map();
+      if (!attrs.has(name)) attrs.set(name, decodeEntities(body.slice(i + 1, close)));
+    }
+    i = close + 1;
+  }
+  return attrs ?? NO_ATTRS;
+}
+function findDeclarationEnd(text, from) {
+  let quote = "";
+  for (let i = from; i < text.length; i++) {
+    const char = text.charAt(i);
+    if (quote !== "") {
+      if (char === quote) quote = "";
+    } else if (isQuote2(char)) {
+      quote = char;
+    } else if (char === ">") {
+      return i;
+    }
+  }
+  return -1;
+}
+function findTagEnd(text, start) {
+  let quote = "";
+  for (let i = start + 1; i < text.length; i++) {
+    const char = text.charAt(i);
+    if (char === "<") return -i - 2;
+    if (quote !== "") {
+      if (char === quote) quote = "";
+    } else if (isQuote2(char)) {
+      quote = char;
+    } else if (char === ">") {
+      return i;
+    }
+  }
+  return -1;
+}
+function scanXml(text, onEvent, options = {}) {
+  const length = text.length;
+  let pos = text.charCodeAt(0) === 65279 ? 1 : 0;
+  while (pos < length) {
+    const lt = text.indexOf("<", pos);
+    const textEnd = lt === -1 ? length : lt;
+    if (textEnd > pos) onEvent({ type: "text", text: decodeEntities(text.slice(pos, textEnd)) });
+    if (lt === -1) return;
+    const next = text.charAt(lt + 1);
+    if (next === "<") {
+      pos = lt + 1;
+    } else if (next === "!" && text.startsWith("<!--", lt)) {
+      const close = text.indexOf("-->", lt + 4);
+      if (close === -1) return;
+      pos = close + 3;
+    } else if (next === "!" && text.startsWith("<![CDATA[", lt)) {
+      const close = text.indexOf("]]>", lt + 9);
+      if (close === -1) return;
+      if (options.cdataText === true && close > lt + 9) onEvent({ type: "text", text: text.slice(lt + 9, close) });
+      pos = close + 3;
+    } else if (next === "?") {
+      const close = text.indexOf("?>", lt + 2);
+      if (close === -1) return;
+      pos = close + 2;
+    } else if (next === "!") {
+      options.onDeclaration?.();
+      const close = findDeclarationEnd(text, lt + 2);
+      if (close === -1) return;
+      pos = close + 1;
+    } else {
+      const close = findTagEnd(text, lt);
+      if (close === -1) return;
+      if (close < -1) {
+        pos = -close - 2;
+        continue;
+      }
+      const event = parseTag(text.slice(lt + 1, close));
+      if (event !== void 0) onEvent(event);
+      pos = close + 1;
+    }
+  }
+}
+
+// ../core/src/coverage/detect.ts
+var DETECTION_WINDOW = 1024;
+var DETECTION_PREFIX = 1 + DETECTION_WINDOW + 1;
+function isSpace5(char) {
+  return char === " " || char === "	" || char === "\n" || char === "\r";
+}
+function detectCoverageFormat(text) {
+  const start = text.charCodeAt(0) === 65279 ? 1 : 0;
+  const end = start + DETECTION_WINDOW;
+  const window = text.slice(start, end);
+  let first = 0;
+  while (first < window.length && isSpace5(window.charAt(first))) first++;
+  if (first === window.length) return end >= text.length ? "empty" : "unknown";
+  if (window.startsWith("TN:", first) || window.startsWith("SF:", first)) return "lcov";
+  if (window.charAt(first) !== "<") return "unknown";
+  return detectXml(window.slice(first));
+}
+function detectXml(window) {
+  let decided;
+  let seenRoot = false;
+  scanXml(window, (event) => {
+    if (decided !== void 0) return;
+    if (!seenRoot) {
+      if (event.type === "text") {
+        if (event.text.trim() !== "") decided = "unknown";
+      } else if (event.type === "end") {
+        decided = "unknown";
+      } else if (event.name !== "coverage" || event.attrs.has("clover")) {
+        decided = "unknown";
+      } else if (event.selfClosing) {
+        decided = "cobertura";
+      } else {
+        seenRoot = true;
+      }
+      return;
+    }
+    if (event.type === "text") return;
+    decided = event.type === "start" && event.name === "project" ? "unknown" : "cobertura";
+  });
+  if (decided !== void 0) return decided;
+  return seenRoot ? "cobertura" : "unknown";
+}
+function chooseCoverageFormat(text, selection) {
+  if (selection === "auto") return { format: detectCoverageFormat(text), how: "auto-detected" };
+  return { format: selection, how: "configured" };
+}
+function coverageChoiceLine(choice, file) {
+  const prefix = file === void 0 ? "coverage: " : `coverage: ${file}: `;
+  return `${prefix}${choice.format} (${choice.how})`;
+}
+
+// ../core/src/coverage/cobertura.ts
+function parseCoberturaCounted(text, options = {}) {
+  const sources = [];
+  let skipped = 0;
+  const perFile = /* @__PURE__ */ new Map();
+  let inSources = false;
+  let sourceText2;
+  let currentFile;
+  let methodDepth = 0;
+  scanXml(text, (event) => {
+    if (event.type === "text") {
+      if (sourceText2 !== void 0) sourceText2 += event.text;
+      return;
+    }
+    if (event.type === "end") {
+      switch (event.name) {
+        case "sources":
+          inSources = false;
+          sourceText2 = void 0;
+          break;
+        case "source": {
+          const source = sourceText2?.trim();
+          if (source) sources.push(source);
+          sourceText2 = void 0;
+          break;
+        }
+        case "class":
+          currentFile = void 0;
+          methodDepth = 0;
+          break;
+        case "methods":
+        case "method":
+          if (methodDepth > 0) methodDepth--;
+          break;
+      }
+      return;
+    }
+    switch (event.name) {
+      case "sources":
+        inSources = !event.selfClosing;
+        break;
+      case "source":
+        if (inSources && !event.selfClosing) sourceText2 = "";
+        break;
+      case "class": {
+        const filename = event.selfClosing ? "" : (event.attrs.get("filename") ?? "").trim();
+        currentFile = filename === "" ? void 0 : filename;
+        methodDepth = 0;
+        break;
+      }
+      case "methods":
+      case "method":
+        if (currentFile !== void 0 && !event.selfClosing) methodDepth++;
+        break;
+      case "line":
+        if (currentFile !== void 0 && methodDepth === 0) {
+          if (!addLine(perFile, currentFile, event.attrs.get("number"), event.attrs.get("hits"))) skipped++;
+        }
+        break;
+    }
+  });
+  const resolve2 = makeResolver([...new Set(sources)], options.repoRoot, options.coverageRoot);
+  const map = /* @__PURE__ */ new Map();
+  for (const [filename, lines] of perFile) {
+    const separated = resolve2(filename);
+    const key = options.literalBackslashes === true ? literalBackslashKey(filename, separated, resolve2) : separated;
+    let target = map.get(key);
+    if (!target) {
+      target = /* @__PURE__ */ new Map();
+      map.set(key, target);
+    }
+    for (const [lineNo, hits] of lines) {
+      target.set(lineNo, Math.max(target.get(lineNo) ?? 0, hits));
+    }
+  }
+  return { map, skipped };
+}
+function addLine(perFile, filename, number, hits) {
+  if (number === void 0) return false;
+  const lineNo = Number(number);
+  if (!Number.isInteger(lineNo) || lineNo < 1) return false;
+  let count2 = 0;
+  if (hits !== void 0) {
+    if (hits.trim() === "") return false;
+    count2 = Number(hits);
+    if (!Number.isFinite(count2) || count2 < 0) return false;
+  }
+  let lines = perFile.get(filename);
+  if (!lines) {
+    lines = /* @__PURE__ */ new Map();
+    perFile.set(filename, lines);
+  }
+  lines.set(lineNo, Math.max(lines.get(lineNo) ?? 0, count2));
+  return true;
+}
+var MAX_CLIMBING_JOIN_SOURCES = 16;
+function makeResolver(sources, repoRoot, coverageRoot) {
+  const direct = directSources(sources, repoRoot);
+  const climbing = sources.slice(0, MAX_CLIMBING_JOIN_SOURCES);
+  return (filename) => {
+    if (isAbsolutePath(filename)) return normalizePath(filename, repoRoot);
+    return resolvePath(filename, climbs(normalizePath(filename)) ? climbing : direct, repoRoot, coverageRoot);
+  };
+}
+function directSources(sources, repoRoot) {
+  const root = normalizeRoot(repoRoot);
+  const foldedRoot = foldForRoot(root, root);
+  const kept = [];
+  const seen = /* @__PURE__ */ new Set();
+  const keep = (source, key) => {
+    if (seen.has(key)) return;
+    seen.add(key);
+    kept.push(source);
+  };
+  for (const source of sources) {
+    const path = normalizePath(source);
+    if (!isAbsolutePath(source)) {
+      if (climbs(path)) continue;
+      if (path !== "") {
+        kept.push(source);
+        break;
+      }
+      keep(source, "relative:");
+      continue;
+    }
+    if (root === "") continue;
+    if (startsWithPath(path, root)) {
+      const rest = path.slice(root.length + 1);
+      if (rest !== "" && !isAbsolutePath(`${rest}/`)) {
+        kept.push(source);
+        break;
+      }
+      if (rest.length < 3) keep(source, `under:${rest}`);
+    } else if (path.length === root.length) {
+      if (startsWithPath(`${path}/`, root)) keep(source, "root:");
+    } else if (path.length < root.length) {
+      const folded = foldForRoot(path, root);
+      if (foldedRoot.startsWith(path.endsWith("/") ? folded : `${folded}/`)) {
+        keep(source, `ancestor:${path.length}:${folded}`);
+      }
+    }
+  }
+  return kept;
+}
+function resolvePath(filename, sources, repoRoot, coverageRoot) {
+  for (const source of sources) {
+    const joined = `${source}/${filename}`;
+    if (isAbsolutePath(source)) {
+      if (repoRoot === void 0) continue;
+      const key2 = normalizePath(joined, repoRoot);
+      if (!isAbsolutePath(key2) && !climbs(key2)) return key2;
+    } else {
+      const key2 = normalizePath(joined);
+      if (key2 !== "" && !climbs(key2)) return joinCoverageRoot(key2, coverageRoot);
+    }
+  }
+  const key = normalizePath(filename, repoRoot);
+  return isAbsolutePath(key) ? key : joinCoverageRoot(key, coverageRoot);
+}
+function climbs(path) {
+  return path === ".." || path.startsWith("../");
+}
+
+// ../core/src/coverage/lcov.ts
+function createLcovReader(options = {}) {
+  const map = /* @__PURE__ */ new Map();
+  let current;
+  let skipped = 0;
+  const resolve2 = (raw) => options.coverageRoot !== void 0 && !isAbsolutePath(raw.trim()) ? normalizePath(joinCoverageRoot(raw, options.coverageRoot), options.repoRoot) : normalizePath(raw, options.repoRoot);
+  return {
+    push(raw) {
+      const line = raw.trim();
+      if (line.startsWith("SF:")) {
+        const raw2 = line.slice(3);
+        const separated = resolve2(raw2);
+        const path = options.literalBackslashes === true ? literalBackslashKey(raw2, separated, resolve2) : separated;
+        current = map.get(path);
+        if (!current) {
+          current = /* @__PURE__ */ new Map();
+          map.set(path, current);
+        }
+      } else if (line.startsWith("DA:")) {
+        if (!current) {
+          skipped++;
+          return;
+        }
+        const [lineNo, hits] = line.slice(3).split(",");
+        const n = Number(lineNo);
+        const h = Number(hits);
+        if (!Number.isInteger(n) || n < 1 || !Number.isFinite(h) || h < 0) {
+          skipped++;
+          return;
+        }
+        current.set(n, (current.get(n) ?? 0) + h);
+      } else if (line === "end_of_record") {
+        current = void 0;
+      }
+    },
+    skipped() {
+      return skipped;
+    },
+    finish() {
+      for (const [path, hits] of map) {
+        if (hits.size === 0) map.delete(path);
+      }
+      return map;
+    }
+  };
+}
+
+// ../core/src/coverage/index.ts
+function parseCoverageCounted(text, format, options = {}) {
+  switch (format) {
+    case "lcov": {
+      const reader = createLcovReader(options);
+      for (const line of text.split(/\r?\n/)) reader.push(line);
+      const map = reader.finish();
+      return { map, skipped: reader.skipped() };
+    }
+    case "cobertura":
+      return parseCoberturaCounted(text, options);
+  }
 }
 
 // ../core/src/lines.ts
@@ -44624,160 +44241,6 @@ function weeklyDownloads(answer) {
   return typeof count2 === "number" && Number.isSafeInteger(count2) && count2 >= 0 ? count2 : "unavailable";
 }
 
-// ../core/src/policy/limits.ts
-var POLICY_MAX_CHARS = 262144;
-var POLICY_MAX_ERRORS = 50;
-var POLICY_MAX_LIST_ITEMS = 1e3;
-var POLICY_MAX_GLOB = 512;
-var POLICY_MAX_ROOT = 512;
-var POLICY_MAX_PERM = 512;
-var POLICY_MAX_NAME = 128;
-var POLICY_MAX_NAME_OR_GLOB = 512;
-var POLICY_MAX_LABEL = 50;
-var POLICY_MAX_LOGIN = 44;
-var POLICY_MAX_EVENT = 64;
-var POLICY_MAX_MATCHER = 512;
-var POLICY_MAX_HOST = 253;
-var POLICY_MAX_ALLOWED_HOSTS = 50;
-var POLICY_THRESHOLD_MIN = 0;
-var POLICY_THRESHOLD_MAX = 100;
-var POLICY_MAX_FILES_MIN = 1;
-var POLICY_MAX_FILES_MAX = 1e5;
-var POLICY_MAX_CHANGED_LINES_MIN = 1;
-var POLICY_MAX_CHANGED_LINES_MAX = 1e7;
-var POLICY_MIN_AGE_DAYS_MIN = 0;
-var POLICY_MIN_AGE_DAYS_MAX = 3650;
-var POLICY_MIN_WEEKLY_DOWNLOADS_MIN = 0;
-var POLICY_MIN_WEEKLY_DOWNLOADS_MAX = 1e9;
-var POLICY_SEVERITIES = ["block", "warn", "info", "off"];
-var POLICY_SIGNAL_IDS = [
-  "TI01",
-  "TI02",
-  "TI03",
-  "TI04",
-  "TI05",
-  "TI06",
-  "TI07",
-  "TI08",
-  "TI09",
-  "TI10",
-  "TI11",
-  "TI12",
-  "TI13",
-  "TI14",
-  "TI15",
-  "TI16",
-  "TI17"
-];
-var POLICY_RULE_IDS = [
-  "P01",
-  "P02",
-  "P03",
-  "P04",
-  "P05",
-  "P06",
-  "P07",
-  "P08",
-  "P09",
-  "P10",
-  "P11",
-  "P12",
-  "P13",
-  "P14"
-];
-var POLICY_INJECTION_SIGNAL_IDS = [
-  "PI01",
-  "PI02",
-  "PI03",
-  "PI04",
-  "PI05"
-];
-var POLICY_REGISTRIES = ["npm", "pypi"];
-var POLICY_PROTECTED_PATHS_MODES = ["block", "warn"];
-
-// ../core/src/policy/errors.ts
-var MESSAGES = {
-  object: "must be an object",
-  required: "is required",
-  unknownKey: "is not a known key",
-  list: "must be a list",
-  tooManyItems: "must have at most 1000 items",
-  string: "must be a string",
-  empty: "must not be empty",
-  version: "must be 1",
-  number: "must be a number",
-  integer: "must be an integer",
-  boolean: "must be true or false",
-  stringOrNull: "must be a string or null",
-  plain: "must not contain a control character or start or end with white space",
-  glob: "is not a supported glob pattern",
-  root: "is not a repo-relative directory",
-  perm: "is not a permission rule such as Tool or Tool(pattern)",
-  login: "is not a GitHub login",
-  event: "must contain only the letters A-Z and a-z",
-  host: "is not a host name: use only the letters A-Z and a-z, digits, . and -, with no scheme, path, port, user name or wildcard",
-  textNotString: "policy text must be a string",
-  textNotJson: "policy text is not valid JSON"
-};
-function maxItemsMessage(max) {
-  return `must have at most ${String(max)} items`;
-}
-function maxCharsMessage(max) {
-  return `must be at most ${String(max)} characters`;
-}
-function rangeMessage(min, max) {
-  return `must be between ${String(min)} and ${String(max)}`;
-}
-function enumMessage(members) {
-  return `must be one of: ${members.join(", ")}`;
-}
-function textTooLongMessage(max) {
-  return `policy text must be at most ${String(max)} characters`;
-}
-var MAX_SEGMENT_CODE_POINTS = 64;
-function pointerSegment(key) {
-  let kept = "";
-  let count2 = 0;
-  let cut = false;
-  for (const ch of key) {
-    if (count2 === MAX_SEGMENT_CODE_POINTS) {
-      cut = true;
-      break;
-    }
-    const code2 = ch.charCodeAt(0);
-    kept += ch.length === 1 && (code2 <= 31 || code2 === 127) ? "?" : ch;
-    count2++;
-  }
-  if (cut) kept += "\u2026";
-  return kept.replace(/~/g, "~0").replace(/\//g, "~1");
-}
-var ErrorCollector = class {
-  stored = [];
-  count = 0;
-  /** The number of errors added so far. */
-  get total() {
-    return this.count;
-  }
-  add(path, message) {
-    this.count++;
-    if (this.stored.length < POLICY_MAX_ERRORS) this.stored.push({ path, message });
-  }
-  /** An unknown key under `parent`; the key's segment is built only when the error is kept. */
-  addUnknownKey(parent, key) {
-    this.count++;
-    if (this.stored.length < POLICY_MAX_ERRORS) {
-      this.stored.push({ path: `${parent}/${pointerSegment(key)}`, message: MESSAGES.unknownKey });
-    }
-  }
-  /** All errors when there are at most `POLICY_MAX_ERRORS`; else the first 49 and a line counting the rest. */
-  finish() {
-    if (this.count <= POLICY_MAX_ERRORS) return this.stored.slice();
-    const listed2 = this.stored.slice(0, POLICY_MAX_ERRORS - 1);
-    listed2.push({ path: "", message: `${String(this.count - (POLICY_MAX_ERRORS - 1))} more errors not listed` });
-    return listed2;
-  }
-};
-
 // ../core/src/policy/grammar.ts
 var POLICY_PATTERNS = {
   /** No control character; no leading or trailing white space (ECMAScript `\s`). */
@@ -44961,6 +44424,337 @@ function gitDiffArgs(base, head = "HEAD") {
   ];
 }
 
+// ../core/src/policy/validate.ts
+function known(entries) {
+  return new Map(entries);
+}
+function objectOf(keys, required = []) {
+  return (value, path, errors) => {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+      errors.add(path, MESSAGES.object);
+      return void 0;
+    }
+    const input = value;
+    for (const key of required) {
+      if (!Object.hasOwn(input, key)) errors.add(`${path}/${key}`, MESSAGES.required);
+    }
+    const out = {};
+    for (const key of Object.keys(input)) {
+      const handler2 = keys.get(key);
+      if (handler2 === void 0) {
+        errors.addUnknownKey(path, key);
+        continue;
+      }
+      const result = handler2(input[key], `${path}/${key}`, errors);
+      if (result !== void 0) out[key] = result;
+    }
+    return out;
+  };
+}
+function listOf3(item, max = POLICY_MAX_LIST_ITEMS) {
+  const tooMany = max === POLICY_MAX_LIST_ITEMS ? MESSAGES.tooManyItems : maxItemsMessage(max);
+  return (value, path, errors) => {
+    if (!Array.isArray(value)) {
+      errors.add(path, MESSAGES.list);
+      return void 0;
+    }
+    if (value.length > max) {
+      errors.add(path, tooMany);
+      return void 0;
+    }
+    const out = [];
+    for (let i = 0; i < value.length; i++) {
+      const result = item(value[i], `${path}/${String(i)}`, errors);
+      if (result !== void 0) out.push(result);
+    }
+    return out;
+  };
+}
+function enumOf(members) {
+  const message = enumMessage(members);
+  return (value, path, errors) => {
+    if (typeof value === "string" && members.includes(value)) return value;
+    errors.add(path, message);
+    return void 0;
+  };
+}
+function stringOf2(grammar) {
+  const tooLong = maxCharsMessage(grammar.max);
+  return (value, path, errors) => {
+    if (typeof value !== "string") {
+      errors.add(path, MESSAGES.string);
+      return void 0;
+    }
+    if (value === "") {
+      errors.add(path, MESSAGES.empty);
+      return void 0;
+    }
+    if (codePointLength(value, grammar.max) > grammar.max) {
+      errors.add(path, tooLong);
+      return void 0;
+    }
+    if (!grammar.regex.test(value)) {
+      errors.add(path, grammar.message);
+      return void 0;
+    }
+    return value;
+  };
+}
+var bool = (value, path, errors) => {
+  if (typeof value === "boolean") return value;
+  errors.add(path, MESSAGES.boolean);
+  return void 0;
+};
+function numberIn(min, max) {
+  const range = rangeMessage(min, max);
+  return (value, path, errors) => {
+    if (typeof value !== "number" || !Number.isFinite(value)) {
+      errors.add(path, MESSAGES.number);
+      return void 0;
+    }
+    if (value < min || value > max) {
+      errors.add(path, range);
+      return void 0;
+    }
+    return value;
+  };
+}
+function integerIn(min, max) {
+  const range = rangeMessage(min, max);
+  return (value, path, errors) => {
+    if (typeof value !== "number" || !Number.isInteger(value)) {
+      errors.add(path, MESSAGES.integer);
+      return void 0;
+    }
+    if (value < min || value > max) {
+      errors.add(path, range);
+      return void 0;
+    }
+    return value;
+  };
+}
+var version = (value, path, errors) => {
+  if (value === 1) return 1;
+  errors.add(path, MESSAGES.version);
+  return void 0;
+};
+var severity = enumOf(POLICY_SEVERITIES);
+var agentToolEnum = enumOf(AGENT_TOOLS);
+var agentTool = (value, path, errors) => {
+  if (errors.skipUnknown && typeof value === "string" && value !== "" && !AGENT_TOOLS.some((tool) => tool === value)) {
+    errors.addUnknownName(unknownItemName(path, value));
+    return void 0;
+  }
+  return agentToolEnum(value, path, errors);
+};
+var rootString = stringOf2(GRAMMARS.root);
+var rootOrNull = (value, path, errors) => {
+  if (value === null) return null;
+  if (typeof value !== "string") {
+    errors.add(path, MESSAGES.stringOrNull);
+    return void 0;
+  }
+  return rootString(value, path, errors);
+};
+var coverage = objectOf(
+  known([
+    ["threshold", numberIn(POLICY_THRESHOLD_MIN, POLICY_THRESHOLD_MAX)],
+    ["exclude", listOf3(stringOf2(GRAMMARS.glob))],
+    ["root", rootOrNull]
+  ])
+);
+var requiredHook = objectOf(
+  known([
+    ["event", stringOf2(GRAMMARS.event)],
+    ["matcher", stringOf2(GRAMMARS.matcher)]
+  ]),
+  ["event"]
+);
+var setup = objectOf(
+  known([
+    ["require", bool],
+    ["expect", listOf3(agentTool)],
+    ["consistency", severity],
+    ["forbidden_permissions", listOf3(stringOf2(GRAMMARS.perm))],
+    ["required_permissions_deny", listOf3(stringOf2(GRAMMARS.perm))],
+    ["allowed_mcp_servers", listOf3(stringOf2(GRAMMARS.name))],
+    ["forbidden_mcp_servers", listOf3(stringOf2(GRAMMARS.nameOrGlob))],
+    ["required_hooks", listOf3(requiredHook)],
+    ["forbidden_files", listOf3(stringOf2(GRAMMARS.glob))]
+  ])
+);
+var testIntegrity = objectOf(
+  known([
+    ["mode", enumOf(TEST_INTEGRITY_MODES)],
+    ["signals", objectOf(known(POLICY_SIGNAL_IDS.map((id) => [id, severity])))],
+    ["accept_label", stringOf2(GRAMMARS.label)]
+  ])
+);
+var flaky = objectOf(known([["quarantine", bool]]));
+var policySettings = objectOf(
+  known([
+    ["required", bool],
+    ["rules", objectOf(known(POLICY_RULE_IDS.map((id) => [id, severity])))]
+  ])
+);
+var agents = objectOf(
+  known([
+    ["labels", listOf3(stringOf2(GRAMMARS.label))],
+    ["extra_logins", listOf3(stringOf2(GRAMMARS.login))],
+    ["protected_paths", listOf3(stringOf2(GRAMMARS.glob))],
+    ["protected_paths_mode", enumOf(POLICY_PROTECTED_PATHS_MODES)],
+    ["require_human_approval", bool],
+    ["max_files", integerIn(POLICY_MAX_FILES_MIN, POLICY_MAX_FILES_MAX)],
+    ["max_changed_lines", integerIn(POLICY_MAX_CHANGED_LINES_MIN, POLICY_MAX_CHANGED_LINES_MAX)]
+  ])
+);
+var dependencies = objectOf(
+  known([
+    ["lookup", bool],
+    ["registries", listOf3(enumOf(POLICY_REGISTRIES))],
+    ["min_age_days", integerIn(POLICY_MIN_AGE_DAYS_MIN, POLICY_MIN_AGE_DAYS_MAX)],
+    ["min_weekly_downloads", integerIn(POLICY_MIN_WEEKLY_DOWNLOADS_MIN, POLICY_MIN_WEEKLY_DOWNLOADS_MAX)],
+    ["allowed_hosts", listOf3(stringOf2(GRAMMARS.host), POLICY_MAX_ALLOWED_HOSTS)]
+  ])
+);
+var injection = objectOf(
+  known([
+    ["exempt", listOf3(stringOf2(GRAMMARS.glob))],
+    ["phrases", listOf3(stringOf2(GRAMMARS.name))],
+    ["signals", objectOf(known(POLICY_INJECTION_SIGNAL_IDS.map((id) => [id, severity])))]
+  ])
+);
+var document = objectOf(
+  known([
+    ["version", version],
+    ["coverage", coverage],
+    ["setup", setup],
+    ["test_integrity", testIntegrity],
+    ["flaky", flaky],
+    ["policy", policySettings],
+    ["agents", agents],
+    ["dependencies", dependencies],
+    ["injection", injection]
+  ]),
+  ["version"]
+);
+function validatePolicy(value) {
+  const errors = new ErrorCollector();
+  const out = validatePolicyInto(value, errors);
+  if (errors.total === 0) return { ok: true, policy: out };
+  return { ok: false, errors: errors.finish() };
+}
+function validatePolicyInto(value, errors, root = "") {
+  return document(value, root, errors);
+}
+
+// ../core/src/policy/response.ts
+var RESPONSE_MAX_QUARANTINE_ITEMS = 1e4;
+var QUARANTINE_ITEM_MAX_UNITS = 1024;
+var MAX_ITEM_UNITS = QUARANTINE_ITEM_MAX_UNITS;
+var MESSAGE_MAX_BYTES_MIN = 256;
+var MESSAGE_MAX_BYTES_MAX = 65536;
+var UNREAD_KEYS = ["etag", "updatedAt"];
+var UNREAD_SETTINGS_KEYS = ["redactMessages"];
+var MESSAGE_TEXT = {
+  versionMin: "must be an integer of at least 1",
+  quarantineItem: "must not contain a control character",
+  quarantineTooMany: "must have at most 10000 items"
+};
+function hasControl(text) {
+  for (let i = 0; i < text.length; i++) {
+    const code2 = text.charCodeAt(i);
+    if (code2 <= 31 || code2 >= 127 && code2 <= 159 || code2 === 8232 || code2 === 8233) return true;
+  }
+  return false;
+}
+function validatePolicyResponse(value) {
+  const errors = new ErrorCollector(true);
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    errors.add("", MESSAGES.object);
+    return { ok: false, errors: errors.finish() };
+  }
+  const input = value;
+  const keys = ["version", "policy", "quarantine", "settings"];
+  for (const key of keys) {
+    if (!Object.hasOwn(input, key)) errors.add(`/${key}`, MESSAGES.required);
+  }
+  for (const key of Object.keys(input)) {
+    if (!keys.includes(key) && !UNREAD_KEYS.includes(key)) errors.addUnknownKey("", key);
+  }
+  let version2;
+  if (Object.hasOwn(input, "version")) {
+    const v = input.version;
+    if (typeof v !== "number") errors.add("/version", MESSAGES.number);
+    else if (!Number.isSafeInteger(v) || v < 1) errors.add("/version", MESSAGE_TEXT.versionMin);
+    else version2 = v;
+  }
+  let policy;
+  if (Object.hasOwn(input, "policy")) {
+    const before = errors.total;
+    const checked = validatePolicyInto(input.policy, errors, "/policy");
+    if (errors.total === before) policy = checked;
+  }
+  let quarantine;
+  if (Object.hasOwn(input, "quarantine")) {
+    const v = input.quarantine;
+    if (!Array.isArray(v)) errors.add("/quarantine", MESSAGES.list);
+    else if (v.length > RESPONSE_MAX_QUARANTINE_ITEMS) errors.add("/quarantine", MESSAGE_TEXT.quarantineTooMany);
+    else {
+      const items = [];
+      let good = true;
+      for (let i = 0; i < v.length; i++) {
+        const item = v[i];
+        const at = `/quarantine/${String(i)}`;
+        if (typeof item !== "string") errors.add(at, MESSAGES.string);
+        else if (item === "") errors.add(at, MESSAGES.empty);
+        else if (item.length > MAX_ITEM_UNITS) errors.add(at, maxCharsMessage(MAX_ITEM_UNITS));
+        else if (hasControl(item)) errors.add(at, MESSAGE_TEXT.quarantineItem);
+        else {
+          items.push(item);
+          continue;
+        }
+        good = false;
+      }
+      if (good) quarantine = items;
+    }
+  }
+  let settings2;
+  if (Object.hasOwn(input, "settings")) {
+    const v = input.settings;
+    if (typeof v !== "object" || v === null || Array.isArray(v)) errors.add("/settings", MESSAGES.object);
+    else {
+      const s = v;
+      const known2 = ["uploadJunit", "messageMaxBytes"];
+      for (const key of known2) {
+        if (!Object.hasOwn(s, key)) errors.add(`/settings/${key}`, MESSAGES.required);
+      }
+      for (const key of Object.keys(s)) {
+        if (!known2.includes(key) && !UNREAD_SETTINGS_KEYS.includes(key)) errors.addUnknownKey("/settings", key);
+      }
+      let uploadJunit;
+      let messageMaxBytes;
+      if (Object.hasOwn(s, "uploadJunit")) {
+        if (typeof s.uploadJunit === "boolean") uploadJunit = s.uploadJunit;
+        else errors.add("/settings/uploadJunit", MESSAGES.boolean);
+      }
+      if (Object.hasOwn(s, "messageMaxBytes")) {
+        const n = s.messageMaxBytes;
+        if (typeof n !== "number") errors.add("/settings/messageMaxBytes", MESSAGES.number);
+        else if (!Number.isInteger(n)) errors.add("/settings/messageMaxBytes", MESSAGES.integer);
+        else if (n < MESSAGE_MAX_BYTES_MIN || n > MESSAGE_MAX_BYTES_MAX) {
+          errors.add("/settings/messageMaxBytes", rangeMessage(MESSAGE_MAX_BYTES_MIN, MESSAGE_MAX_BYTES_MAX));
+        } else messageMaxBytes = n;
+      }
+      if (uploadJunit !== void 0 && messageMaxBytes !== void 0) settings2 = { uploadJunit, messageMaxBytes };
+    }
+  }
+  if (errors.total > 0 || version2 === void 0 || policy === void 0 || quarantine === void 0 || settings2 === void 0) {
+    return { ok: false, errors: errors.finish() };
+  }
+  return { ok: true, response: { version: version2, policy, quarantine, settings: settings2 }, unknown: errors.unknown() };
+}
+
 // ../core/src/junit/testId.ts
 var TEST_ID_MAX_UNITS = 500;
 var HASH_SUFFIX_UNITS = 9;
@@ -45132,367 +44926,6 @@ function parseJunitXml(text, maxCases) {
   return { ok: true, cases, dropped };
 }
 
-// ../core/src/policy/validate.ts
-function known(entries) {
-  return new Map(entries);
-}
-function objectOf(keys, required = []) {
-  return (value, path, errors) => {
-    if (typeof value !== "object" || value === null || Array.isArray(value)) {
-      errors.add(path, MESSAGES.object);
-      return void 0;
-    }
-    const input = value;
-    for (const key of required) {
-      if (!Object.hasOwn(input, key)) errors.add(`${path}/${key}`, MESSAGES.required);
-    }
-    const out = {};
-    for (const key of Object.keys(input)) {
-      const handler2 = keys.get(key);
-      if (handler2 === void 0) {
-        errors.addUnknownKey(path, key);
-        continue;
-      }
-      const result = handler2(input[key], `${path}/${key}`, errors);
-      if (result !== void 0) out[key] = result;
-    }
-    return out;
-  };
-}
-function listOf3(item, max = POLICY_MAX_LIST_ITEMS) {
-  const tooMany = max === POLICY_MAX_LIST_ITEMS ? MESSAGES.tooManyItems : maxItemsMessage(max);
-  return (value, path, errors) => {
-    if (!Array.isArray(value)) {
-      errors.add(path, MESSAGES.list);
-      return void 0;
-    }
-    if (value.length > max) {
-      errors.add(path, tooMany);
-      return void 0;
-    }
-    const out = [];
-    for (let i = 0; i < value.length; i++) {
-      const result = item(value[i], `${path}/${String(i)}`, errors);
-      if (result !== void 0) out.push(result);
-    }
-    return out;
-  };
-}
-function enumOf(members) {
-  const message = enumMessage(members);
-  return (value, path, errors) => {
-    if (typeof value === "string" && members.includes(value)) return value;
-    errors.add(path, message);
-    return void 0;
-  };
-}
-function stringOf2(grammar) {
-  const tooLong = maxCharsMessage(grammar.max);
-  return (value, path, errors) => {
-    if (typeof value !== "string") {
-      errors.add(path, MESSAGES.string);
-      return void 0;
-    }
-    if (value === "") {
-      errors.add(path, MESSAGES.empty);
-      return void 0;
-    }
-    if (codePointLength(value, grammar.max) > grammar.max) {
-      errors.add(path, tooLong);
-      return void 0;
-    }
-    if (!grammar.regex.test(value)) {
-      errors.add(path, grammar.message);
-      return void 0;
-    }
-    return value;
-  };
-}
-var bool = (value, path, errors) => {
-  if (typeof value === "boolean") return value;
-  errors.add(path, MESSAGES.boolean);
-  return void 0;
-};
-function numberIn(min, max) {
-  const range = rangeMessage(min, max);
-  return (value, path, errors) => {
-    if (typeof value !== "number" || !Number.isFinite(value)) {
-      errors.add(path, MESSAGES.number);
-      return void 0;
-    }
-    if (value < min || value > max) {
-      errors.add(path, range);
-      return void 0;
-    }
-    return value;
-  };
-}
-function integerIn(min, max) {
-  const range = rangeMessage(min, max);
-  return (value, path, errors) => {
-    if (typeof value !== "number" || !Number.isInteger(value)) {
-      errors.add(path, MESSAGES.integer);
-      return void 0;
-    }
-    if (value < min || value > max) {
-      errors.add(path, range);
-      return void 0;
-    }
-    return value;
-  };
-}
-var version = (value, path, errors) => {
-  if (value === 1) return 1;
-  errors.add(path, MESSAGES.version);
-  return void 0;
-};
-var severity = enumOf(POLICY_SEVERITIES);
-var rootString = stringOf2(GRAMMARS.root);
-var rootOrNull = (value, path, errors) => {
-  if (value === null) return null;
-  if (typeof value !== "string") {
-    errors.add(path, MESSAGES.stringOrNull);
-    return void 0;
-  }
-  return rootString(value, path, errors);
-};
-var coverage = objectOf(
-  known([
-    ["threshold", numberIn(POLICY_THRESHOLD_MIN, POLICY_THRESHOLD_MAX)],
-    ["exclude", listOf3(stringOf2(GRAMMARS.glob))],
-    ["root", rootOrNull]
-  ])
-);
-var requiredHook = objectOf(
-  known([
-    ["event", stringOf2(GRAMMARS.event)],
-    ["matcher", stringOf2(GRAMMARS.matcher)]
-  ]),
-  ["event"]
-);
-var setup = objectOf(
-  known([
-    ["require", bool],
-    ["expect", listOf3(enumOf(AGENT_TOOLS))],
-    ["consistency", severity],
-    ["forbidden_permissions", listOf3(stringOf2(GRAMMARS.perm))],
-    ["required_permissions_deny", listOf3(stringOf2(GRAMMARS.perm))],
-    ["allowed_mcp_servers", listOf3(stringOf2(GRAMMARS.name))],
-    ["forbidden_mcp_servers", listOf3(stringOf2(GRAMMARS.nameOrGlob))],
-    ["required_hooks", listOf3(requiredHook)],
-    ["forbidden_files", listOf3(stringOf2(GRAMMARS.glob))]
-  ])
-);
-var testIntegrity = objectOf(
-  known([
-    ["mode", enumOf(TEST_INTEGRITY_MODES)],
-    ["signals", objectOf(known(POLICY_SIGNAL_IDS.map((id) => [id, severity])))],
-    ["accept_label", stringOf2(GRAMMARS.label)]
-  ])
-);
-var flaky = objectOf(known([["quarantine", bool]]));
-var policySettings = objectOf(
-  known([
-    ["required", bool],
-    ["rules", objectOf(known(POLICY_RULE_IDS.map((id) => [id, severity])))]
-  ])
-);
-var agents = objectOf(
-  known([
-    ["labels", listOf3(stringOf2(GRAMMARS.label))],
-    ["extra_logins", listOf3(stringOf2(GRAMMARS.login))],
-    ["protected_paths", listOf3(stringOf2(GRAMMARS.glob))],
-    ["protected_paths_mode", enumOf(POLICY_PROTECTED_PATHS_MODES)],
-    ["require_human_approval", bool],
-    ["max_files", integerIn(POLICY_MAX_FILES_MIN, POLICY_MAX_FILES_MAX)],
-    ["max_changed_lines", integerIn(POLICY_MAX_CHANGED_LINES_MIN, POLICY_MAX_CHANGED_LINES_MAX)]
-  ])
-);
-var dependencies = objectOf(
-  known([
-    ["lookup", bool],
-    ["registries", listOf3(enumOf(POLICY_REGISTRIES))],
-    ["min_age_days", integerIn(POLICY_MIN_AGE_DAYS_MIN, POLICY_MIN_AGE_DAYS_MAX)],
-    ["min_weekly_downloads", integerIn(POLICY_MIN_WEEKLY_DOWNLOADS_MIN, POLICY_MIN_WEEKLY_DOWNLOADS_MAX)],
-    ["allowed_hosts", listOf3(stringOf2(GRAMMARS.host), POLICY_MAX_ALLOWED_HOSTS)]
-  ])
-);
-var injection = objectOf(
-  known([
-    ["exempt", listOf3(stringOf2(GRAMMARS.glob))],
-    ["phrases", listOf3(stringOf2(GRAMMARS.name))],
-    ["signals", objectOf(known(POLICY_INJECTION_SIGNAL_IDS.map((id) => [id, severity])))]
-  ])
-);
-var document = objectOf(
-  known([
-    ["version", version],
-    ["coverage", coverage],
-    ["setup", setup],
-    ["test_integrity", testIntegrity],
-    ["flaky", flaky],
-    ["policy", policySettings],
-    ["agents", agents],
-    ["dependencies", dependencies],
-    ["injection", injection]
-  ]),
-  ["version"]
-);
-function validatePolicy(value) {
-  const errors = new ErrorCollector();
-  const out = document(value, "", errors);
-  if (errors.total === 0) return { ok: true, policy: out };
-  return { ok: false, errors: errors.finish() };
-}
-
-// ../core/src/policy/response.ts
-var RESPONSE_MAX_QUARANTINE_ITEMS = 1e4;
-var QUARANTINE_ITEM_MAX_UNITS = 1024;
-var MAX_ITEM_UNITS = QUARANTINE_ITEM_MAX_UNITS;
-var MAX_ETAG_UNITS = 200;
-var MESSAGE_MAX_BYTES_MIN = 256;
-var MESSAGE_MAX_BYTES_MAX = 65536;
-var MESSAGE_TEXT = {
-  versionMin: "must be an integer of at least 1",
-  etag: "must be 1 to 200 printable ASCII characters",
-  updatedAt: "must be a UTC time such as 2026-01-31T09:30:00Z",
-  quarantineItem: "must not contain a control character",
-  quarantineTooMany: "must have at most 10000 items"
-};
-var UPDATED_AT = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,9})?Z$/;
-function validUpdatedAt(value) {
-  const m = UPDATED_AT.exec(value);
-  if (m === null) return false;
-  const [year, month, day, hour, minute, second] = m.slice(1, 7).map(Number);
-  if (month < 1 || month > 12 || hour > 23 || minute > 59 || second > 59) return false;
-  const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
-  const days = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1];
-  return day >= 1 && day <= days;
-}
-function hasControl(text) {
-  for (let i = 0; i < text.length; i++) {
-    const code2 = text.charCodeAt(i);
-    if (code2 <= 31 || code2 >= 127 && code2 <= 159 || code2 === 8232 || code2 === 8233) return true;
-  }
-  return false;
-}
-function isPrintableAscii(text) {
-  for (let i = 0; i < text.length; i++) {
-    const code2 = text.charCodeAt(i);
-    if (code2 < 32 || code2 > 126) return false;
-  }
-  return true;
-}
-function validatePolicyResponse(value) {
-  const errors = new ErrorCollector();
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    errors.add("", MESSAGES.object);
-    return { ok: false, errors: errors.finish() };
-  }
-  const input = value;
-  const keys = ["version", "etag", "updatedAt", "policy", "quarantine", "settings"];
-  for (const key of keys) {
-    if (!Object.hasOwn(input, key)) errors.add(`/${key}`, MESSAGES.required);
-  }
-  for (const key of Object.keys(input)) {
-    if (!keys.includes(key)) errors.addUnknownKey("", key);
-  }
-  let version2;
-  if (Object.hasOwn(input, "version")) {
-    const v = input.version;
-    if (typeof v !== "number") errors.add("/version", MESSAGES.number);
-    else if (!Number.isSafeInteger(v) || v < 1) errors.add("/version", MESSAGE_TEXT.versionMin);
-    else version2 = v;
-  }
-  let etag;
-  if (Object.hasOwn(input, "etag")) {
-    const v = input.etag;
-    if (typeof v !== "string") errors.add("/etag", MESSAGES.string);
-    else if (v === "") errors.add("/etag", MESSAGES.empty);
-    else if (v.length > MAX_ETAG_UNITS) errors.add("/etag", maxCharsMessage(MAX_ETAG_UNITS));
-    else if (!isPrintableAscii(v)) errors.add("/etag", MESSAGE_TEXT.etag);
-    else etag = v;
-  }
-  let updatedAt;
-  if (Object.hasOwn(input, "updatedAt")) {
-    const v = input.updatedAt;
-    if (typeof v !== "string") errors.add("/updatedAt", MESSAGES.string);
-    else if (!validUpdatedAt(v)) errors.add("/updatedAt", MESSAGE_TEXT.updatedAt);
-    else updatedAt = v;
-  }
-  let policy;
-  if (Object.hasOwn(input, "policy")) {
-    const checked = validatePolicy(input.policy);
-    if (checked.ok) policy = checked.policy;
-    else for (const e of checked.errors) errors.add(e.path === "" ? "/policy" : `/policy${e.path}`, e.message);
-  }
-  let quarantine;
-  if (Object.hasOwn(input, "quarantine")) {
-    const v = input.quarantine;
-    if (!Array.isArray(v)) errors.add("/quarantine", MESSAGES.list);
-    else if (v.length > RESPONSE_MAX_QUARANTINE_ITEMS) errors.add("/quarantine", MESSAGE_TEXT.quarantineTooMany);
-    else {
-      const items = [];
-      let good = true;
-      for (let i = 0; i < v.length; i++) {
-        const item = v[i];
-        const at = `/quarantine/${String(i)}`;
-        if (typeof item !== "string") errors.add(at, MESSAGES.string);
-        else if (item === "") errors.add(at, MESSAGES.empty);
-        else if (item.length > MAX_ITEM_UNITS) errors.add(at, maxCharsMessage(MAX_ITEM_UNITS));
-        else if (hasControl(item)) errors.add(at, MESSAGE_TEXT.quarantineItem);
-        else {
-          items.push(item);
-          continue;
-        }
-        good = false;
-      }
-      if (good) quarantine = items;
-    }
-  }
-  let settings2;
-  if (Object.hasOwn(input, "settings")) {
-    const v = input.settings;
-    if (typeof v !== "object" || v === null || Array.isArray(v)) errors.add("/settings", MESSAGES.object);
-    else {
-      const s = v;
-      const known2 = ["uploadJunit", "redactMessages", "messageMaxBytes"];
-      for (const key of known2) {
-        if (!Object.hasOwn(s, key)) errors.add(`/settings/${key}`, MESSAGES.required);
-      }
-      for (const key of Object.keys(s)) {
-        if (!known2.includes(key)) errors.addUnknownKey("/settings", key);
-      }
-      let uploadJunit;
-      let redactMessages;
-      let messageMaxBytes;
-      if (Object.hasOwn(s, "uploadJunit")) {
-        if (typeof s.uploadJunit === "boolean") uploadJunit = s.uploadJunit;
-        else errors.add("/settings/uploadJunit", MESSAGES.boolean);
-      }
-      if (Object.hasOwn(s, "redactMessages")) {
-        if (typeof s.redactMessages === "boolean") redactMessages = s.redactMessages;
-        else errors.add("/settings/redactMessages", MESSAGES.boolean);
-      }
-      if (Object.hasOwn(s, "messageMaxBytes")) {
-        const n = s.messageMaxBytes;
-        if (typeof n !== "number") errors.add("/settings/messageMaxBytes", MESSAGES.number);
-        else if (!Number.isInteger(n)) errors.add("/settings/messageMaxBytes", MESSAGES.integer);
-        else if (n < MESSAGE_MAX_BYTES_MIN || n > MESSAGE_MAX_BYTES_MAX) {
-          errors.add("/settings/messageMaxBytes", rangeMessage(MESSAGE_MAX_BYTES_MIN, MESSAGE_MAX_BYTES_MAX));
-        } else messageMaxBytes = n;
-      }
-      if (uploadJunit !== void 0 && redactMessages !== void 0 && messageMaxBytes !== void 0) {
-        settings2 = { uploadJunit, redactMessages, messageMaxBytes };
-      }
-    }
-  }
-  if (errors.total > 0 || version2 === void 0 || etag === void 0 || updatedAt === void 0 || policy === void 0 || quarantine === void 0 || settings2 === void 0) {
-    return { ok: false, errors: errors.finish() };
-  }
-  return { ok: true, response: { version: version2, etag, updatedAt, policy, quarantine, settings: settings2 } };
-}
-
 // ../core/src/junit/results.ts
 var JUNIT_MAX_FILES = 50;
 var JUNIT_MAX_TOTAL_BYTES = 26214400;
@@ -45537,151 +44970,365 @@ function parseJunitSources(sources) {
   };
 }
 
+// ../core/src/policy/unite.ts
+var SEVERITY_RANK2 = { off: 0, info: 1, warn: 2, block: 3 };
+var MODE_RANK = { off: 0, warn: 1, block: 2 };
+var PROTECTED_MODE_RANK = { warn: 0, block: 1 };
+function strictest(rank, ...values) {
+  let top;
+  for (const value of values) if (value !== void 0 && (top === void 0 || rank[value] > rank[top])) top = value;
+  return top;
+}
+function belowBase(rank, floor, head, base) {
+  if (base === void 0) return false;
+  const effective2 = (value) => Math.max(rank[floor], value === void 0 ? -1 : rank[value]);
+  return effective2(head) < effective2(base);
+}
+function larger(a, b) {
+  return a === void 0 ? b : b === void 0 ? a : Math.max(a, b);
+}
+function smaller(a, b) {
+  return a === void 0 ? b : b === void 0 ? a : Math.min(a, b);
+}
+function missingFromHead(head, base, key) {
+  const present = new Set((head ?? []).map(key));
+  const out = [];
+  for (const entry of base ?? []) {
+    const id = key(entry);
+    if (present.has(id)) continue;
+    present.add(id);
+    out.push(entry);
+  }
+  return out;
+}
+function union(head, base, key = String) {
+  if (head === void 0 && base === void 0) return void 0;
+  return [...head ?? [], ...missingFromHead(head, base, key)];
+}
+function eitherTrue(head, base) {
+  return head === true || base === true ? true : head;
+}
+function eitherFalse(head, base) {
+  return head === false || base === false ? false : head;
+}
+var hookKey = (hook2) => JSON.stringify([hook2.event, hook2.matcher ?? null]);
+function put(object, key, value) {
+  if (value !== void 0) object[key] = value;
+}
+function strictestRecord(rank, head, base) {
+  if (head === void 0 && base === void 0) return void 0;
+  const out = {};
+  const ids = /* @__PURE__ */ new Set([...Object.keys(head ?? {}), ...Object.keys(base ?? {})]);
+  for (const id of ids) {
+    const mine = head !== void 0 && Object.hasOwn(head, id) ? head[id] : void 0;
+    const theirs = base !== void 0 && Object.hasOwn(base, id) ? base[id] : void 0;
+    const value = strictest(rank, mine, theirs);
+    if (value !== void 0) out[id] = value;
+  }
+  return out;
+}
+function uniteDocuments(head, base, ignored) {
+  const looser = (setting) => ignored.push({ setting, reason: "looser" });
+  const united = { version: head.version };
+  {
+    const out = {};
+    const threshold = larger(head.coverage?.threshold, base.coverage?.threshold);
+    put(out, "threshold", threshold);
+    put(out, "exclude", head.coverage?.exclude);
+    if (head.coverage !== void 0 && Object.hasOwn(head.coverage, "root"))
+      out.root = head.coverage.root;
+    const baseThreshold = base.coverage?.threshold;
+    if (baseThreshold !== void 0 && (head.coverage?.threshold ?? -Infinity) < baseThreshold) {
+      looser("coverage.threshold");
+    }
+    if (head.coverage !== void 0 || Object.keys(out).length > 0) united.coverage = out;
+  }
+  {
+    const h = head.setup;
+    const b = base.setup;
+    const out = {};
+    put(out, "require", eitherTrue(h?.require, b?.require));
+    if (b?.require === true && h?.require !== true) looser("setup.require");
+    put(out, "expect", union(h?.expect, b?.expect));
+    if (missingFromHead(h?.expect, b?.expect, String).length > 0) looser("setup.expect");
+    put(out, "consistency", strictest(SEVERITY_RANK2, h?.consistency, b?.consistency));
+    if (belowBase(SEVERITY_RANK2, "warn", h?.consistency, b?.consistency)) looser("setup.consistency");
+    for (const key of [
+      "forbidden_permissions",
+      "required_permissions_deny",
+      "forbidden_mcp_servers",
+      "forbidden_files"
+    ]) {
+      put(out, key, union(h?.[key], b?.[key]));
+      if (missingFromHead(h?.[key], b?.[key], String).length > 0) looser(`setup.${key}`);
+    }
+    put(out, "required_hooks", union(h?.required_hooks, b?.required_hooks, hookKey));
+    if (missingFromHead(h?.required_hooks, b?.required_hooks, hookKey).length > 0) looser("setup.required_hooks");
+    const headList = h?.allowed_mcp_servers ?? [];
+    const baseList = b?.allowed_mcp_servers ?? [];
+    if (h?.allowed_mcp_servers !== void 0 || b?.allowed_mcp_servers !== void 0) {
+      let allowed;
+      if (headList.length > 0 && baseList.length > 0) {
+        const shared = headList.filter((server) => baseList.includes(server));
+        allowed = shared.length > 0 ? [...new Set(shared)] : [...baseList];
+      } else if (baseList.length > 0) {
+        allowed = [...baseList];
+      } else {
+        allowed = [...headList];
+      }
+      out.allowed_mcp_servers = allowed;
+      if (baseList.length > 0 && (headList.length === 0 || headList.some((server) => !baseList.includes(server)))) {
+        looser("setup.allowed_mcp_servers");
+      }
+    }
+    if (h !== void 0 || Object.keys(out).length > 0) united.setup = out;
+  }
+  {
+    const h = head.test_integrity;
+    const b = base.test_integrity;
+    const out = {};
+    put(out, "mode", strictest(MODE_RANK, h?.mode, b?.mode));
+    const modeDropped = h?.mode !== void 0 ? b?.mode !== void 0 && MODE_RANK[h.mode] < MODE_RANK[b.mode] : belowBase(MODE_RANK, "warn", void 0, b?.mode);
+    if (modeDropped) looser("test_integrity.mode");
+    put(out, "signals", strictestRecord(SEVERITY_RANK2, h?.signals, b?.signals));
+    put(out, "accept_label", h?.accept_label);
+    if (h !== void 0 || Object.keys(out).length > 0) united.test_integrity = out;
+  }
+  {
+    const out = {};
+    put(out, "quarantine", eitherFalse(head.flaky?.quarantine, base.flaky?.quarantine));
+    if (base.flaky?.quarantine === false && head.flaky?.quarantine !== false) looser("flaky.quarantine");
+    if (head.flaky !== void 0 || Object.keys(out).length > 0) united.flaky = out;
+  }
+  {
+    const out = {};
+    put(out, "required", head.policy?.required);
+    put(out, "rules", strictestRecord(SEVERITY_RANK2, head.policy?.rules, base.policy?.rules));
+    if (head.policy !== void 0 || Object.keys(out).length > 0) united.policy = out;
+  }
+  {
+    const h = head.agents;
+    const b = base.agents;
+    const out = {};
+    for (const key of ["labels", "extra_logins", "protected_paths"]) {
+      put(out, key, union(h?.[key], b?.[key]));
+      if (missingFromHead(h?.[key], b?.[key], String).length > 0) looser(`agents.${key}`);
+    }
+    put(out, "protected_paths_mode", strictest(PROTECTED_MODE_RANK, h?.protected_paths_mode, b?.protected_paths_mode));
+    if (b?.protected_paths_mode === "block" && h?.protected_paths_mode !== "block") {
+      looser("agents.protected_paths_mode");
+    }
+    put(out, "require_human_approval", eitherTrue(h?.require_human_approval, b?.require_human_approval));
+    if (b?.require_human_approval === true && h?.require_human_approval !== true) {
+      looser("agents.require_human_approval");
+    }
+    for (const key of ["max_files", "max_changed_lines"]) {
+      put(out, key, smaller(h?.[key], b?.[key]));
+      const cap = b?.[key];
+      if (cap !== void 0 && (h?.[key] ?? Infinity) > cap) looser(`agents.${key}`);
+    }
+    if (h !== void 0 || Object.keys(out).length > 0) united.agents = out;
+  }
+  {
+    const h = head.dependencies;
+    const b = base.dependencies;
+    const out = {};
+    put(out, "lookup", eitherTrue(h?.lookup, b?.lookup));
+    if (b?.lookup === true && h?.lookup !== true) looser("dependencies.lookup");
+    put(out, "registries", h?.registries);
+    put(out, "min_age_days", larger(h?.min_age_days, b?.min_age_days));
+    put(out, "min_weekly_downloads", larger(h?.min_weekly_downloads, b?.min_weekly_downloads));
+    put(out, "allowed_hosts", h?.allowed_hosts);
+    for (const [key, fallback] of [
+      ["min_age_days", DEFAULT_MIN_AGE_DAYS],
+      ["min_weekly_downloads", DEFAULT_MIN_WEEKLY_DOWNLOADS]
+    ]) {
+      const given = b?.[key];
+      if (given !== void 0 && Math.max(fallback, h?.[key] ?? -Infinity) < Math.max(fallback, given)) {
+        looser(`dependencies.${key}`);
+      }
+    }
+    if (h !== void 0 || Object.keys(out).length > 0) united.dependencies = out;
+  }
+  {
+    const h = head.injection;
+    const b = base.injection;
+    const out = {};
+    put(out, "exempt", h?.exempt);
+    put(out, "phrases", union(h?.phrases, b?.phrases));
+    if (missingFromHead(h?.phrases, b?.phrases, String).length > 0) looser("injection.phrases");
+    put(out, "signals", strictestRecord(SEVERITY_RANK2, h?.signals, b?.signals));
+    for (const id of Object.keys(DEFAULT_INJECTION_SEVERITIES)) {
+      const baseValue = b?.signals !== void 0 && Object.hasOwn(b.signals, id) ? b.signals[id] : void 0;
+      const headValue = h?.signals !== void 0 && Object.hasOwn(h.signals, id) ? h.signals[id] : void 0;
+      if (belowBase(SEVERITY_RANK2, DEFAULT_INJECTION_SEVERITIES[id], headValue, baseValue)) {
+        looser(`injection.signals.${id}`);
+      }
+    }
+    if (h !== void 0 || Object.keys(out).length > 0) united.injection = out;
+  }
+  return united;
+}
+function uniteFilePolicy(policy, base) {
+  if (policy.source !== "file" || policy.document === null || base === void 0 || base.kind !== "document") {
+    return { policy, ignored: [] };
+  }
+  const ignored = [];
+  const document2 = uniteDocuments(policy.document, base.document, ignored);
+  const seen = /* @__PURE__ */ new Set();
+  const records = ignored.filter((record) => {
+    if (seen.has(record.setting)) return false;
+    seen.add(record.setting);
+    return true;
+  }).sort((a, b) => byCodeUnit(a.setting, b.setting));
+  return { policy: { ...policy, document: document2, copies: { head: policy.document, base: base.document } }, ignored: records };
+}
+
 // ../core/src/policy/apply.ts
 var STRICTNESS2 = { off: 0, warn: 1, block: 2 };
-function rootKey(root) {
-  return root === void 0 || root === null ? "." : root;
-}
 function normalizedRoot(root) {
   return parseCoverageRoot(root, "the org policy's coverage.root");
 }
-function applyPolicy(layers, policy) {
-  const document2 = policy.document;
-  if (policy.source === "none" || document2 === null) return { inputs: layers.resolved, ignored: [] };
-  const app = policy.source === "app";
-  const policyLayer = "policy-file";
+function applyPolicy(layers, policy, base) {
+  const united = uniteFilePolicy(policy, base);
+  const applied = united.policy;
+  const document2 = applied.document;
+  if (applied.source === "none" || document2 === null) return { inputs: layers.resolved, ignored: [], policy: applied };
+  const app = applied.source === "app";
+  const head = applied.copies?.head ?? document2;
   const ignored = [];
   const inputs = { ...layers.resolved };
-  applyCoverage(layers, document2, app, inputs, ignored);
-  applySetup(layers, document2, app, inputs, ignored);
-  const modeSettings = applyMode(layers, document2, app, ignored);
+  applyCoverage(layers, document2, head, app, inputs, ignored);
+  applySetup(layers, document2, head, app, inputs, ignored);
+  const modeSettings = applyMode(layers, document2, head, app, ignored);
   if (modeSettings !== void 0) inputs.testIntegrityMode = modeSettings;
   applyDependencies(layers, document2, app, inputs, ignored);
   const integrity = document2.test_integrity;
-  const result = { inputs, ignored: [] };
+  const result = { inputs, ignored: [], policy: applied };
   if (integrity?.signals !== void 0 && Object.keys(integrity.signals).length > 0) {
-    result.signalOverrides = { kind: app ? "replace" : "raise", severities: { ...integrity.signals } };
+    result.signalOverrides = {
+      kind: app ? "replace" : "raise",
+      severities: { ...integrity.signals },
+      ...applied.copies === void 0 ? {} : {
+        copies: {
+          head: { ...applied.copies.head.test_integrity?.signals },
+          base: { ...applied.copies.base.test_integrity?.signals }
+        }
+      }
+    };
   }
   if (integrity?.accept_label !== void 0) {
     if (app) result.acceptLabel = integrity.accept_label;
-    else ignored.push({ setting: "test_integrity.accept_label", layer: policyLayer, reason: "not-allowed" });
+    else ignored.push({ setting: "test_integrity.accept_label", reason: "not-allowed" });
   }
   if (!app && document2.policy?.required !== void 0) {
-    ignored.push({ setting: "policy.required", layer: policyLayer, reason: "not-allowed" });
+    ignored.push({ setting: "policy.required", reason: "not-allowed" });
   }
+  ignored.push(...united.ignored);
   const seen = /* @__PURE__ */ new Set();
   result.ignored = ignored.filter((record) => {
-    const key = `${record.setting}\0${record.layer}`;
+    const key = `${record.setting}\0${record.layer ?? ""}`;
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
-  }).sort((a, b) => byCodeUnit(a.setting, b.setting) || byCodeUnit(a.layer, b.layer));
+  }).sort((a, b) => byCodeUnit(a.setting, b.setting) || byCodeUnit(a.layer ?? "", b.layer ?? ""));
   return result;
 }
-function applyCoverage(layers, document2, app, inputs, ignored) {
+function applyCoverage(layers, document2, headDocument, app, inputs, ignored) {
   const { config, raw, resolved } = layers;
   const coverage2 = document2.coverage;
   if (coverage2 === void 0) return;
   if (coverage2.threshold !== void 0) {
     const theirs = coverage2.threshold;
     const inForce = resolved.threshold;
-    if (inForce === null) {
-      inputs.threshold = theirs;
-    } else {
-      if (app && inForce < theirs) {
-        const inputValue = raw.threshold === void 0 ? void 0 : Number(raw.threshold.trim());
-        const inputInForce = inputValue !== void 0 && !(inputValue < inForce);
+    const applied = inForce === null ? theirs : Math.max(theirs, inForce);
+    if (app) {
+      if (inForce !== null && inForce < theirs) {
+        const inputInForce = raw.threshold !== void 0 && !(Number(raw.threshold.trim()) < inForce);
         ignored.push({
           setting: "coverage.threshold",
+          reason: "looser",
           layer: inputInForce ? "input" : "config",
-          reason: "looser",
           given: inForce,
-          applied: theirs
-        });
-      } else if (!app && theirs < inForce) {
-        ignored.push({
-          setting: "coverage.threshold",
-          layer: "policy-file",
-          reason: "looser",
-          given: theirs,
-          applied: inForce
+          applied
         });
       }
-      inputs.threshold = Math.max(theirs, inForce);
+    } else {
+      const headValue = headDocument.coverage?.threshold;
+      if (headValue !== void 0 && headValue < applied) {
+        ignored.push({ setting: "coverage.threshold", reason: "looser", given: headValue, applied });
+      }
     }
+    inputs.threshold = applied;
   }
   if (coverage2.exclude !== void 0) {
     if (app) {
       const theirs = coverage2.exclude;
       const configCount = (config.coverage?.exclude ?? []).length;
-      const fromConfig = resolved.exclude.slice(0, configCount);
-      const fromInput = resolved.exclude.slice(configCount);
-      for (const [layer, patterns] of [
-        ["config", fromConfig],
-        ["input", fromInput]
-      ]) {
+      for (const layer of ["config", "input"]) {
+        const patterns = layer === "config" ? resolved.exclude.slice(0, configCount) : resolved.exclude.slice(configCount);
         if (patterns.some((pattern) => !theirs.includes(pattern))) {
-          ignored.push({ setting: "coverage.exclude", layer, reason: "looser" });
+          ignored.push({ setting: "coverage.exclude", reason: "looser", layer });
         }
       }
       inputs.exclude = [...theirs];
     } else if (coverage2.exclude.length > 0) {
-      ignored.push({ setting: "coverage.exclude", layer: "policy-file", reason: "not-allowed" });
+      ignored.push({ setting: "coverage.exclude", reason: "not-allowed" });
     }
   }
   if (coverage2.root !== void 0) {
     if (app) {
       const theirs = coverage2.root === null ? "." : normalizedRoot(coverage2.root);
-      const inputGiven = raw.coverageRoot !== void 0;
-      const configGiven = config.coverage?.root !== void 0;
-      if (inputGiven || configGiven) {
-        const today = inputGiven ? rootKey(resolved.coverageRoot) : rootKey(config.coverage?.root);
-        if (today !== theirs) {
-          ignored.push({ setting: "coverage.root", layer: inputGiven ? "input" : "config", reason: "looser" });
-        }
+      if (resolved.coverageRoot !== void 0 && resolved.coverageRoot !== theirs) {
+        ignored.push({
+          setting: "coverage.root",
+          reason: "looser",
+          layer: raw.coverageRoot !== void 0 ? "input" : "config"
+        });
       }
       inputs.coverageRoot = theirs === "." ? void 0 : theirs;
     } else {
-      ignored.push({ setting: "coverage.root", layer: "policy-file", reason: "not-allowed" });
+      ignored.push({ setting: "coverage.root", reason: "not-allowed" });
     }
   }
 }
-function applySetup(layers, document2, app, inputs, ignored) {
+function applySetup(layers, document2, headDocument, app, inputs, ignored) {
   const { config, raw, resolved } = layers;
   const setup2 = document2.setup;
   if (setup2 === void 0) return;
   if (setup2.require !== void 0) {
     if (setup2.require) {
-      if (app && !resolved.requireAgentSetup) {
-        const layer = raw.requireAgentSetup === false ? "input" : config.setup?.require === false ? "config" : void 0;
-        if (layer !== void 0) ignored.push({ setting: "setup.require", layer, reason: "looser" });
+      const layer = raw.requireAgentSetup === false ? "input" : config.setup?.require === false ? "config" : void 0;
+      if (app && !resolved.requireAgentSetup && layer !== void 0) {
+        ignored.push({ setting: "setup.require", reason: "looser", layer });
       }
       inputs.requireAgentSetup = true;
-    } else if (!app && resolved.requireAgentSetup) {
-      ignored.push({ setting: "setup.require", layer: "policy-file", reason: "looser" });
     }
   }
+  if (!app && headDocument.setup?.require === false && resolved.requireAgentSetup) {
+    ignored.push({ setting: "setup.require", reason: "looser" });
+  }
   if (setup2.expect !== void 0) {
-    const union = [.../* @__PURE__ */ new Set([...resolved.expectAgentSetup ?? [], ...setup2.expect])];
-    if (union.length > 0) inputs.expectAgentSetup = union;
+    const union2 = [.../* @__PURE__ */ new Set([...resolved.expectAgentSetup ?? [], ...setup2.expect])];
+    if (union2.length > 0) inputs.expectAgentSetup = union2;
   }
 }
 function applyDependencies(layers, document2, app, inputs, ignored) {
   const deps = document2.dependencies;
   if (deps === void 0) return;
   const given = layers.resolved.dependencies;
-  if (app && given?.input === "never") ignored.push({ setting: "dependencies", layer: "input", reason: "looser" });
+  if (app && given?.input === "never") ignored.push({ setting: "dependencies", reason: "looser", layer: "input" });
   if (!app && deps.registries !== void 0) {
-    ignored.push({ setting: "dependencies.registries", layer: "policy-file", reason: "not-allowed" });
+    ignored.push({ setting: "dependencies.registries", reason: "not-allowed" });
   }
   if (deps.allowed_hosts !== void 0) {
     if (app) {
       const named = deps.allowed_hosts.map((host) => host.toLowerCase());
       if ((given?.allowedHosts ?? []).some((host) => !named.includes(host))) {
-        ignored.push({ setting: "dependencies.allowed_hosts", layer: "input", reason: "looser" });
+        ignored.push({ setting: "dependencies.allowed_hosts", reason: "looser", layer: "input" });
       }
     } else if (deps.allowed_hosts.length > 0) {
-      ignored.push({ setting: "dependencies.allowed_hosts", layer: "policy-file", reason: "not-allowed" });
+      ignored.push({ setting: "dependencies.allowed_hosts", reason: "not-allowed" });
     }
   }
   inputs.dependencies = {
@@ -45696,24 +45343,23 @@ function applyDependencies(layers, document2, app, inputs, ignored) {
     }
   };
 }
-function applyMode(layers, document2, app, ignored) {
+function applyMode(layers, document2, headDocument, app, ignored) {
   const given = layers.resolved.testIntegrityMode;
   const mode = document2.test_integrity?.mode;
   if (mode === void 0) return given;
   if (app) {
-    for (const [layer, value] of [
-      ["config", given?.config],
-      ["input", given?.input]
-    ]) {
+    for (const layer of ["config", "input"]) {
+      const value = given?.[layer];
       if (value !== void 0 && STRICTNESS2[value] < STRICTNESS2[mode]) {
-        ignored.push({ setting: "test_integrity.mode", layer, reason: "looser" });
+        ignored.push({ setting: "test_integrity.mode", reason: "looser", layer });
       }
     }
   } else {
     const inForce = given?.input ?? "warn";
     const today = given?.config !== void 0 && STRICTNESS2[given.config] > STRICTNESS2[inForce] ? given.config : inForce;
-    if (STRICTNESS2[mode] < STRICTNESS2[today]) {
-      ignored.push({ setting: "test_integrity.mode", layer: "policy-file", reason: "looser" });
+    const headMode = headDocument.test_integrity?.mode;
+    if (headMode !== void 0 && STRICTNESS2[headMode] < STRICTNESS2[today]) {
+      ignored.push({ setting: "test_integrity.mode", reason: "looser" });
     }
   }
   return { ...given, policy: { mode, kind: app ? "app" : "file" } };
@@ -45737,7 +45383,8 @@ function parsePolicyJson(text) {
 }
 
 // ../core/src/render/logo.ts
-var LOGO_MARKUP = '<img src="https://raw.githubusercontent.com/pharn-dev/pharn-ci/main/docs/assets/pharn-logo.svg" alt="pharn" width="48" height="48">';
+var LOGO_COMMIT = "515998146a22a1886341d94236e4138e1777c13a";
+var LOGO_MARKUP = `<img src="https://raw.githubusercontent.com/pharn-dev/pharn-ci/${LOGO_COMMIT}/docs/assets/pharn-logo.svg" alt="pharn" width="48" height="48">`;
 function logoMarkup() {
   return LOGO_MARKUP;
 }
@@ -45755,117 +45402,23 @@ function acceptLabelOf(report) {
   const configured = report.testIntegrity.acceptLabel;
   return typeof configured === "string" && configured !== "" ? configured : DEFAULT_ACCEPT_LABEL;
 }
-var SECRET_HINT = "Revoke the credential at its provider, remove it from the file and from git history, and load it from an environment variable or a secret store.";
-var MESSAGE_HINTS = {
-  DIFF_COVERAGE_BELOW_THRESHOLD: "Add tests that exercise the uncovered lines listed in the table above.",
-  DIFF_COVERAGE_UNGATED: "To gate diff coverage, set a threshold above 0 (`coverage.threshold`, `threshold` or `--threshold`).",
-  NO_COVERABLE_CHANGES: "Nothing to do if the change has no code; otherwise check that the coverage report includes the changed files.",
-  COVERAGE_FILE_MISSING: "Run the tests with coverage before pharn-ci, and check the path (`coverage.file`, `coverage-file` or `--coverage`).",
-  COVERAGE_FILE_EMPTY: "Run the tests with coverage enabled before pharn-ci, and check that the report covers this repo's sources.",
-  COVERAGE_FORMAT_UNSUPPORTED: "Have the test runner write lcov or Cobertura XML; if it already does, set `coverage.format` explicitly.",
-  DIFF_UNAVAILABLE: "Check out full history (`actions/checkout` with `fetch-depth: 0`) or set the base (`base-ref` or `--base`).",
-  COVERAGE_PATHS_UNMATCHED: "Write coverage paths relative to the repository root, or set the directory they start from (`coverage.root`, `coverage-root` or `--coverage-root`).",
-  COVERAGE_PATHS_PARTIALLY_UNMATCHED: "Nothing to do if those files are generated or outside the repo; if changed files are missing from the table, check the coverage root.",
-  COVERAGE_LINES_SKIPPED: "Regenerate the coverage report and check that the reporter finished writing it; a truncated or hand-edited file can show more coverage than the tests gave.",
-  CONFIG_CHANGED_IN_DIFF: "Review the config and workflow changes before trusting the verdict; protect `.pharn/ci.yml` and `.github/workflows/` with CODEOWNERS.",
-  COVERAGE_FILE_TRACKED: "Generate the coverage file in CI and stop tracking it (`git rm --cached` it and add it to `.gitignore`).",
-  DIFF_BINARY_COVERED_FILE: "Remove `-diff` or `binary` attributes for source files from `.gitattributes` so their changes are measured.",
-  TEST_FILES_DELETED: "Check that the deleted or renamed tests were meant to go, or that their cases moved to a file the test runner still runs.",
-  NO_AGENT_SETUP_FILES: "Add an AGENTS.md or CLAUDE.md at the repository root that tells agents how to build and test.",
-  AGENT_SETUP_FILE_EMPTY: "Fill in the empty file or delete it; an agent reads nothing from an empty file.",
-  AGENT_SETUP_EXPECTED_MISSING: "Add a setup file for each missing tool (for example AGENTS.md, CLAUDE.md or .cursor/rules/), or ask whoever owns `setup.expect` (the org policy owner, or the maintainers for `.pharn/ci.yml`) to change it.",
-  TEST_INTEGRITY_MODE_IGNORED: "Set the mode with the `test-integrity` input in the workflow; `test_integrity.mode` in `.pharn/ci.yml` can only make the check stricter, so remove the looser value.",
-  TEST_INTEGRITY_OFF: "Set the `test-integrity` input to `warn` or `block` in the workflow to check for weakened tests.",
-  TEST_INTEGRITY_TI01: "Restore the deleted tests, or say in the PR why they go so a reviewer can confirm it.",
-  TEST_INTEGRITY_TI02: (label) => `Restore the removed tests, or say in the PR why they go; a reviewer who is not the PR author can record that sign-off by applying the accept label ${label}. A test that only moved or was renamed is not reported when its body is the same or close to it.`,
-  TEST_INTEGRITY_TI03: (label) => `Remove the skip so the test runs again, or say in the PR why it must stay, for example a test that fails in CI; a reviewer who is not the PR author can record that sign-off by applying the accept label ${label}.`,
-  TEST_INTEGRITY_TI04: "Remove the marker so the whole suite runs, or say in the PR why only the marked tests should run.",
-  TEST_INTEGRITY_TI05: (label) => `Restore the assertions the test had, or say in the PR why it checks less now; a reviewer who is not the PR author can record that sign-off by applying the accept label ${label}.`,
-  TEST_INTEGRITY_TI06: "Restore the stronger matcher, guard or placement of the assertion, or say in the PR why the test checks less now.",
-  TEST_INTEGRITY_TI07: "Check each new expected value against what the code should do, not what it now returns; if the behaviour change is meant, say so in the PR so a reviewer can confirm it.",
-  TEST_INTEGRITY_TI08: "Review the snapshot changes, or regenerate them in a separate change, and keep snapshot-update flags out of the test command.",
-  TEST_INTEGRITY_TI09: (label) => `Restore the setting, or say in the PR why it changes; a reviewer who is not the PR author can record that sign-off by applying the accept label ${label}. A raised retry count or timeout is a warning only.`,
-  TEST_INTEGRITY_TI12: "Mock a collaborator of the code under test instead of the code itself, or say in the PR why this module is mocked.",
-  TEST_INTEGRITY_TI10: (label) => `Restore the test script, or say in the PR why it changes so a reviewer can confirm it; a reviewer who is not the PR author can record that sign-off by applying the accept label ${label}.`,
-  TEST_INTEGRITY_TI13: (label) => `Write a test for the code in place of the ignore comment, or say in the PR why it cannot be tested; a reviewer who is not the PR author can record that sign-off by applying the accept label ${label}.`,
-  TEST_INTEGRITY_TI11: "Restore the test step or trigger, or say in the PR why CI stops running these tests so a reviewer can confirm it.",
-  TEST_INTEGRITY_TI14: "Restore the threshold or the exclusions, or say in the PR why they change so a reviewer can confirm it.",
-  TEST_INTEGRITY_TI15: "Check that the code handles the general case and not only the test's value, and add a test with another input.",
-  TEST_INTEGRITY_TI16: "Fix the lint or type error the comment hides, or say in the PR why the test needs it.",
-  TEST_INTEGRITY_TI17: "Restore the assertion that can fail, or say in the PR why the test checks less now.",
-  TEST_INTEGRITY_INDEX_UNAVAILABLE: "A file over 512 KiB or nested too deeply, one with many syntax errors, more than 200 touched test files, a missing Python 3.8 or newer for `.py` files, or git objects that could not be read stop the comparison. A test file git shows as binary (a `-diff` or `binary` attribute in `.gitattributes`) hides its changed lines from the signals that read the diff, and non-text content such as a NUL byte also stops the comparison. Review the named test files by hand for removed tests and weakened assertions.",
-  TEST_INTEGRITY_TEXT_TRUNCATED: "Review the named files by hand for skipped, focused or weakened tests, or split the change so each file stays under the limit.",
-  TEST_INTEGRITY_ACCEPTED: "A reviewer other than the PR author signed off, so the block findings are warnings. The sign-off belongs to the pull request, not to a commit: remove the label if a later push should be judged again.",
-  TEST_INTEGRITY_ACCEPT_IGNORED: "The block findings stand. Fix them, or ask a reviewer who is not the PR author to apply the label; it counts only when a user account other than the author applied it last.",
-  AGENT_CONFIG_SECRET_S01: SECRET_HINT,
-  AGENT_CONFIG_SECRET_S02: SECRET_HINT,
-  AGENT_CONFIG_SECRET_S03: SECRET_HINT,
-  AGENT_CONFIG_SECRET_S04: SECRET_HINT,
-  AGENT_CONFIG_SECRET_S05: SECRET_HINT,
-  AGENT_CONFIG_SECRET_S06: SECRET_HINT,
-  AGENT_CONFIG_SECRET_S07: SECRET_HINT,
-  AGENT_CONFIG_SECRET_S08: SECRET_HINT,
-  AGENT_CONFIG_SECRET_S09: SECRET_HINT,
-  AGENT_CONFIG_SECRET_S10: "If the value is a real secret, revoke it at its provider, remove it from the file and from git history, and load it from an environment variable or a secret store. If it is not a secret, a reviewer can confirm that.",
-  AGENT_CONFIG_SECRET_S11: "Move the literal value into the environment, like the other secrets in the same file, so no secret is committed.",
-  AGENT_CONFIG_SECRET_UNSCANNED: "Keep agent config files text, under 512 KiB and inside the repository, and run on a checkout of the pull request head (not PR-number mode or a compare-API diff), so they can be scanned for committed secrets.",
-  POLICY_UNAVAILABLE: "Give the job `permissions: id-token: write` (fork pull requests get no OIDC token) and check that the pharn.dev app is installed for this repository.",
-  POLICY_OVERRIDE_IGNORED: "The org policy's value applies. Raise the setting in the workflow inputs or `.pharn/ci.yml` to match, or ask the policy owner to change the policy.",
-  UPLOAD_TOO_LARGE: "Nothing in the pull request needs fixing; the full report is in the job summary and report.json.",
-  POLICY_P08: "Stop tracking the file (`git rm --cached` it and add it to `.gitignore`); the org policy forbids it in the repository.",
-  POLICY_P09: "Revert the edit, or ask the policy owner to make it; a pull request cannot loosen the check it is graded by.",
-  POLICY_P11: "Agent PRs may not change these paths under the org policy. Move the change to a pull request by a person, or ask the policy owner to change `agents.protected_paths`.",
-  POLICY_P07: "Make the instruction files in one directory name the same package manager and test runner, or move a file into the package it describes; an agent follows whichever file it reads first.",
-  POLICY_P13: "An agent PR may not widen its own or another agent's powers. Move the change to a pull request by a person, or ask the policy owner to change `policy.rules.P13`.",
-  AGENT_PR_DETECTION_INCOMPLETE: "Re-run the job if the GitHub API failed. A pull request with more than 250 commits, an author GitHub does not name, or an edited policy file whose base cannot be read always counts as an agent PR.",
-  // E3 item 23 (policy settings): the hints of P02 to P06 and of the settings problems.
-  POLICY_P02: "Narrow or remove the allow rule (or the defaultMode or additionalDirectories key) in the settings file, or ask the policy owner to change setup.forbidden_permissions.",
-  POLICY_P03: "Add a deny rule equal to or broader than the required one to the .claude/settings.json of each directory named.",
-  POLICY_P04: "Remove the server, or ask the policy owner to add it to setup.allowed_mcp_servers.",
-  POLICY_P05: "Remove the server from the MCP file.",
-  POLICY_P06: "Add a command hook for the event whose matcher covers the required one (`*` or the same tool names), without an if condition.",
-  POLICY_SETTINGS_INVALID: "Keep agent settings files valid JSON and regular files under 512 KiB, and run on a checkout of the pull request head, so the org policy can check them.",
-  POLICY_P14: "Split the agent pull request into smaller ones, one per area named, or ask the policy owner to change `agents.max_files` or `agents.max_changed_lines`. Lockfiles, snapshots and `*.generated.*` files do not count.",
-  TESTS_NOT_EXERCISING_CHANGES: "Add or update a test that imports each listed file and asserts on the changed behaviour, or say in the PR why no test changes. This is a warning only.",
-  // Stale instructions (H3): the instruction file is what to fix, never the check.
-  SETUP_STALE_SI01: "Make the command match a script in the root package.json or a target in the root Makefile, or remove it from the instruction file.",
-  SETUP_STALE_SI02: "Point the instruction at the path where the file now lives, or remove the line.",
-  SETUP_STALE_SI03: "Point the link or `@` import at a file that exists, or remove it.",
-  SETUP_STALE_SI04: "Read the instruction file next to the files this change edits, and update it where it no longer matches.",
-  // H4 (prompt-injection scan): the hints of PI01 to PI05 and of the cut scan.
-  INJECTION_PI01: "Remove the invisible or bidirectional character, or write it as an escape (such as `\\u202E`) where the code needs it.",
-  INJECTION_PI02: "Remove the hidden text, or move what it says into visible text a reviewer can read.",
-  INJECTION_PI03: "Remove the phrase. If the file documents prompt injection on purpose, keep such samples in test files or under `fixtures/`.",
-  INJECTION_PI04: "Remove the blob from the instruction file; point to a reviewed file in the repository instead.",
-  INJECTION_PI05: "Remove the instruction file from the vendored directory, or keep vendored code out of the repository.",
-  INJECTION_TEXT_TRUNCATED: "Split the change into smaller pull requests, so every added line is scanned.",
-  // Flaky tests (A6): the JUnit paths and the test step are what to fix; test results never change the verdict.
-  JUNIT_NOT_FOUND: "Point `junit-paths` (or `--junit`) at the files the test step writes, run pharn-ci after the test step, and keep the test step from stopping the job first (`if: always()` on the pharn-ci step).",
-  JUNIT_INVALID: "Have the test runner write plain JUnit XML: one `testsuites` or `testsuite` root, no DOCTYPE, every element closed.",
-  JUNIT_TOO_LARGE: "Narrow `junit-paths` to the files of this job, or merge the reports; the results past the limits are not counted or uploaded.",
-  FLAKY_QUARANTINED_FAILURES: "Nothing to fix in the pull request; the org's quarantine list on pharn.dev says which tests are known to be flaky.",
-  // Dependency safety (A13): the dependency is what to fix, never the check.
-  DEPENDENCY_D01: "Check the package name against the registry: an agent may have invented it, and anyone can publish a package under an invented name. Use the real package, or remove the dependency.",
-  DEPENDENCY_D02: "Check who publishes the package and why it is new before you merge; prefer an established package. This is a warning only.",
-  DEPENDENCY_D03: "Check that this is the package you meant (a typo of a popular name is a common trap) and who publishes it. This is a warning only.",
-  DEPENDENCY_D04: "Run the package manager's install so the lockfile matches the manifest, and commit both; a lockfile that changes a hash for the same version needs an explanation.",
-  DEPENDENCY_D05: "Depend on a published registry version instead, or have a person review where the code comes from; a git, URL or local source is not covered by the registry's checks. For a registry your team runs (Artifactory, Nexus, a private PyPI index), name its host in the dependency-allowed-hosts input or the org policy's dependencies.allowed_hosts.",
-  DEPENDENCY_LOOKUP_UNAVAILABLE: "Re-run the job; the registry lookups fail open, so D01 to D03 were not checked for the packages counted.",
-  DEPENDENCY_CHECK_INCOMPLETE: "Keep manifests and lockfiles valid and under 32 MiB, and run on a checkout of the pull request head with fetch-depth: 0, so they can be compared."
-};
-var BLOCK_ONLY_ACCEPT_CLAUSE = /* @__PURE__ */ new Set([
-  "TEST_INTEGRITY_TI06",
-  "TEST_INTEGRITY_TI12",
-  "TEST_INTEGRITY_TI17",
+function withAcceptClause(hint, label) {
+  return `${hint.slice(0, -1)}; a reviewer who is not the PR author can record that sign-off by applying the accept label ${labelSpan(label)}.`;
+}
+var LIFTABLE_CODES = /* @__PURE__ */ new Set([
   "TEST_INTEGRITY_INDEX_UNAVAILABLE",
   "TEST_INTEGRITY_TEXT_TRUNCATED"
 ]);
+var TI_CODE_PREFIX = "TEST_INTEGRITY_";
+function acceptOf(code2) {
+  if (LIFTABLE_CODES.has(code2)) return "block";
+  return code2.startsWith(TI_CODE_PREFIX) ? testIntegritySignal(code2.slice(TI_CODE_PREFIX.length))?.accept : void 0;
+}
 function hintFor(code2, label, blocks = false) {
-  if (!Object.hasOwn(MESSAGE_HINTS, code2)) return void 0;
-  const hint = MESSAGE_HINTS[code2];
-  if (typeof hint === "function") return hint(labelSpan(label));
-  if (!blocks || !BLOCK_ONLY_ACCEPT_CLAUSE.has(code2)) return hint;
-  return `${hint.slice(0, -1)}; a reviewer who is not the PR author can record that sign-off by applying the accept label ${labelSpan(label)}.`;
+  const hint = messageFix(code2)?.hint;
+  if (hint === void 0) return void 0;
+  const accept = acceptOf(code2);
+  return accept === "always" || accept === "block" && blocks ? withAcceptClause(hint, label) : hint;
 }
 function labelSpan(text) {
   const safe = replaceUnsafeChars(text, "\uFFFD");
@@ -45874,42 +45427,23 @@ function labelSpan(text) {
   const pad = /^[` ]|[` ]$/.test(safe) ? " " : "";
   return `${fence}${pad}${safe}${pad}${fence}`;
 }
-var SIGNAL_HINT_IDS = /* @__PURE__ */ new Set([
-  "TI01",
-  "TI02",
-  "TI03",
-  "TI04",
-  "TI05",
-  "TI06",
-  "TI07",
-  "TI08",
-  "TI09",
-  "TI10",
-  "TI11",
-  "TI12",
-  "TI13",
-  "TI14",
-  "TI15",
-  "TI16",
-  "TI17"
-]);
 var BINARY_HINT_SENTENCE = "Git shows this file as binary: if a `-diff` or `binary` attribute in `.gitattributes` matches it, remove that attribute; if none does, the file holds non-text content such as a NUL byte, so store it as UTF-8 text.";
-var BINARY_FINDING_IDS = /* @__PURE__ */ new Set(["TI01", "TI10", "TI11", "TI14"]);
 function signalHint(id, label, blocks, detail) {
-  if (!SIGNAL_HINT_IDS.has(id)) return void 0;
-  const hint = hintFor(`TEST_INTEGRITY_${id}`, label, blocks);
-  if (hint === void 0 || detail === void 0 || !BINARY_FINDING_IDS.has(id) || !isBinaryDetail(detail)) return hint;
+  const signal2 = testIntegritySignal(id);
+  if (signal2 === void 0) return void 0;
+  const hint = hintFor(`${TI_CODE_PREFIX}${id}`, label, blocks);
+  if (hint === void 0 || detail === void 0 || signal2.binary !== true || !isBinaryDetail(detail)) return hint;
   return `${hint} ${BINARY_HINT_SENTENCE}`;
 }
 var MAX_FINDINGS = 20;
 var OPEN_FINDINGS = 10;
-var SEVERITY_RANK2 = { block: 0, warn: 1, info: 2 };
-function bySeverity(signals) {
-  const rank = (s) => SEVERITY_RANK2[s.severity] ?? 3;
+var SEVERITY_RANK3 = { block: 0, warn: 1, info: 2 };
+function bySeverity2(signals) {
+  const rank = (s) => SEVERITY_RANK3[s.severity] ?? 3;
   return signals.map((signal2, index) => ({ signal: signal2, index })).sort((a, b) => rank(a.signal) - rank(b.signal) || a.index - b.index).map(({ signal: signal2 }) => signal2);
 }
 function listedSignals(report) {
-  return bySeverity(report.testIntegrity.signals).slice(0, MAX_FINDINGS);
+  return bySeverity2(report.testIntegrity.signals).slice(0, MAX_FINDINGS);
 }
 var SIGNAL_MESSAGE_CODE = /^TEST_INTEGRITY_TI\d\d$/;
 var SEVERITY_ICON = { block: LEVEL_ICON.error, warn: LEVEL_ICON.warn, info: LEVEL_ICON.info };
@@ -46075,7 +45609,7 @@ function policyLines(report, maxRows) {
   if (violations.length === 0) {
     if (report.policy?.source !== "none") lines.push("No policy violations.", "");
   } else {
-    const listed2 = bySeverity(violations).slice(0, Math.min(MAX_POLICY_VIOLATIONS, maxRows));
+    const listed2 = bySeverity2(violations).slice(0, Math.min(MAX_POLICY_VIOLATIONS, maxRows));
     const violationLines = (violation) => {
       const icon = SEVERITY_ICON[violation.severity] ?? LEVEL_ICON.info;
       const id = inlineText(String(violation.id));
@@ -46118,7 +45652,7 @@ function policyLines(report, maxRows) {
   if (lines[lines.length - 1] !== "") lines.push("");
   return lines;
 }
-var STALE_IDS2 = ["SI01", "SI02", "SI03", "SI04"];
+var STALE_IDS2 = ["SI01", "SI02", "SI03"];
 var STALE_WORDS = {
   command: (token) => `command${token} is not defined in the root package.json or Makefile`,
   path: (token) => `path${token} is not in the repository`,
@@ -46136,13 +45670,11 @@ function staleLines(report, maxRows) {
   if (findings.length === 0) return [];
   const label = acceptLabelOf(report);
   const lines = ["### \u{1F4C4} Instructions", ""];
-  const ordered = [...findings.filter((f) => f.id !== "SI04"), ...findings.filter((f) => f.id === "SI04")];
-  const listed2 = ordered.slice(0, Math.min(MAX_FINDINGS, maxRows));
+  const listed2 = findings.slice(0, Math.min(MAX_FINDINGS, maxRows));
   const findingLine = (finding2) => {
     const token = typeof finding2.token === "string" ? ` ${code(finding2.token)}` : "";
-    const words = finding2.id === "SI04" ? `last changed more than 90 days ago, and names${token === "" ? " a file" : token}, which this change edits` : STALE_WORDS[finding2.kind](token);
-    const icon = finding2.id === "SI04" ? LEVEL_ICON.info : LEVEL_ICON.warn;
-    return `- ${icon} **${finding2.id}** ${code(`${finding2.path}:${finding2.line}`)} \u2014 ${words}`;
+    const words = STALE_WORDS[finding2.kind](token);
+    return `- ${LEVEL_ICON.warn} **${finding2.id}** ${code(`${finding2.path}:${finding2.line}`)} \u2014 ${words}`;
   };
   for (const finding2 of listed2.slice(0, OPEN_FINDINGS)) lines.push(findingLine(finding2));
   const folded = listed2.slice(OPEN_FINDINGS);
@@ -46170,7 +45702,7 @@ function injectionSignalsOf(report) {
   return Array.isArray(signals) ? signals : [];
 }
 function listedInjection(report) {
-  return bySeverity(injectionSignalsOf(report)).slice(0, MAX_FINDINGS);
+  return bySeverity2(injectionSignalsOf(report)).slice(0, MAX_FINDINGS);
 }
 var INJECTION_MESSAGE_CODE = /^INJECTION_PI\d\d$/;
 function injectionLines(report) {
@@ -46251,7 +45783,7 @@ function hasDependencySection(report) {
   return typeof deps.checked === "number" && deps.checked > 0 || dependencySignalsOf(report).length > 0 || report.messages.some((m) => m.code === "DEPENDENCY_CHECK_INCOMPLETE" || m.code === "DEPENDENCY_LOOKUP_UNAVAILABLE");
 }
 function listedDependencySignals(report, maxRows) {
-  return bySeverity(dependencySignalsOf(report)).slice(0, Math.min(MAX_DEPENDENCY_FINDINGS, Math.max(maxRows, 1)));
+  return bySeverity2(dependencySignalsOf(report)).slice(0, Math.min(MAX_DEPENDENCY_FINDINGS, Math.max(maxRows, 1)));
 }
 function dependencyLines(report, maxRows) {
   const label = acceptLabelOf(report);
@@ -46485,10 +46017,10 @@ function policyCell(report) {
 }
 function renderMessage(m, report) {
   const line = `- ${LEVEL_ICON[m.level]} \`${m.code}\` ${inlineText(m.text)}`;
-  const lifted = m.code === "TEST_INTEGRITY_INDEX_UNAVAILABLE" || m.code === "TEST_INTEGRITY_TEXT_TRUNCATED";
+  const lifted = LIFTABLE_CODES.has(m.code);
   const base = hintFor(m.code, acceptLabelOf(report), lifted ? isLiftableUnreadableError(m) : m.level === "error");
   const binary = base !== void 0 && report.testIntegrity.signals.some(
-    (s) => BINARY_FINDING_IDS.has(s.id) && `TEST_INTEGRITY_${s.id}` === m.code && isBinaryDetail(s.detail)
+    (s) => testIntegritySignal(s.id)?.binary === true && `${TI_CODE_PREFIX}${s.id}` === m.code && isBinaryDetail(s.detail)
   );
   const hint = binary ? `${base} ${BINARY_HINT_SENTENCE}` : base;
   return hint === void 0 ? line : `${line}
@@ -46540,44 +46072,9 @@ function escapeCellPipes(text) {
   return out + run2;
 }
 var MARKDOWN_ACTIVE = /[\\`*_[\]#!|~]/g;
+var ISSUE_REFERENCE = /(#|gh-|\/(?:issues|pulls?|discussions)\/)(?=\d)/gi;
 function inlineText(text) {
-  return replaceUnsafeChars(text, " ").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(MARKDOWN_ACTIVE, "\\$&").replace(/@/g, "@\u200B").replace(/:\/\//g, ":\\/\\/").replace(/(www)\./gi, "$1\\.");
-}
-
-// ../core/src/secrets/redact.ts
-var MESSAGE_MAX_BYTES = 2048;
-var MIN_BUDGET_BYTES = 32;
-var SUFFIX_FIXED_BYTES = 12;
-function redactSecrets(text) {
-  const spans = findSecretSpans(text).sort((a, b) => b.start - a.start);
-  let out = text;
-  for (const span2 of spans) {
-    const marker = span2.id === "S10" ? "[redacted]" : `[redacted:${span2.id}]`;
-    out = out.slice(0, span2.start) + marker + out.slice(span2.end);
-  }
-  return out;
-}
-var digitsOf = (n) => String(n).length;
-function truncateUtf8(text, maxBytes) {
-  if (!Number.isSafeInteger(maxBytes) || maxBytes < MIN_BUDGET_BYTES) {
-    throw new RangeError(`maxBytes must be a safe integer of at least ${MIN_BUDGET_BYTES}`);
-  }
-  const total = utf8ByteLength(text);
-  if (total <= maxBytes) return text;
-  let keepUnits = 0;
-  let keepBytes = 0;
-  for (let i = 0; i < text.length; ) {
-    const units = text.codePointAt(i) > 65535 ? 2 : 1;
-    const bytes = keepBytes + utf8ByteLength(text.slice(i, i + units));
-    if (bytes + SUFFIX_FIXED_BYTES + digitsOf(total - bytes) > maxBytes) break;
-    keepBytes = bytes;
-    i += units;
-    keepUnits = i;
-  }
-  return `${text.slice(0, keepUnits)}\u2026[+${total - keepBytes} bytes]`;
-}
-function redactMessage(text, maxBytes = MESSAGE_MAX_BYTES) {
-  return truncateUtf8(redactSecrets(text), maxBytes);
+  return replaceUnsafeChars(text, " ").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(MARKDOWN_ACTIVE, "\\$&").replace(/@/g, "@\u200B").replace(ISSUE_REFERENCE, "$1\u200B").replace(/:\/\//g, ":\\/\\/").replace(/(www)\./gi, "$1\\.");
 }
 
 // ../core/src/setup/sizes.ts
@@ -46941,6 +46438,42 @@ function decodeTestSourceText(bytes) {
   return parts.join("");
 }
 
+// ../core/src/secrets/redact.ts
+var MESSAGE_MAX_BYTES = 2048;
+var MIN_BUDGET_BYTES = 32;
+var SUFFIX_FIXED_BYTES = 12;
+function redactSecrets(text) {
+  const spans = findSecretSpans(text).sort((a, b) => b.start - a.start);
+  let out = text;
+  for (const span2 of spans) {
+    const marker = span2.id === "S10" ? "[redacted]" : `[redacted:${span2.id}]`;
+    out = out.slice(0, span2.start) + marker + out.slice(span2.end);
+  }
+  return out;
+}
+var digitsOf = (n) => String(n).length;
+function truncateUtf8(text, maxBytes) {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < MIN_BUDGET_BYTES) {
+    throw new RangeError(`maxBytes must be a safe integer of at least ${MIN_BUDGET_BYTES}`);
+  }
+  const total = utf8ByteLength(text);
+  if (total <= maxBytes) return text;
+  let keepUnits = 0;
+  let keepBytes = 0;
+  for (let i = 0; i < text.length; ) {
+    const units = text.codePointAt(i) > 65535 ? 2 : 1;
+    const bytes = keepBytes + utf8ByteLength(text.slice(i, i + units));
+    if (bytes + SUFFIX_FIXED_BYTES + digitsOf(total - bytes) > maxBytes) break;
+    keepBytes = bytes;
+    i += units;
+    keepUnits = i;
+  }
+  return `${text.slice(0, keepUnits)}\u2026[+${total - keepBytes} bytes]`;
+}
+function redactMessage(text, maxBytes = MESSAGE_MAX_BYTES) {
+  return truncateUtf8(redactSecrets(text), maxBytes);
+}
+
 // ../core/src/upload/bundle.ts
 var isContainer = (value) => value !== null && typeof value === "object";
 function redactLeaves(root) {
@@ -47165,27 +46698,27 @@ function utf8Bytes(text) {
   }
   return out.subarray(0, n);
 }
-function put(block, offset, text) {
+function put2(block, offset, text) {
   for (let i = 0; i < text.length; i++) block[offset + i] = text.charCodeAt(i);
 }
 var octal = (value, digits) => value.toString(8).padStart(digits, "0");
 function header(name, size) {
   const block = new Uint8Array(BLOCK);
-  put(block, 0, name);
-  put(block, 100, "0000644\0");
-  put(block, 108, "0000000\0");
-  put(block, 116, "0000000\0");
-  put(block, 124, `${octal(size, 11)}\0`);
-  put(block, 136, "00000000000\0");
-  put(block, 148, "        ");
-  put(block, 156, "0");
-  put(block, 257, "ustar\0");
-  put(block, 263, "00");
-  put(block, 329, "0000000\0");
-  put(block, 337, "0000000\0");
+  put2(block, 0, name);
+  put2(block, 100, "0000644\0");
+  put2(block, 108, "0000000\0");
+  put2(block, 116, "0000000\0");
+  put2(block, 124, `${octal(size, 11)}\0`);
+  put2(block, 136, "00000000000\0");
+  put2(block, 148, "        ");
+  put2(block, 156, "0");
+  put2(block, 257, "ustar\0");
+  put2(block, 263, "00");
+  put2(block, 329, "0000000\0");
+  put2(block, 337, "0000000\0");
   let sum = 0;
   for (const byte of block) sum += byte;
-  put(block, 148, `${octal(sum, 6)}\0 `);
+  put2(block, 148, `${octal(sum, 6)}\0 `);
   return block;
 }
 function buildUploadTar(entries) {
@@ -47310,19 +46843,6 @@ async function readPolicySettingsSources(deps, paths, symlinks) {
   return { files: read.files, dropped };
 }
 
-// ../node-io/src/chunks.ts
-async function* oneChunk(read) {
-  yield await read();
-}
-function gitChunks(deps, args) {
-  return deps.gitStream ? deps.gitStream(args) : oneChunk(() => deps.git(args));
-}
-async function fileChunks(deps, path) {
-  if (deps.readFileStream) return deps.readFileStream(path);
-  const text = await deps.readFile(path);
-  return text === null ? null : oneChunk(async () => text);
-}
-
 // ../node-io/src/policyFile.ts
 import { lstat as lstat2 } from "node:fs/promises";
 var POLICY_FILE_MAX_BYTES = 1048576;
@@ -47418,11 +46938,6 @@ async function readPolicyFileAt(deps, options) {
 // ../node-io/src/configFile.ts
 var CONFIG_FILE_MAX_BYTES = 1048576;
 var REGULAR_FILE_MODES = /* @__PURE__ */ new Set(["100644", "100755"]);
-async function commitOf(deps, revision) {
-  const out = await deps.git(["rev-parse", "--verify", "--quiet", "--end-of-options", `${revision}^{commit}`]);
-  const oid = out.trim();
-  return OBJECT_ID.test(oid) ? oid : null;
-}
 function treeEntry(tree, name, oidBytes) {
   let at = 0;
   while (at < tree.length) {
@@ -47440,14 +46955,11 @@ function treeEntry(tree, name, oidBytes) {
 async function readConfigFileAt(deps, options) {
   const unreadable = { kind: "unreadable" };
   try {
-    const { base, path } = options;
-    const head = options.head ?? "HEAD";
-    if (isUnsafeTestSourcePath(path) || !isUsableRevision(base) || !isUsableRevision(head)) return unreadable;
-    const baseOid = await commitOf(deps, base);
-    const headOid = await commitOf(deps, head);
-    if (baseOid === null || headOid === null) return unreadable;
-    const mergeBase = (await deps.git(["merge-base", baseOid, headOid])).trim();
-    if (!OBJECT_ID.test(mergeBase)) return unreadable;
+    const { revisions, path } = options;
+    if (isUnsafeTestSourcePath(path) || !isUsableRevision(revisions.base)) return unreadable;
+    const resolved = await revisions.resolve();
+    if ("unresolved" in resolved) return unreadable;
+    const { mergeBase } = resolved;
     const slash = path.lastIndexOf("/");
     const dir = slash === -1 ? "" : path.slice(0, slash);
     const name = path.slice(slash + 1);
@@ -47480,10 +46992,49 @@ async function configCopyInUse(deps, options) {
   if (state === "untouched") return { source: "working-tree" };
   if (state === "added") return { source: "absent" };
   const path = configRepoPath(options.configPath, options.repoRoot);
-  const { gitBatch } = deps;
-  if (path === null || options.base === void 0 || gitBatch === void 0) return { source: "unreadable" };
-  const copy = await readConfigFileAt({ git: (args) => deps.git(args), gitBatch }, { base: options.base, path });
+  if (path === null || options.revisions === void 0) return { source: "unreadable" };
+  const copy = await readConfigFileAt(deps, { revisions: options.revisions, path });
   return copy.kind === "text" ? { source: "merge-base", path, text: copy.text } : { source: "unreadable" };
+}
+async function loadConfig(deps, location) {
+  const text = await deps.readFile(location.path);
+  if (text === null) {
+    if (location.explicit) throw new ConfigError(`config file not found: ${location.name}`);
+    return {};
+  }
+  try {
+    return parseConfig(text);
+  } catch (err) {
+    throw new ConfigError(`${location.name}: ${errorText(err)}`);
+  }
+}
+async function loadConfigInUse(deps, location) {
+  const copy = await configCopyInUse(deps, {
+    diff: location.diff,
+    revisions: location.revisions,
+    configPath: location.configPath,
+    repoRoot: location.repoRoot
+  });
+  if (copy.source === "working-tree") return { config: await loadConfig(deps, location) };
+  const headConfigExclude = headExclusions(await deps.readFile(location.path));
+  const head = headConfigExclude === void 0 ? {} : { headConfigExclude };
+  if (copy.source !== "merge-base") return { config: {}, configSource: copy.source, ...head };
+  try {
+    return { config: parseConfig(copy.text), configSource: "merge-base", ...head };
+  } catch (err) {
+    throw new ConfigError(`${copy.path} at the merge base: ${errorText(err)}`);
+  }
+}
+function headExclusions(text) {
+  if (text === null) return void 0;
+  try {
+    return parseConfig(text).coverage?.exclude;
+  } catch {
+    return void 0;
+  }
+}
+function errorText(err) {
+  return err instanceof Error ? err.message : String(err);
 }
 
 // ../node-io/src/coverage.ts
@@ -47509,7 +47060,7 @@ async function readCoverageFiles(deps, options) {
     const coveragePath = deps.resolvePath(baseDir, entry);
     if (seen.has(coveragePath)) continue;
     seen.add(coveragePath);
-    const chunks = await fileChunks(deps, coveragePath);
+    const chunks = await deps.readFileStream(coveragePath);
     if (chunks === null) {
       coverageFiles.push({ missingFile: name(entry) });
       continue;
@@ -47560,214 +47111,11 @@ async function readDiscoveredCoverage(deps, options) {
     log,
     literal: true
   });
-  return { files, format };
-}
-
-// ../node-io/src/io.ts
-import { execFile, spawn } from "node:child_process";
-import { open as open2, readdir as readdir2, readFile as readFileText } from "node:fs/promises";
-var GIT_TIMEOUT_MS = 12e4;
-var LOCAL_GIT_SUBCOMMANDS = [
-  "cat-file",
-  "diff",
-  "hash-object",
-  "log",
-  "ls-files",
-  "ls-tree",
-  "merge-base",
-  "rev-parse"
-];
-var REFUSED_OPTION_PREFIXES = ["--upload-pack", "--receive-pack", "--exec", "--output", "--ext-diff"];
-function localGitArgs(args) {
-  const subcommand = LOCAL_GIT_SUBCOMMANDS.find((name) => name === args[0]);
-  if (subcommand === void 0) {
-    throw new Error(
-      `git ${args[0] ?? ""} is not allowed: pharn-ci runs only these git subcommands: ${LOCAL_GIT_SUBCOMMANDS.join(", ")}`
-    );
-  }
-  const safe = [subcommand];
-  let options = true;
-  for (const arg of args.slice(1)) {
-    if (options && (arg === "--end-of-options" || arg === "--")) {
-      options = false;
-    } else if (options && (REFUSED_OPTION_PREFIXES.some((prefix) => arg.startsWith(prefix)) || subcommand === "hash-object" && arg === "-w" || subcommand === "cat-file" && (arg.startsWith("--textconv") || arg.startsWith("--filters")))) {
-      throw new Error(`git ${subcommand}: the option "${arg}" is not allowed`);
-    }
-    safe.push(`${arg}`);
-  }
-  return safe;
-}
-async function* streamGit(cwd, gitArgs, timeoutMs = GIT_TIMEOUT_MS) {
-  const args = localGitArgs(gitArgs);
-  const child = spawn("git", args, { cwd, stdio: ["pipe", "pipe", "pipe"] });
-  let stderr = "";
-  let timedOut = false;
-  child.stdin.on("error", () => {
-  });
-  child.stderr.setEncoding("utf8");
-  child.stderr.on("data", (chunk) => {
-    stderr += chunk;
-  });
-  const closed = new Promise((done) => {
-    child.on("error", (error2) => done({ code: null, error: error2 }));
-    child.on("close", (code2) => done({ code: code2 }));
-  });
-  const timer = setTimeout(() => {
-    timedOut = true;
-    child.kill();
-  }, timeoutMs);
-  try {
-    child.stdout.setEncoding("utf8");
-    for await (const chunk of child.stdout) yield chunk;
-    const { code: code2, error: error2 } = await closed;
-    if (timedOut) throw new Error(`git ${args[0] ?? ""} timed out after ${timeoutMs / 1e3} s`);
-    if (error2) throw error2;
-    if (code2 !== 0) throw new Error(stderr || `Command failed: git ${args.join(" ")}`);
-  } finally {
-    clearTimeout(timer);
-    if (child.exitCode === null && child.signalCode === null) child.kill();
-  }
-}
-function runGit(cwd, gitArgs, timeoutMs = GIT_TIMEOUT_MS) {
-  let args;
-  try {
-    args = localGitArgs(gitArgs);
-  } catch (err) {
-    return Promise.reject(err);
-  }
-  return new Promise((ok, fail2) => {
-    execFile(
-      "git",
-      args,
-      { cwd, maxBuffer: 256 * 1024 * 1024, encoding: "utf8", timeout: timeoutMs },
-      (err, stdout, stderr) => {
-        if (err?.killed) fail2(new Error(`git ${args[0] ?? ""} timed out after ${timeoutMs / 1e3} s`));
-        else if (err) fail2(new Error(stderr || err.message));
-        else ok(stdout);
-      }
-    );
-  });
-}
-var GIT_BATCH_MAX_BUFFER = 64 * 1024 * 1024;
-function runGitBatch(cwd, gitArgs, input, timeoutMs = GIT_TIMEOUT_MS) {
-  let args;
-  try {
-    args = localGitArgs(gitArgs);
-  } catch (err) {
-    return Promise.reject(err);
-  }
-  return new Promise((ok, fail2) => {
-    const child = execFile(
-      "git",
-      args,
-      {
-        cwd,
-        maxBuffer: GIT_BATCH_MAX_BUFFER,
-        encoding: "buffer",
-        timeout: timeoutMs,
-        env: { ...process.env, GIT_NO_LAZY_FETCH: "1" }
-      },
-      (err, stdout, stderr) => {
-        if (err?.killed) fail2(new Error(`git ${args[0] ?? ""} timed out after ${timeoutMs / 1e3} s`));
-        else if (err) fail2(new Error(stderr.toString("utf8") || err.message));
-        else ok(stdout);
-      }
-    );
-    child.stdin?.on("error", () => {
-    });
-    child.stdin?.end(input);
-  });
-}
-async function readFile(path) {
-  try {
-    return await readFileText(path, "utf8");
-  } catch (err) {
-    if (err.code === "ENOENT") return null;
-    throw err;
-  }
-}
-async function readFileStream(path) {
-  let handle;
-  try {
-    handle = await open2(path, "r");
-  } catch (err) {
-    if (err.code === "ENOENT") return null;
-    throw err;
-  }
-  return handle.createReadStream({ encoding: "utf8" });
-}
-async function listDir(path) {
-  try {
-    const entries = await readdir2(path, { withFileTypes: true });
-    return entries.map(
-      (entry) => ({
-        name: entry.name,
-        kind: entry.isSymbolicLink() ? "symlink" : entry.isDirectory() ? "directory" : entry.isFile() ? "file" : "other"
-      })
-    );
-  } catch (err) {
-    const code2 = err.code;
-    if (code2 === "ENOENT" || code2 === "ENOTDIR") return null;
-    throw err;
-  }
-}
-
-// ../node-io/src/junit.ts
-var MAX_JUNIT_GLOB_FILES = 1e3;
-var MAX_JUNIT_WALK_ENTRIES = 1e5;
-async function readJunitFiles(deps, options) {
-  const patterns = options.patterns.map((pattern) => parseExcludePattern(pattern, options.label));
-  const budget = { files: 0, entries: 0 };
-  const limits = { files: MAX_JUNIT_GLOB_FILES, entries: MAX_JUNIT_WALK_ENTRIES };
-  const listDir2 = (dir) => deps.listDir(deps.resolvePath(options.baseDir, dir));
-  const paths = [];
-  const seen = /* @__PURE__ */ new Set();
-  let walkLimit = false;
-  for (const pattern of patterns) {
-    let found;
-    try {
-      found = await walkGlob(pattern, listDir2, budget, limits);
-    } catch (err) {
-      if (!(err instanceof WalkLimitError)) throw err;
-      walkLimit = true;
-      break;
-    }
-    for (const path of found) {
-      if (seen.has(path)) continue;
-      seen.add(path);
-      paths.push(path);
-    }
-  }
-  const files = [];
-  let bytes = 0;
-  let overBytes = false;
-  for (const [index, path] of paths.entries()) {
-    if (index >= JUNIT_MAX_FILES) {
-      files.push({ path, dropped: "file-cap" });
-      continue;
-    }
-    if (overBytes) {
-      files.push({ path, dropped: "byte-cap" });
-      continue;
-    }
-    const chunks = await fileChunks(deps, deps.resolvePath(options.baseDir, path));
-    if (chunks === null) continue;
-    const parts = [];
-    for await (const chunk of chunks) {
-      bytes += utf8ByteLength(chunk);
-      if (bytes > JUNIT_MAX_TOTAL_BYTES) {
-        overBytes = true;
-        break;
-      }
-      parts.push(chunk);
-    }
-    files.push(overBytes ? { path, dropped: "byte-cap" } : { path, text: parts.join("") });
-  }
-  return walkLimit ? { files, walkLimit } : { files };
+  return { files };
 }
 
 // ../node-io/src/pythonIndex.ts
-import { execFile as execFile2 } from "node:child_process";
+import { execFile } from "node:child_process";
 import { tmpdir } from "node:os";
 
 // ../node-io/src/pythonIndexScript.ts
@@ -48549,7 +47897,7 @@ function decodeStrict(data) {
 }
 var spawnPython = (command, args, options, stdin) => new Promise((resolve2) => {
   try {
-    const child = execFile2(
+    const child = execFile(
       command,
       [...args],
       { ...options, encoding: "buffer" },
@@ -48667,10 +48015,63 @@ async function indexPythonTestSources(sources, index = (files) => indexPythonTes
   return pythonTestIndexFromRun(sources, run2);
 }
 
+// ../node-io/src/revisions.ts
+var revParseArgs = (revision) => [
+  "rev-parse",
+  "--verify",
+  "--quiet",
+  "--end-of-options",
+  `${revision}^{commit}`
+];
+function runRevisions(deps, base, printedBase) {
+  let answer;
+  const commit = async (revision, label, printed) => {
+    let out = printed;
+    if (out === void 0) {
+      try {
+        out = await deps.git(revParseArgs(revision));
+      } catch (err) {
+        throw new StepFailed(`git rev-parse could not resolve the ${label}: ${firstLine(err)}`);
+      }
+    }
+    const oid = out.trim();
+    if (!OBJECT_ID.test(oid))
+      throw new StepFailed(`git rev-parse could not resolve the ${label}: no commit id was printed`);
+    return oid;
+  };
+  const find = async () => {
+    try {
+      const baseOid = await commit(base, "base", printedBase);
+      const headOid = await commit("HEAD", "head");
+      let out;
+      try {
+        out = await deps.git(["merge-base", baseOid, headOid]);
+      } catch (err) {
+        throw new StepFailed(`git merge-base failed: ${firstLine(err)}`);
+      }
+      const mergeBase = out.trim();
+      if (!OBJECT_ID.test(mergeBase)) throw new StepFailed("git merge-base failed: no commit id was printed");
+      return { base: baseOid, head: headOid, mergeBase };
+    } catch (err) {
+      return { unresolved: err instanceof StepFailed ? err.message : `git could not be read: ${firstLine(err)}` };
+    }
+  };
+  return {
+    base,
+    resolve: () => {
+      answer ??= find();
+      return answer;
+    }
+  };
+}
+async function diffEnds(revisions) {
+  const resolved = await revisions.resolve();
+  return "unresolved" in resolved ? { base: revisions.base, head: "HEAD" } : { base: resolved.base, head: resolved.head };
+}
+
 // ../node-io/src/staleInstructions.ts
 var MAX_MANIFEST_BYTES = 512 * 1024;
 var MANIFESTS = ["package.json", "Makefile"];
-var SECONDS = /^\d{1,12}$/;
 async function readBlobs(deps, requests) {
   const checked = await batchCheck(
     deps,
@@ -48697,10 +48098,11 @@ async function readStaleInstructionSources(deps, options) {
   const touched = (path) => options.diff.some((file) => file.path === path || file.oldPath === path);
   try {
     let mergeBase = null;
-    const { base } = options;
-    if (base !== void 0 && !base.startsWith("-") && deps.git !== void 0 && MANIFESTS.some(touched)) {
-      const out = (await deps.git(["merge-base", base, "HEAD"])).trim();
-      if (OBJECT_ID.test(out)) mergeBase = out;
+    const { revisions } = options;
+    if (revisions !== void 0 && !revisions.base.startsWith("-") && MANIFESTS.some(touched)) {
+      const resolved = await revisions.resolve();
+      if ("unresolved" in resolved) throw new Error(resolved.unresolved);
+      mergeBase = resolved.mergeBase;
     }
     const requests = [];
     for (const manifest of MANIFESTS) {
@@ -48721,55 +48123,15 @@ async function readStaleInstructionSources(deps, options) {
     sources.makefile = sides.Makefile;
   } catch {
   }
-  if (deps.git !== void 0) {
-    const timed = staleTimestampPaths({ instructions, diff: options.diff, repoFiles: options.repoFiles, agentSetup }).filter((path) => !isUnsafeTestSourcePath(path)).slice(0, MAX_TIMESTAMP_FILES);
-    if (timed.length > 0) {
-      try {
-        const head = (await deps.git(["log", "-1", "--format=%ct", "HEAD"])).trim();
-        if (SECONDS.test(head)) {
-          const files = [];
-          for (const path of timed) {
-            const out = (await deps.git(["log", "-1", "--format=%ct", "HEAD", "--", `:(top,literal)${path}`])).trim();
-            if (SECONDS.test(out)) files.push({ path, time: Number(out) });
-          }
-          sources.commitTimes = { head: Number(head), files };
-        }
-      } catch {
-      }
-    }
-  }
   return sources;
 }
 
 // ../node-io/src/testSources.ts
-async function resolveRevision(deps, revision, label) {
-  let out;
-  try {
-    out = await deps.git(["rev-parse", "--verify", "--quiet", "--end-of-options", `${revision}^{commit}`]);
-  } catch (err) {
-    throw new StepFailed(`git rev-parse could not resolve the ${label}: ${firstLine(err)}`);
-  }
-  const oid = out.trim();
-  if (!OBJECT_ID.test(oid))
-    throw new StepFailed(`git rev-parse could not resolve the ${label}: no commit id was printed`);
-  return oid;
-}
-async function mergeBaseOf(deps, baseOid, headOid) {
-  let out;
-  try {
-    out = await deps.git(["merge-base", baseOid, headOid]);
-  } catch (err) {
-    throw new StepFailed(`git merge-base failed: ${firstLine(err)}`);
-  }
-  const oid = out.trim();
-  if (!OBJECT_ID.test(oid)) throw new StepFailed("git merge-base failed: no commit id was printed");
-  return oid;
-}
 async function readTestSources(deps, options) {
   try {
-    const baseOid = await resolveRevision(deps, options.base, "base");
-    const headOid = await resolveRevision(deps, options.head ?? "HEAD", "head");
-    const mergeBase = await mergeBaseOf(deps, baseOid, headOid);
+    const revisions = await options.revisions.resolve();
+    if ("unresolved" in revisions) return unavailableTestSources(revisions.unresolved);
+    const { head: headOid, mergeBase } = revisions;
     const selected = (options.select ?? selectTestSourcePaths)(options.diff);
     const requests = [
       ...selected.base.filter((path) => !isUnsafeTestSourcePath(path)).map((path) => ({ oid: mergeBase, path })),
@@ -48817,6 +48179,417 @@ async function readTestSources(deps, options) {
   } catch (err) {
     return unavailableTestSources(err instanceof StepFailed ? err.message : `git could not be read: ${firstLine(err)}`);
   }
+}
+
+// ../node-io/src/gatherSources.ts
+async function gatherSources(deps, options) {
+  const out = {};
+  const lsTree = options.checkout === "pr-number" ? null : await readHeadTree(deps, options.warn);
+  if (lsTree !== null) out.repoFileBytes = parseLsTreeSizes(lsTree);
+  const testSources = await gatherTestSources(deps, options);
+  if (testSources !== void 0) {
+    out.testSources = testSources;
+    const pythonTestIndex = await indexPythonTestSources(testSources, deps.indexPython ?? indexPythonTests);
+    if (pythonTestIndex !== void 0) {
+      out.pythonTestIndex = pythonTestIndex;
+      if (!pythonTestIndex.available) {
+        options.log(
+          "parsed" in options.diff && pythonNotFoundStopsComparison(options.diff.parsed, pythonTestIndex) ? "pharn-ci: no Python interpreter was found (python-not-found), so TI02 and TI05 did not run" : `pharn-ci: the Python test index is unavailable (${pythonTestIndex.reason}), so .py test files are not compared, which fails the run in mode block`
+        );
+      }
+    }
+  }
+  const agentConfigSources = await gatherAgentConfigSources(deps, options);
+  if (agentConfigSources !== void 0) out.agentConfigSources = agentConfigSources;
+  const agentInstructionSources = await gatherAgentInstructionSources(deps, options);
+  if (agentInstructionSources !== void 0) out.agentInstructionSources = agentInstructionSources;
+  const policySettingsSources = await gatherPolicySettingsSources(deps, options, lsTree);
+  if (policySettingsSources !== void 0) out.policySettingsSources = policySettingsSources;
+  const selfModificationSources = await gatherSelfModificationSources(deps, options);
+  if (selfModificationSources !== void 0) out.selfModificationSources = selfModificationSources;
+  const staleInstructionSources = await gatherStaleInstructionSources(deps, options);
+  if (staleInstructionSources !== void 0) out.staleInstructionSources = staleInstructionSources;
+  const dependencySources = await gatherDependencySources(deps, options);
+  if (dependencySources !== void 0) out.dependencySources = dependencySources;
+  return out;
+}
+async function headIsInBase(revisions) {
+  const resolved = await revisions.resolve();
+  return !("unresolved" in resolved) && resolved.mergeBase === resolved.head;
+}
+async function readHeadTree(deps, warn) {
+  try {
+    return await deps.git(["ls-tree", "-r", "-l", "-z", "--full-tree", "HEAD"]);
+  } catch (err) {
+    warn(`pharn-ci: git ls-tree failed, so empty agent setup files are not reported: ${firstLine(err)}`);
+    return null;
+  }
+}
+function baseAndHeadUnread(options) {
+  if (options.checkout === "pr-number") return "pr-number mode: the diff came from the GitHub API";
+  if ("text" in options.diff) return "the diff came from the GitHub compare API";
+  if ("unavailable" in options.diff) return "the diff is unavailable";
+  if (options.revisions === void 0) return "reading git objects is not available";
+  return null;
+}
+function headUnread(options, what) {
+  if (options.checkout === "head") return null;
+  if (options.checkout === "pr-number") {
+    return `pr-number mode: the checkout is not the pull request head, so its committed ${what} were not read`;
+  }
+  return "text" in options.diff ? "the diff came from the GitHub compare API, so the checkout may not be the pull request head" : "the diff is unavailable, so the checkout may not be the pull request head";
+}
+function policyDocumentInForce(policy) {
+  return policy !== void 0 && (policy.source === "app" || policy.source === "file") && policy.document !== null;
+}
+var emptySources = () => ({ base: { files: [], dropped: [] }, head: { files: [], dropped: [] } });
+async function gatherTestSources(deps, options) {
+  if (resolveTestIntegrityMode(options.testIntegrityMode).mode === "off") return void 0;
+  const { diff, revisions } = options;
+  const unread = baseAndHeadUnread(options);
+  if (unread !== null || revisions === void 0 || !("parsed" in diff)) {
+    return unavailableTestSources(unread ?? "reading git objects is not available");
+  }
+  const sources = await readTestSources(deps, { revisions, diff: diff.parsed });
+  if ("unavailable" in sources.base) {
+    options.log(
+      `pharn-ci: could not read the test and test-config files from git, so they are not compared: ${sources.base.unavailable}`
+    );
+  }
+  return sources;
+}
+async function gatherAgentConfigSources(deps, options) {
+  const paths = agentConfigSecretPaths(scanAgentSetup(options.repoFiles));
+  if (paths.length === 0) return void 0;
+  const unread = headUnread(options, "agent config files");
+  if (unread !== null) return { unavailable: unread };
+  const sources = await readAgentConfigSources(deps, paths);
+  if ("unavailable" in sources) {
+    options.log(
+      `pharn-ci: could not read the agent config files from git, so they are not scanned for secrets: ${sources.unavailable}`
+    );
+  }
+  return sources;
+}
+async function gatherAgentInstructionSources(deps, options) {
+  if (options.policy === void 0 || consistencySeverity(options.policy).severity === null) return void 0;
+  const paths = agentInstructionPaths(scanAgentSetup(options.repoFiles));
+  if (paths.length === 0) return void 0;
+  const unread = headUnread(options, "agent instruction files");
+  if (unread !== null) return { unavailable: unread };
+  const sources = await readAgentConfigSources(deps, paths);
+  if ("unavailable" in sources) {
+    options.log(
+      `pharn-ci: could not read the agent instruction files from git, so P07 did not compare them: ${sources.unavailable}`
+    );
+  }
+  return sources;
+}
+async function gatherPolicySettingsSources(deps, options, lsTree) {
+  const { policy } = options;
+  if (policy === void 0 || policy.document === null) return void 0;
+  if (!policyDocumentInForce(policy)) return void 0;
+  const unread = headUnread(options, "agent settings files");
+  if (unread !== null) return { unavailable: unread };
+  const paths = policySettingsPaths(options.repoFiles, policy.document);
+  if (paths.length === 0) return { files: [], dropped: [] };
+  const sources = await readPolicySettingsSources(deps, paths, lsTree === null ? null : parseLsTreeSymlinks(lsTree));
+  if ("unavailable" in sources) {
+    options.log(
+      `pharn-ci: could not read the agent settings files from git, so they are not checked against the org policy: ${sources.unavailable}`
+    );
+  }
+  return sources;
+}
+async function gatherSelfModificationSources(deps, options) {
+  if (!policyDocumentInForce(options.policy)) return void 0;
+  return readChangedSources(deps, options, {
+    select: selectSelfModificationPaths,
+    what: "the agent settings, MCP, workflow and CODEOWNERS files",
+    effect: "rule P13 could not compare them"
+  });
+}
+async function gatherDependencySources(deps, options) {
+  if (resolveDependencySettings(options.dependencySettings).mode === "never") return void 0;
+  return readChangedSources(deps, options, {
+    select: (files) => selectDependencyPaths(files, options.repoFiles),
+    what: "the manifests and lockfiles",
+    effect: "dependency safety could not compare them",
+    limits: DEPENDENCY_SOURCE_LIMITS
+  });
+}
+async function readChangedSources(deps, options, read) {
+  const { diff, revisions } = options;
+  const unread = baseAndHeadUnread(options);
+  if (unread !== null || revisions === void 0 || !("parsed" in diff)) {
+    return unavailableTestSources(unread ?? "reading git objects is not available");
+  }
+  const selected = read.select(diff.parsed);
+  if (selected.base.length === 0 && selected.head.length === 0) return emptySources();
+  const sources = await readTestSources(deps, {
+    revisions,
+    diff: diff.parsed,
+    select: read.select,
+    limits: read.limits
+  });
+  if ("unavailable" in sources.base) {
+    options.log(`pharn-ci: could not read ${read.what} from git, so ${read.effect}: ${sources.base.unavailable}`);
+  }
+  return sources;
+}
+async function gatherPolicyFileBase(deps, options) {
+  const { policy, revisions } = options;
+  if (policy?.source !== "file") return void 0;
+  if (baseAndHeadUnread(options) !== null || revisions === void 0 || policy.path === void 0) {
+    return { kind: "unreadable" };
+  }
+  return readPolicyFileAt(deps, { rev: (await diffEnds(revisions)).base, path: policy.path });
+}
+async function gatherStaleInstructionSources(deps, options) {
+  const { diff, revisions } = options;
+  if (options.checkout === "pr-number" || !("parsed" in diff)) return void 0;
+  const sources = await readStaleInstructionSources(deps, {
+    repoFiles: options.repoFiles,
+    diff: diff.parsed,
+    revisions
+  });
+  if (sources !== void 0 && "unavailable" in sources.instructions) {
+    options.log(
+      `pharn-ci: could not read the agent instruction files from git, so stale instructions are not checked: ${sources.instructions.unavailable}`
+    );
+  }
+  return sources;
+}
+
+// ../node-io/src/httpBody.ts
+async function readCapped(response, maxBytes) {
+  if (response.body === null) return "";
+  const reader = response.body.getReader();
+  const chunks = [];
+  let total = 0;
+  for (; ; ) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel().catch(() => {
+      });
+      return null;
+    }
+    chunks.push(value);
+  }
+  const bytes = new Uint8Array(total);
+  let at = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, at);
+    at += chunk.byteLength;
+  }
+  return new TextDecoder("utf-8").decode(bytes);
+}
+
+// ../node-io/src/io.ts
+import { execFile as execFile2, spawn } from "node:child_process";
+import { open as open2, readdir as readdir2, readFile as readFileText } from "node:fs/promises";
+var GIT_TIMEOUT_MS = 12e4;
+var LOCAL_GIT_SUBCOMMANDS = [
+  "cat-file",
+  "diff",
+  "hash-object",
+  "log",
+  "ls-files",
+  "ls-tree",
+  "merge-base",
+  "rev-parse"
+];
+var REFUSED_OPTION_PREFIXES = ["--upload-pack", "--receive-pack", "--exec", "--output", "--ext-diff"];
+function localGitArgs(args) {
+  const subcommand = LOCAL_GIT_SUBCOMMANDS.find((name) => name === args[0]);
+  if (subcommand === void 0) {
+    throw new Error(
+      `git ${args[0] ?? ""} is not allowed: pharn-ci runs only these git subcommands: ${LOCAL_GIT_SUBCOMMANDS.join(", ")}`
+    );
+  }
+  const safe = [subcommand];
+  let options = true;
+  for (const arg of args.slice(1)) {
+    if (options && (arg === "--end-of-options" || arg === "--")) {
+      options = false;
+    } else if (options && (REFUSED_OPTION_PREFIXES.some((prefix) => arg.startsWith(prefix)) || subcommand === "hash-object" && arg === "-w" || subcommand === "cat-file" && (arg.startsWith("--textconv") || arg.startsWith("--filters")))) {
+      throw new Error(`git ${subcommand}: the option "${arg}" is not allowed`);
+    }
+    safe.push(`${arg}`);
+  }
+  return safe;
+}
+async function* streamGit(cwd, gitArgs, timeoutMs = GIT_TIMEOUT_MS) {
+  const args = localGitArgs(gitArgs);
+  const child = spawn("git", args, { cwd, stdio: ["pipe", "pipe", "pipe"] });
+  let stderr = "";
+  let timedOut = false;
+  child.stdin.on("error", () => {
+  });
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (chunk) => {
+    stderr += chunk;
+  });
+  const closed = new Promise((done) => {
+    child.on("error", (error2) => done({ code: null, error: error2 }));
+    child.on("close", (code2) => done({ code: code2 }));
+  });
+  const timer = setTimeout(() => {
+    timedOut = true;
+    child.kill();
+  }, timeoutMs);
+  try {
+    child.stdout.setEncoding("utf8");
+    for await (const chunk of child.stdout) yield chunk;
+    const { code: code2, error: error2 } = await closed;
+    if (timedOut) throw new Error(`git ${args[0] ?? ""} timed out after ${timeoutMs / 1e3} s`);
+    if (error2) throw error2;
+    if (code2 !== 0) throw new Error(stderr || `Command failed: git ${args.join(" ")}`);
+  } finally {
+    clearTimeout(timer);
+    if (child.exitCode === null && child.signalCode === null) child.kill();
+  }
+}
+function runGit(cwd, gitArgs, timeoutMs = GIT_TIMEOUT_MS) {
+  let args;
+  try {
+    args = localGitArgs(gitArgs);
+  } catch (err) {
+    return Promise.reject(err);
+  }
+  return new Promise((ok, fail2) => {
+    execFile2(
+      "git",
+      args,
+      { cwd, maxBuffer: 256 * 1024 * 1024, encoding: "utf8", timeout: timeoutMs },
+      (err, stdout, stderr) => {
+        if (err?.killed) fail2(new Error(`git ${args[0] ?? ""} timed out after ${timeoutMs / 1e3} s`));
+        else if (err) fail2(new Error(stderr || err.message));
+        else ok(stdout);
+      }
+    );
+  });
+}
+var GIT_BATCH_MAX_BUFFER = 64 * 1024 * 1024;
+function runGitBatch(cwd, gitArgs, input, timeoutMs = GIT_TIMEOUT_MS) {
+  let args;
+  try {
+    args = localGitArgs(gitArgs);
+  } catch (err) {
+    return Promise.reject(err);
+  }
+  return new Promise((ok, fail2) => {
+    const child = execFile2(
+      "git",
+      args,
+      {
+        cwd,
+        maxBuffer: GIT_BATCH_MAX_BUFFER,
+        encoding: "buffer",
+        timeout: timeoutMs,
+        env: { ...process.env, GIT_NO_LAZY_FETCH: "1" }
+      },
+      (err, stdout, stderr) => {
+        if (err?.killed) fail2(new Error(`git ${args[0] ?? ""} timed out after ${timeoutMs / 1e3} s`));
+        else if (err) fail2(new Error(stderr.toString("utf8") || err.message));
+        else ok(stdout);
+      }
+    );
+    child.stdin?.on("error", () => {
+    });
+    child.stdin?.end(input);
+  });
+}
+async function readFile(path) {
+  try {
+    return await readFileText(path, "utf8");
+  } catch (err) {
+    if (err.code === "ENOENT") return null;
+    throw err;
+  }
+}
+async function readFileStream(path) {
+  let handle;
+  try {
+    handle = await open2(path, "r");
+  } catch (err) {
+    if (err.code === "ENOENT") return null;
+    throw err;
+  }
+  return handle.createReadStream({ encoding: "utf8" });
+}
+async function listDir(path) {
+  try {
+    const entries = await readdir2(path, { withFileTypes: true });
+    return entries.map(
+      (entry) => ({
+        name: entry.name,
+        kind: entry.isSymbolicLink() ? "symlink" : entry.isDirectory() ? "directory" : entry.isFile() ? "file" : "other"
+      })
+    );
+  } catch (err) {
+    const code2 = err.code;
+    if (code2 === "ENOENT" || code2 === "ENOTDIR") return null;
+    throw err;
+  }
+}
+
+// ../node-io/src/junit.ts
+var MAX_JUNIT_GLOB_FILES = 1e3;
+var MAX_JUNIT_WALK_ENTRIES = 1e5;
+async function readJunitFiles(deps, options) {
+  const { paths, walkLimit } = await matchJunitFiles(deps, options);
+  const files = [];
+  let bytes = 0;
+  let overBytes = false;
+  for (const [index, path] of paths.entries()) {
+    if (index >= JUNIT_MAX_FILES) {
+      files.push({ path, dropped: "file-cap" });
+      continue;
+    }
+    if (overBytes) {
+      files.push({ path, dropped: "byte-cap" });
+      continue;
+    }
+    const chunks = await deps.readFileStream(deps.resolvePath(options.baseDir, path));
+    if (chunks === null) continue;
+    const parts = [];
+    for await (const chunk of chunks) {
+      bytes += utf8ByteLength(chunk);
+      if (bytes > JUNIT_MAX_TOTAL_BYTES) {
+        overBytes = true;
+        break;
+      }
+      parts.push(chunk);
+    }
+    files.push(overBytes ? { path, dropped: "byte-cap" } : { path, text: parts.join("") });
+  }
+  return walkLimit ? { files, walkLimit } : { files };
+}
+async function matchJunitFiles(deps, options) {
+  const patterns = options.patterns.map((pattern) => parseExcludePattern(pattern, options.label));
+  const budget = { files: 0, entries: 0 };
+  const limits = { files: MAX_JUNIT_GLOB_FILES, entries: MAX_JUNIT_WALK_ENTRIES };
+  const listDir2 = (dir) => deps.listDir(deps.resolvePath(options.baseDir, dir));
+  const paths = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const pattern of patterns) {
+    let found;
+    try {
+      found = await walkGlob(pattern, listDir2, budget, limits);
+    } catch (err) {
+      if (!(err instanceof WalkLimitError)) throw err;
+      return { paths, walkLimit: true };
+    }
+    for (const path of found) {
+      if (seen.has(path)) continue;
+      seen.add(path);
+      paths.push(path);
+    }
+  }
+  return { paths, walkLimit: false };
 }
 
 // src/node-io.ts
@@ -49080,25 +48853,33 @@ async function tokenWithin(getIDToken2, ms) {
     clearTimeout(timer);
   }
 }
-async function requestAppToken(deps, noTokenLine = NO_TOKEN_LINE) {
+var ERROR_CLASS = /^[A-Za-z][A-Za-z0-9]{0,63}$/;
+function errorClassOf(error2) {
+  const name = error2 instanceof Error ? error2.name : void 0;
+  return typeof name === "string" && ERROR_CLASS.test(name) ? name : "Error";
+}
+function tokenFailedLine(errorClass) {
+  return `pharn-ci: the job grants \`id-token: write\`, but the OIDC token request for the org policy failed (${errorClass})`;
+}
+async function requestAppToken(deps, noTokenLine) {
   const { getIDToken: getIDToken2, setSecret: setSecret2 } = deps;
   if (!oidcOffered(deps) || getIDToken2 === void 0 || setSecret2 === void 0) {
-    deps.info(noTokenLine);
-    return null;
+    deps.info(noTokenLine ?? NO_TOKEN_LINE);
+    return { kind: "not-offered" };
   }
+  const failed2 = (errorClass) => {
+    deps.info(noTokenLine ?? tokenFailedLine(errorClass));
+    return { kind: "failed", errorClass };
+  };
   let token;
   try {
     token = await tokenWithin(getIDToken2, deps.tokenTimeoutMs ?? APP_TOKEN_TIMEOUT_MS);
-  } catch {
-    deps.info(noTokenLine);
-    return null;
+  } catch (error2) {
+    return failed2(errorClassOf(error2));
   }
-  if (typeof token !== "string" || token === "") {
-    deps.info(noTokenLine);
-    return null;
-  }
+  if (typeof token !== "string" || token === "") return failed2("empty token");
   setSecret2(token);
-  return token;
+  return { kind: "token", token };
 }
 var REQUEST_ID = /^[A-Za-z0-9-]{1,64}$/;
 var defaultSleep = (ms) => new Promise((resolve2) => setTimeout(resolve2, ms));
@@ -49111,8 +48892,6 @@ async function appRequest(deps, request2) {
   return attempt(deps, request2);
 }
 async function attempt(deps, request2) {
-  const doFetch = deps.fetch;
-  if (doFetch === void 0) return { kind: "network" };
   let timeoutMs = deps.timeoutMs ?? request2.timeoutMs ?? APP_TIMEOUT_MS;
   if (request2.remainingMs !== void 0) {
     const left = request2.remainingMs();
@@ -49123,7 +48902,7 @@ async function attempt(deps, request2) {
   const post = request2.method === "POST";
   let response;
   try {
-    response = await doFetch(request2.url.href, {
+    response = await deps.fetch(request2.url.href, {
       method: post ? "POST" : "GET",
       headers: {
         Accept: "application/json",
@@ -49151,35 +48930,11 @@ async function attempt(deps, request2) {
     return answer;
   }
   try {
-    const read = await readCapped(response);
+    const read = await readCapped(response, APP_MAX_BODY_BYTES);
     return read === null ? { ...answer, tooLarge: true } : { ...answer, body: read };
   } catch {
     return signal2.aborted ? { kind: "timeout" } : { kind: "network" };
   }
-}
-async function readCapped(response) {
-  if (response.body === null) return "";
-  const reader = response.body.getReader();
-  const chunks = [];
-  let total = 0;
-  for (; ; ) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    total += value.byteLength;
-    if (total > APP_MAX_BODY_BYTES) {
-      await reader.cancel().catch(() => {
-      });
-      return null;
-    }
-    chunks.push(value);
-  }
-  const bytes = new Uint8Array(total);
-  let at = 0;
-  for (const chunk of chunks) {
-    bytes.set(chunk, at);
-    at += chunk.byteLength;
-  }
-  return new TextDecoder("utf-8").decode(bytes);
 }
 
 // src/policy-input.ts
@@ -49197,19 +48952,11 @@ function parsePolicyInput(value) {
 var REPOSITORY = /^(?:[A-Za-z0-9-]{1,39}|(?=[A-Za-z0-9_-]{1,39}\/)[A-Za-z0-9][A-Za-z0-9-]*_[A-Za-z0-9]{3,8})\/[A-Za-z0-9._-]{1,100}$/;
 var JSON_CONTENT_TYPE = /^application\/json\s*(?:;|$)/i;
 async function fetchAppPolicy(deps, options) {
-  let settings2;
-  const policy = await requestPolicy(deps, options, (value) => {
-    settings2 = value;
-  });
-  const used = settings2;
-  return used === void 0 ? { policy } : { policy, ...used };
-}
-async function requestPolicy(deps, options, onSettings) {
   const required = options.mode === "required";
   const unavailable2 = (reason, extra = {}) => {
     if (extra.requestId !== void 0)
       deps.info(`pharn-ci: the org policy request failed (request id ${extra.requestId})`);
-    return {
+    const policy = {
       source: "none",
       version: null,
       document: null,
@@ -49222,17 +48969,22 @@ async function requestPolicy(deps, options, onSettings) {
         required
       }
     };
+    return { policy };
   };
   const silent = (extra = {}) => ({
-    source: "none",
-    version: null,
-    document: null,
-    ...extra.noApp === true ? { noApp: true } : {},
-    ...extra.noInstallation === true ? { noInstallation: true } : {}
+    policy: {
+      source: "none",
+      version: null,
+      document: null,
+      ...extra.noApp === true ? { noApp: true } : {},
+      ...extra.noInstallation === true ? { noInstallation: true } : {}
+    }
   });
   if (oidcOffered(deps) && !REPOSITORY.test(options.repository)) return unavailable2("no-repository");
-  const token = await requestAppToken(deps);
-  if (token === null) return required ? unavailable2("no-oidc-token") : silent();
+  const tokenResult = await requestAppToken(deps);
+  if (tokenResult.kind === "not-offered") return required ? unavailable2("no-oidc-token") : silent();
+  if (tokenResult.kind === "failed") return unavailable2("no-oidc-token");
+  const { token } = tokenResult;
   const url = new URL("/api/v1/policy", options.origin);
   url.searchParams.set("repo", options.repository);
   const result = await appRequest(deps, { url, token });
@@ -49262,16 +49014,18 @@ async function requestPolicy(deps, options, onSettings) {
   }
   const validated = validatePolicyResponse(parsed);
   if (!validated.ok) return unavailable2("invalid-response", { status, ...id });
-  onSettings({
-    messageMaxBytes: validated.response.settings.messageMaxBytes,
-    quarantine: validated.response.quarantine,
-    uploadJunit: validated.response.settings.uploadJunit
-  });
+  const { response, unknown } = validated;
   return {
-    source: "app",
-    version: validated.response.version,
-    fetchedAt: (deps.now?.() ?? /* @__PURE__ */ new Date()).toISOString(),
-    document: validated.response.policy
+    policy: {
+      source: "app",
+      version: response.version,
+      fetchedAt: (deps.now?.() ?? /* @__PURE__ */ new Date()).toISOString(),
+      document: response.policy,
+      ...unknown.total > 0 ? { unknownKeys: unknown } : {}
+    },
+    messageMaxBytes: response.settings.messageMaxBytes,
+    quarantine: response.quarantine,
+    uploadJunit: response.settings.uploadJunit
   };
 }
 
@@ -49281,7 +49035,7 @@ async function obtainPolicy(deps, choice, origin) {
   if (choice.kind === "file") {
     return {
       policy: await readPolicyFile(
-        { readFile: deps.readFile, resolvePath: deps.resolvePath, lstat: deps.lstat ?? lstatPath },
+        { readFile: deps.readFile, resolvePath: deps.resolvePath, lstat: deps.lstat },
         { root: deps.workspace, path: choice.path, label: "the policy input" }
       )
     };
@@ -49360,37 +49114,12 @@ function allowedLookupUrl(url) {
   }
   return parsed.protocol === "https:" && parsed.port === "" && parsed.username === "" && parsed.password === "" && parsed.search === "" && parsed.hash === "" && REGISTRY_LOOKUP_HOSTS.includes(parsed.hostname);
 }
-async function readCapped2(response) {
-  if (response.body === null) return "";
-  const reader = response.body.getReader();
-  const chunks = [];
-  let total = 0;
-  for (; ; ) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    total += value.byteLength;
-    if (total > REGISTRY_MAX_BODY_BYTES) {
-      await reader.cancel().catch(() => {
-      });
-      return null;
-    }
-    chunks.push(value);
-  }
-  const bytes = new Uint8Array(total);
-  let at = 0;
-  for (const chunk of chunks) {
-    bytes.set(chunk, at);
-    at += chunk.byteLength;
-  }
-  return new TextDecoder("utf-8").decode(bytes);
-}
 async function registryGet(deps, url) {
-  const doFetch = deps.fetch;
-  if (doFetch === void 0 || !allowedLookupUrl(url)) return { kind: "network" };
+  if (!allowedLookupUrl(url)) return { kind: "network" };
   const signal2 = AbortSignal.timeout(deps.registryTimeoutMs ?? REGISTRY_TIMEOUT_MS);
   let response;
   try {
-    response = await doFetch(url, {
+    response = await deps.fetch(url, {
       method: "GET",
       headers: { Accept: "application/json", "User-Agent": REGISTRY_USER_AGENT },
       redirect: "error",
@@ -49405,7 +49134,7 @@ async function registryGet(deps, url) {
     return { kind: "response", status: response.status };
   }
   try {
-    const body = await readCapped2(response);
+    const body = await readCapped(response, REGISTRY_MAX_BODY_BYTES);
     return body === null ? { kind: "response", status: 200, tooLarge: true } : { kind: "response", status: 200, body };
   } catch {
     return signal2.aborted ? { kind: "timeout" } : { kind: "network" };
@@ -49517,25 +49246,16 @@ var UPLOAD_DEADLINE_MS = 9e4;
 var JSON_CONTENT_TYPE2 = /^application\/json\s*(?:;|$)/i;
 var OBJECT_KEY = /^[A-Za-z0-9/_.=-]{1,512}$/;
 var PUT_OK = [200, 201, 204];
-var ERROR_CLASS = /^[A-Za-z_$][A-Za-z0-9_$]{0,63}$/;
-function errorClassOf(err) {
-  if (typeof err !== "object" || err === null) return typeof err;
-  const name = err.constructor?.name;
-  return typeof name === "string" && ERROR_CLASS.test(name) ? name : "unknown";
-}
 async function runUpload(deps, input) {
   let step;
-  let thrown;
   try {
     const clock = () => (deps.now?.() ?? /* @__PURE__ */ new Date()).getTime();
     const deadlineAt = clock() + (deps.uploadDeadlineMs ?? UPLOAD_DEADLINE_MS);
     step = await uploadSteps(deps, input, () => deadlineAt - clock());
   } catch (err) {
     step = { outcome: { status: "failed", reason: "internal" }, errorClass: errorClassOf(err) };
-    thrown = { err };
   }
   logOutcome(deps, step);
-  if (thrown !== void 0 && deps.debug === true) throw thrown.err;
   return step.outcome;
 }
 function logOutcome(deps, step) {
@@ -49559,8 +49279,9 @@ async function uploadSteps(deps, input, remainingMs) {
   if (input.choice === "never") return { outcome: { status: "skipped", reason: "input-never" } };
   if (input.pullRequestTarget === true) return { outcome: { status: "skipped", reason: "pull-request-target" } };
   if (input.report.meta === void 0) return { outcome: { status: "skipped", reason: "no-meta" } };
-  const token = await requestAppToken(deps, UPLOAD_NO_TOKEN_LINE);
-  if (token === null) return { outcome: { status: "skipped", reason: "no-oidc" } };
+  const tokenResult = await requestAppToken(deps, UPLOAD_NO_TOKEN_LINE);
+  if (tokenResult.kind !== "token") return { outcome: { status: "skipped", reason: "no-oidc" } };
+  const { token } = tokenResult;
   const commentUrl = await findCommentUrl(deps, input.findOwnComment);
   const createdAt = (deps.now?.() ?? /* @__PURE__ */ new Date()).toISOString();
   const meta = buildUploadMeta(input.report, { version: VERSION7, createdAt, commentUrl });
@@ -49650,9 +49371,17 @@ async function uploadSteps(deps, input, remainingMs) {
   if (runsResult.kind !== "response" || ![200, 201, 202].includes(runsResult.status)) {
     return failed(failReason("runs", runsResult, remainingMs()), runsId);
   }
-  const runUrl = readRunsAnswer(runsResult, input.appOrigin);
-  if (runUrl === null) return failed("runs:malformed", runsId);
-  return { outcome: { status: "ok", runUrl, ...junitXml === void 0 ? {} : { junit: true } }, ...runsId };
+  const runs = readRunsAnswer(runsResult, input.appOrigin);
+  if (runs === null) return failed("runs:malformed", runsId);
+  return {
+    outcome: {
+      status: "ok",
+      runUrl: runs.runUrl,
+      ...junitXml === void 0 ? {} : { junit: true },
+      ...runs.appCommented ? { appCommented: true } : {}
+    },
+    ...runsId
+  };
 }
 var failed = (reason, id) => ({ outcome: { status: "failed", reason }, ...id });
 function requestIdOf(result) {
@@ -49715,10 +49444,14 @@ function readRunsAnswer(result, origin) {
   const answer = jsonObject(result);
   if (answer === null || typeof answer.url !== "string") return null;
   const url = httpsUrl(answer.url, 2048);
-  return url !== null && url.origin === origin.origin ? url.href : null;
+  if (url === null || url.origin !== origin.origin) return null;
+  const { commentUrl } = answer;
+  return {
+    runUrl: url.href,
+    appCommented: typeof commentUrl === "string" && httpsUrl(commentUrl, 2048, true) !== null
+  };
 }
 async function putBundle(deps, url, bytes, remainingMs) {
-  if (deps.fetch === void 0) return "put:network";
   const signal2 = AbortSignal.timeout(Math.min(deps.timeoutMs ?? PUT_TIMEOUT_MS, remainingMs()));
   let response;
   try {
@@ -49829,7 +49562,16 @@ async function runUnsafe(deps) {
   const baseRefInput = input("base-ref");
   const prNumberMode = !pr && prNumber !== void 0;
   const earlyDiff = prNumberMode ? void 0 : await getDiff(baseRefInput, deps, void 0, configInput);
-  const { config, configSource, headConfigExclude } = await loadConfigInUse(configInput || void 0, deps, earlyDiff);
+  const configName2 = configInput || DEFAULT_CONFIG;
+  const { config, configSource, headConfigExclude } = await loadConfigInUse(deps, {
+    path: deps.resolvePath(deps.workspace, configName2),
+    name: configName2,
+    explicit: configInput !== "",
+    configPath: configInput || void 0,
+    repoRoot: deps.workspace,
+    diff: earlyDiff === void 0 || "unavailable" in earlyDiff.diff ? null : "parsed" in earlyDiff.diff ? earlyDiff.diff.parsed : parseUnifiedDiff(earlyDiff.diff.text),
+    revisions: earlyDiff?.revisions
+  });
   const rawInputs = {
     coverageFile: splitLines(input("coverage-file")),
     coverageFormat: input("coverage-format") || void 0,
@@ -49851,7 +49593,12 @@ async function runUnsafe(deps) {
   );
   if (!resolved.ok) throw resolved.errors[0];
   const { policy, uploadMessageMaxBytes, quarantine, uploadJunit } = await obtainPolicy(deps, policyChoice, appOrigin);
-  const application = policy === void 0 ? void 0 : applyPolicy({ config, raw: rawInputs, resolved: resolved.inputs }, policy);
+  const policyFileBase = await gatherPolicyFileBase(
+    deps,
+    earlyDiff === void 0 ? { policy, diff: { unavailable: "pr-number mode" }, checkout: "pr-number", revisions: void 0 } : { policy, diff: earlyDiff.diff, checkout: earlyDiff.checkout, revisions: earlyDiff.revisions }
+  );
+  const application = policy === void 0 ? void 0 : applyPolicy({ config, raw: rawInputs, resolved: resolved.inputs }, policy, policyFileBase);
+  const appliedPolicy = application?.policy ?? policy;
   const effective2 = application?.inputs ?? resolved.inputs;
   const {
     coverageFile,
@@ -49889,49 +49636,34 @@ async function runUnsafe(deps) {
       name: (entry) => entry,
       log: (line) => deps.info(line)
     });
-    coverage2 = { files: coverageFiles, format };
+    coverage2 = { files: coverageFiles };
   }
   const repoFiles = await trackedFiles(target, deps);
-  const lsTree = target ? null : await deps.git(["ls-tree", "-r", "-l", "-z", "--full-tree", "HEAD"]).catch((err) => {
-    deps.warning(`git ls-tree failed, so empty agent setup files are not reported: ${String(err)}`);
-    return null;
-  });
-  const { diff, localBase } = earlyDiff ?? await getDiff(baseRefInput, deps, target, configInput);
-  const testSources = await gatherTestSources(deps, { diff, localBase, target, testIntegrityMode });
-  const agentConfigSources = await gatherAgentConfigSources(deps, { repoFiles, diff, target });
-  const policySettingsSources = await gatherPolicySettingsSources(deps, { repoFiles, diff, target, policy, lsTree });
-  const agentInstructionSources = await gatherAgentInstructionSources(deps, { repoFiles, diff, target, policy });
-  const selfModificationSources = await gatherSelfModificationSources(deps, { diff, localBase, target, policy });
-  const staleInstructionSources = await gatherStaleInstructionSources(deps, { repoFiles, diff, localBase, target });
-  const dependencySources = await gatherDependencySources(deps, {
+  const { diff, revisions, checkout } = earlyDiff ?? await getDiff(baseRefInput, deps, target, configInput);
+  const localBase = revisions === void 0 ? void 0 : (await diffEnds(revisions)).base;
+  const gathered = await gatherSources(deps, {
     diff,
-    localBase,
-    target,
+    revisions,
+    checkout,
     repoFiles,
-    dependencySettings
+    testIntegrityMode,
+    dependencySettings,
+    policy: appliedPolicy,
+    log: (line) => deps.info(line),
+    warn: (line) => deps.warning(line)
   });
-  const dependencyLookups = dependencySources === void 0 || !("parsed" in diff) ? void 0 : await gatherDependencyLookups(deps, {
+  const dependencyLookups = gathered.dependencySources === void 0 || !("parsed" in diff) ? void 0 : await gatherDependencyLookups(deps, {
     diff: diff.parsed,
-    sources: dependencySources,
+    sources: gathered.dependencySources,
     repoFiles,
     dependencySettings
   });
-  const pythonTestIndex = testSources === void 0 ? void 0 : await indexPythonTestSources(testSources, deps.indexPython ?? indexPythonTests);
-  if (pythonTestIndex !== void 0 && !pythonTestIndex.available) {
-    deps.info(
-      "parsed" in diff && pythonNotFoundStopsComparison(diff.parsed, pythonTestIndex) ? "pharn-ci: no Python interpreter was found (python-not-found), so TI02 and TI05 did not run" : `pharn-ci: the Python test index is unavailable (${pythonTestIndex.reason}), so .py test files are not compared`
-    );
-  }
   const agentPrFacts = await gatherAgentPrFacts(deps, target);
   const defaultDetection = detectAgentPr(agentPrFacts);
   if (defaultDetection.incomplete !== null) {
     deps.info(
       `pharn-ci: agent PR detection could not read all of the pull request's evidence (${defaultDetection.incomplete}), so it counts as an agent PR`
     );
-  }
-  let policyFileBase;
-  if (policy?.source === "file") {
-    policyFileBase = localBase !== void 0 && deps.gitBatch !== void 0 && policy.path !== void 0 ? await readPolicyFileAt({ gitBatch: deps.gitBatch }, { rev: localBase, path: policy.path }) : { kind: "unreadable" };
   }
   const junit = junitPatterns.length === 0 ? void 0 : await gatherJunit(deps, junitPatterns);
   const checkInput = {
@@ -49941,39 +49673,31 @@ async function runUnsafe(deps) {
     repoRoot: deps.workspace,
     threshold,
     repoFiles,
-    ...lsTree === null ? {} : { repoFileBytes: parseLsTreeSizes(lsTree) },
+    ...gathered,
     exclude,
     requireAgentSetup,
-    ...expectAgentSetup === void 0 ? {} : { expectAgentSetup },
-    ...testIntegrityMode === void 0 ? {} : { testIntegrityMode },
-    ...testSources === void 0 ? {} : { testSources },
-    ...agentConfigSources === void 0 ? {} : { agentConfigSources },
-    ...agentInstructionSources === void 0 ? {} : { agentInstructionSources },
-    ...pythonTestIndex === void 0 ? {} : { pythonTestIndex },
-    ...coverageRoot === void 0 ? {} : { coverageRoot },
-    ...configInput === "" ? {} : { configPath: configInput },
-    ...configSource === void 0 ? {} : { configSource },
-    ...headConfigExclude === void 0 ? {} : { headConfigExclude },
-    ...policy === void 0 ? {} : { policy },
-    ...policySettingsSources === void 0 ? {} : { policySettingsSources },
-    ...application === void 0 || application.ignored.length === 0 ? {} : { policyIgnored: application.ignored },
-    ...application?.signalOverrides === void 0 ? {} : { signalOverrides: application.signalOverrides },
+    expectAgentSetup,
+    testIntegrityMode,
+    coverageRoot,
+    configPath: configInput || void 0,
+    configSource,
+    headConfigExclude,
+    policy: appliedPolicy,
+    policyFileBase,
+    policyIgnored: application?.ignored,
+    signalOverrides: application?.signalOverrides,
     agentPrFacts,
-    ...policyFileBase === void 0 ? {} : { policyFileBase },
-    ...selfModificationSources === void 0 ? {} : { selfModificationSources },
-    ...staleInstructionSources === void 0 ? {} : { staleInstructionSources },
-    ...junit === void 0 ? {} : { junit },
+    junit,
     // Only the app's own answer carries a quarantine list; a pull request has no way to add one.
-    ...junit === void 0 || quarantine === void 0 ? {} : { quarantine },
-    ...dependencySettings === void 0 ? {} : { dependencySettings },
-    ...dependencySources === void 0 ? {} : { dependencySources },
-    ...dependencyLookups === void 0 ? {} : { dependencyLookups }
+    quarantine,
+    dependencySettings,
+    dependencyLookups
   };
   const runMetaBase = runMeta(deps.context, { baseRef: baseRefInput, ...target === void 0 ? {} : { target } });
   if (runMetaBase === void 0) deps.info("run metadata is incomplete, so report.json carries no meta");
   const mergeBase = runMetaBase === void 0 || localBase === void 0 ? null : await forkPoint(localBase, runMetaBase.headSha, deps);
   const meta = runMetaBase === void 0 || mergeBase === null ? runMetaBase : { ...runMetaBase, mergeBase };
-  const checked = check(meta === void 0 ? checkInput : { ...checkInput, meta });
+  const checked = check({ ...checkInput, meta });
   const parserFailure = deps.parserLoadFailure?.();
   if (parserFailure !== void 0) throw new Error(parserFailure);
   const signoffNumber = deps.context.eventName === "pull_request" && pr ? pr.number : target?.number;
@@ -49996,7 +49720,8 @@ async function runUnsafe(deps) {
     });
     return listing;
   };
-  const findOwn = (n) => listOnce(n).then(({ comments, viewer }) => ownComments(comments, viewer, scopeLine)[0]);
+  const writers = prWriterLogins(agentPrFacts);
+  const findOwn = (n) => listOnce(n).then(({ comments, viewer }) => ownComments(comments, viewer, scopeLine, writers)[0]);
   const outcome = await runUpload(deps, {
     choice: uploadChoice,
     ...deps.context.eventName === "pull_request_target" ? { pullRequestTarget: true } : {},
@@ -50025,7 +49750,7 @@ async function runUnsafe(deps) {
   deps.setOutput("diff-coverage", report.diffCoverage?.percent?.toString() ?? "");
   if (outcome.status === "ok") deps.setOutput("run-url", outcome.runUrl);
   await deps.writeSummary(summary2).catch((err) => deps.warning(`could not write job summary: ${String(err)}`));
-  if (outcome.status === "ok") {
+  if (outcome.status === "ok" && outcome.appCommented === true) {
     deps.info("pharn-ci: the Pharn GitHub App comments on the pull request for this run, so pharn-ci posts no comment");
     if (commentNumber !== void 0) {
       await pointOwnComment(deps, findOwn(commentNumber), `${COMMENT_MARKER}
@@ -50033,6 +49758,9 @@ ${scopeLine}
 `, outcome.runUrl);
     }
   } else if (comment && issueNumber !== void 0) {
+    if (outcome.status === "ok") {
+      deps.info("pharn-ci: the Pharn GitHub App did not comment on the pull request for this run, so pharn-ci does");
+    }
     const body = fitMarkdown(report, {
       prefix: `${COMMENT_MARKER}
 ${scopeLine}
@@ -50041,7 +49769,7 @@ ${scopeLine}
       fits: (text) => text.length <= MAX_COMMENT_LENGTH,
       ...render
     });
-    await upsertComment(deps, issueNumber, body, scopeLine, listOnce(issueNumber));
+    await upsertComment(deps, issueNumber, body, scopeLine, listOnce(issueNumber), writers);
   }
   deps.info(`pharn-ci verdict: ${report.verdict}`);
   if (report.verdict === "fail" && failOnVerdict) {
@@ -50085,75 +49813,6 @@ async function gatherJunit(deps, patterns) {
   );
   return results;
 }
-async function gatherTestSources(deps, from) {
-  if (resolveTestIntegrityMode(from.testIntegrityMode).mode === "off") return void 0;
-  const { diff, localBase } = from;
-  if (from.target) return unavailableTestSources("pr-number mode: the diff came from the GitHub API");
-  if ("text" in diff) return unavailableTestSources("the diff came from the GitHub compare API");
-  if ("unavailable" in diff) return unavailableTestSources("the diff is unavailable");
-  if (deps.gitBatch === void 0 || localBase === void 0) {
-    return unavailableTestSources("reading git objects is not available");
-  }
-  const sources = await readTestSources(
-    { git: (args) => deps.git(args), gitBatch: deps.gitBatch },
-    { base: localBase, head: "HEAD", diff: diff.parsed }
-  );
-  if ("unavailable" in sources.base) {
-    deps.info(
-      `pharn-ci: could not read the test and test-config files from git, so they are not compared: ${sources.base.unavailable}`
-    );
-  }
-  return sources;
-}
-async function gatherSelfModificationSources(deps, from) {
-  const { policy, diff, localBase } = from;
-  if (deps.gitBatch === void 0) return void 0;
-  if (policy === void 0 || policy.source !== "app" && policy.source !== "file" || policy.document === null) {
-    return void 0;
-  }
-  if (from.target) return unavailableTestSources("pr-number mode: the diff came from the GitHub API");
-  if ("text" in diff) return unavailableTestSources("the diff came from the GitHub compare API");
-  if ("unavailable" in diff) return unavailableTestSources("the diff is unavailable");
-  if (localBase === void 0) return unavailableTestSources("reading git objects is not available");
-  const selected = selectSelfModificationPaths(diff.parsed);
-  if (selected.base.length === 0 && selected.head.length === 0) {
-    return { base: { files: [], dropped: [] }, head: { files: [], dropped: [] } };
-  }
-  const sources = await readTestSources(
-    { git: (args) => deps.git(args), gitBatch: deps.gitBatch },
-    { base: localBase, head: "HEAD", diff: diff.parsed, select: selectSelfModificationPaths }
-  );
-  if ("unavailable" in sources.base) {
-    deps.info(
-      `pharn-ci: could not read the agent settings, MCP, workflow and CODEOWNERS files from git, so rule P13 could not compare them: ${sources.base.unavailable}`
-    );
-  }
-  return sources;
-}
-async function gatherDependencySources(deps, from) {
-  if (resolveDependencySettings(from.dependencySettings).mode === "never") return void 0;
-  if (deps.gitBatch === void 0) return void 0;
-  const { diff, localBase } = from;
-  if (from.target) return unavailableTestSources("pr-number mode: the diff came from the GitHub API");
-  if ("text" in diff) return unavailableTestSources("the diff came from the GitHub compare API");
-  if ("unavailable" in diff) return unavailableTestSources("the diff is unavailable");
-  if (localBase === void 0) return unavailableTestSources("reading git objects is not available");
-  const select = (files) => selectDependencyPaths(files, from.repoFiles);
-  const selected = select(diff.parsed);
-  if (selected.base.length === 0 && selected.head.length === 0) {
-    return { base: { files: [], dropped: [] }, head: { files: [], dropped: [] } };
-  }
-  const sources = await readTestSources(
-    { git: (args) => deps.git(args), gitBatch: deps.gitBatch },
-    { base: localBase, head: "HEAD", diff: diff.parsed, select, limits: DEPENDENCY_SOURCE_LIMITS }
-  );
-  if ("unavailable" in sources.base) {
-    deps.info(
-      `pharn-ci: could not read the manifests and lockfiles from git, so dependency safety could not compare them: ${sources.base.unavailable}`
-    );
-  }
-  return sources;
-}
 async function gatherDependencyLookups(deps, from) {
   const settings2 = resolveDependencySettings(from.dependencySettings);
   if (settings2.mode !== "lookup") return void 0;
@@ -50178,115 +49837,19 @@ async function gatherDependencyLookups(deps, from) {
   );
   return { headTime, results };
 }
-async function gatherAgentConfigSources(deps, from) {
-  if (deps.gitBatch === void 0) return void 0;
-  const paths = agentConfigSecretPaths(scanAgentSetup(from.repoFiles));
-  if (paths.length === 0) return void 0;
-  if (from.target) {
-    return {
-      unavailable: "pr-number mode: the checkout is not the pull request head, so its committed agent config files were not read"
-    };
-  }
-  if ("text" in from.diff) {
-    return {
-      unavailable: "the diff came from the GitHub compare API, so the checkout may not be the pull request head"
-    };
-  }
-  if ("unavailable" in from.diff) {
-    return { unavailable: "the diff is unavailable, so the checkout may not be the pull request head" };
-  }
-  const sources = await readAgentConfigSources({ gitBatch: deps.gitBatch }, paths);
-  if ("unavailable" in sources) {
-    deps.info(
-      `pharn-ci: could not read the agent config files from git, so they are not scanned for secrets: ${sources.unavailable}`
-    );
-  }
-  return sources;
-}
-async function gatherPolicySettingsSources(deps, from) {
-  const { policy } = from;
-  if (deps.gitBatch === void 0) return void 0;
-  if (policy === void 0 || policy.source !== "app" && policy.source !== "file" || policy.document === null) {
-    return void 0;
-  }
-  if (from.target) {
-    return {
-      unavailable: "pr-number mode: the checkout is not the pull request head, so its committed agent settings files were not read"
-    };
-  }
-  if ("text" in from.diff) {
-    return {
-      unavailable: "the diff came from the GitHub compare API, so the checkout may not be the pull request head"
-    };
-  }
-  if ("unavailable" in from.diff) {
-    return { unavailable: "the diff is unavailable, so the checkout may not be the pull request head" };
-  }
-  const paths = policySettingsPaths(from.repoFiles, policy.document);
-  if (paths.length === 0) return { files: [], dropped: [] };
-  const sources = await readPolicySettingsSources(
-    { gitBatch: deps.gitBatch },
-    paths,
-    from.lsTree === null ? null : parseLsTreeSymlinks(from.lsTree)
-  );
-  if ("unavailable" in sources) {
-    deps.info(
-      `pharn-ci: could not read the agent settings files from git, so they are not checked against the org policy: ${sources.unavailable}`
-    );
-  }
-  return sources;
-}
-async function gatherAgentInstructionSources(deps, from) {
-  if (deps.gitBatch === void 0) return void 0;
-  if (from.policy === void 0 || consistencySeverity(from.policy).severity === null) return void 0;
-  const paths = agentInstructionPaths(scanAgentSetup(from.repoFiles));
-  if (paths.length === 0) return void 0;
-  if (from.target) {
-    return {
-      unavailable: "pr-number mode: the checkout is not the pull request head, so its committed agent instruction files were not read"
-    };
-  }
-  if ("text" in from.diff) {
-    return {
-      unavailable: "the diff came from the GitHub compare API, so the checkout may not be the pull request head"
-    };
-  }
-  if ("unavailable" in from.diff) {
-    return { unavailable: "the diff is unavailable, so the checkout may not be the pull request head" };
-  }
-  const sources = await readAgentConfigSources({ gitBatch: deps.gitBatch }, paths);
-  if ("unavailable" in sources) {
-    deps.info(
-      `pharn-ci: could not read the agent instruction files from git, so P07 did not compare them: ${sources.unavailable}`
-    );
-  }
-  return sources;
-}
-async function gatherStaleInstructionSources(deps, from) {
-  if (deps.gitBatch === void 0 || from.target || !("parsed" in from.diff)) return void 0;
-  const sources = await readStaleInstructionSources(
-    { gitBatch: deps.gitBatch, git: (args) => deps.git(args) },
-    {
-      repoFiles: from.repoFiles,
-      diff: from.diff.parsed,
-      ...from.localBase === void 0 ? {} : { base: from.localBase }
-    }
-  );
-  if (sources !== void 0 && "unavailable" in sources.instructions) {
-    deps.info(
-      `pharn-ci: could not read the agent instruction files from git, so stale instructions are not checked: ${sources.instructions.unavailable}`
-    );
-  }
-  return sources;
-}
 async function getDiff(baseRefInput, deps, target, configInput = "") {
   if (baseRefInput.startsWith("-")) throw new Error(`base-ref "${baseRefInput}" must not start with "-"`);
-  if (target) return { diff: await getTargetDiff(baseRefInput, target, deps) };
+  if (target) return { diff: await getTargetDiff(baseRefInput, target, deps), checkout: "pr-number" };
   const { context: context3 } = deps;
   const pr = context3.payload.pull_request;
   const mergeGroup = context3.payload.merge_group;
   const base = resolveBase(context3, { baseRef: baseRefInput }).ref;
-  if (!base) return { diff: { unavailable: "no base to diff against (not a pull request; set the base-ref input)" } };
+  if (!base) {
+    return {
+      diff: { unavailable: "no base to diff against (not a pull request; set the base-ref input)" },
+      checkout: "head"
+    };
+  }
   const head = context3.eventName === "pull_request_target" && pr ? pr.head.sha : mergeGroup?.head_sha || context3.sha;
   if (context3.eventName === "pull_request_target" && pr) {
     const localHead = await deps.git(["rev-parse", "HEAD"]).then(
@@ -50297,33 +49860,37 @@ async function getDiff(baseRefInput, deps, target, configInput = "") {
       return {
         diff: {
           unavailable: "pull_request_target cannot be measured safely: run pharn-ci on pull_request (fork PRs get the job summary only); see SECURITY.md"
-        }
+        },
+        checkout: "unknown"
       };
     }
   }
-  const localBase = await resolveLocal(base, deps);
-  if (localBase) {
+  const revisions = await resolveLocal(base, deps);
+  if (revisions !== null) {
+    const ends = await diffEnds(revisions);
     let parsed;
     try {
       const options = { configPath: configInput === "" ? void 0 : configInput, repoRoot: deps.workspace };
-      parsed = await readDiffChunks(gitChunks(deps, gitDiffArgs(localBase)), options);
+      parsed = await readDiffChunks(deps.gitStream(gitDiffArgs(ends.base, ends.head)), options);
     } catch (err) {
       throw new Error(
         `the local git diff against "${base}" failed (${String(err)}); check out full history with actions/checkout and fetch-depth: 0`
       );
     }
-    if (parsed.length === 0 && await headIsInBase(localBase, deps)) {
+    if (parsed.length === 0 && await headIsInBase(revisions)) {
       const named = baseRefInput ? `base-ref "${baseRefInput}"` : `the base ${base}`;
       return {
         diff: {
           unavailable: `${named} resolves to HEAD or a descendant of HEAD, so there is no change to measure` + (baseRefInput ? "; set base-ref to the branch or commit the change is based on" : "")
-        }
+        },
+        // The base is HEAD or after it, but HEAD is still the head under review: its committed files are read.
+        checkout: "head"
       };
     }
-    return { diff: { parsed }, localBase };
+    return { diff: { parsed }, revisions, checkout: "head" };
   }
   try {
-    return { diff: { text: await deps.api.compareDiff(`${base}...${head}`) } };
+    return { diff: { text: await deps.api.compareDiff(`${base}...${head}`) }, checkout: "unknown" };
   } catch (err) {
     if (baseRefInput) {
       throw new Error(
@@ -50334,7 +49901,8 @@ async function getDiff(baseRefInput, deps, target, configInput = "") {
     return {
       diff: {
         unavailable: `could not get the diff for ${base}...${head} (use actions/checkout with fetch-depth: 0)`
-      }
+      },
+      checkout: "unknown"
     };
   }
 }
@@ -50352,20 +49920,10 @@ async function getTargetDiff(baseRefInput, target, deps) {
     return { unavailable: `could not get the diff for ${base}...${target.headSha} from the GitHub API` };
   }
 }
-var OBJECT_ID2 = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
-async function headIsInBase(base, deps) {
-  try {
-    const mergeBase = (await deps.git(["merge-base", "--end-of-options", base, "HEAD"])).trim();
-    const head = (await deps.git(["rev-parse", "--verify", "--quiet", "--end-of-options", "HEAD^{commit}"])).trim();
-    return OBJECT_ID2.test(mergeBase) && mergeBase === head;
-  } catch {
-    return false;
-  }
-}
 async function forkPoint(base, head, deps) {
   try {
     const mergeBase = (await deps.git(["merge-base", "--end-of-options", base, head])).trim();
-    return OBJECT_ID2.test(mergeBase) ? mergeBase : null;
+    return OBJECT_ID.test(mergeBase) ? mergeBase : null;
   } catch {
     return null;
   }
@@ -50373,11 +49931,13 @@ async function forkPoint(base, head, deps) {
 async function resolveLocal(base, deps) {
   const candidates = COMMIT_SHA.test(base) ? [base] : [`origin/${base}`, base];
   for (const ref of candidates) {
+    let printed;
     try {
-      await deps.git(["rev-parse", "--verify", "--quiet", "--end-of-options", `${ref}^{commit}`]);
-      return ref;
+      printed = await deps.git(["rev-parse", "--verify", "--quiet", "--end-of-options", `${ref}^{commit}`]);
     } catch {
+      continue;
     }
+    return runRevisions(deps, ref, printed);
   }
   return null;
 }
@@ -50416,10 +49976,10 @@ function closeOpenDetails(text) {
   const open3 = (text.match(DETAILS_OPEN)?.length ?? 0) - (text.match(DETAILS_CLOSE)?.length ?? 0);
   return open3 > 0 ? text + "\n\n</details>".repeat(open3) : text;
 }
-async function upsertComment(deps, issueNumber, body, scopeLine, listed2 = listCommentsAndViewer(deps, issueNumber)) {
+async function upsertComment(deps, issueNumber, body, scopeLine, listed2 = listCommentsAndViewer(deps, issueNumber), writers = null) {
   try {
     const { comments, viewer } = await listed2;
-    const [existing, ...rest] = ownComments(comments, viewer, scopeLine);
+    const [existing, ...rest] = ownComments(comments, viewer, scopeLine, writers);
     if (existing) {
       await deps.api.updateComment(existing.id, body);
       deps.info(`updated pharn-ci comment ${existing.id}`);
@@ -50432,10 +49992,12 @@ async function upsertComment(deps, issueNumber, body, scopeLine, listed2 = listC
     }
     const createdLogin = await deps.api.createComment(issueNumber, body) ?? viewer;
     deps.info("created pharn-ci comment");
-    if (createdLogin !== null) await removeRaceDuplicates(deps, issueNumber, createdLogin, body, scopeLine);
+    if (createdLogin !== null && (viewer !== null || mayAdopt(createdLogin, "same", null, writers))) {
+      await removeRaceDuplicates(deps, issueNumber, createdLogin, body, scopeLine);
+    }
   } catch (err) {
     deps.warning(
-      `could not post the PR comment (${errorText(err)}); the report is in the job summary. Grant \`pull-requests: write\` to enable comments.`
+      `could not post the PR comment (${errorText2(err)}); the report is in the job summary. Grant \`pull-requests: write\` to enable comments.`
     );
   }
 }
@@ -50444,15 +50006,30 @@ function commentScope(comment, scopeLine) {
   if (second === scopeLine) return "same";
   return second?.startsWith(SCOPE_LINE_PREFIX) ? "other" : "legacy";
 }
-function ownComments(comments, viewer, scopeLine) {
+function ownComments(comments, viewer, scopeLine, writers) {
   return comments.filter((c) => {
     if (!c.body?.startsWith(COMMENT_MARKER)) return false;
     const login = c.user?.login;
     const scope = commentScope(c, scopeLine);
     if (login === void 0 || scope === "other") return false;
-    if (viewer !== null) return login === viewer;
-    return scope === "same" ? login.endsWith("[bot]") : login === DEFAULT_TOKEN_LOGIN;
+    return mayAdopt(login, scope, viewer, writers);
   }).sort((a, b) => a.id - b.id);
+}
+function mayAdopt(login, scope, viewer, writers) {
+  if (viewer !== null) return login === viewer;
+  if (login === DEFAULT_TOKEN_LOGIN) return true;
+  if (scope !== "same" || !login.endsWith("[bot]")) return false;
+  return writers !== null && !writers.has(login.toLowerCase());
+}
+function prWriterLogins(facts) {
+  const pr = facts.pr;
+  if (pr === null || pr.author === null || pr.commits === null || pr.commitsIncomplete === true) return null;
+  const logins = /* @__PURE__ */ new Set([pr.author.login.toLowerCase()]);
+  for (const commit of pr.commits) {
+    if (commit.authorLogin !== null) logins.add(commit.authorLogin.toLowerCase());
+    if (commit.committerLogin !== null) logins.add(commit.committerLogin.toLowerCase());
+  }
+  return logins;
 }
 async function listCommentsAndViewer(deps, issueNumber) {
   const [comments, viewer] = await Promise.all([deps.api.listComments(issueNumber), deps.api.viewerLogin()]);
@@ -50468,7 +50045,7 @@ async function pointOwnComment(deps, lookup2, prefix, runUrl) {
     deps.info(`updated pharn-ci comment ${existing.id} to point to the run on pharn.dev`);
   } catch (err) {
     deps.warning(
-      `could not update the earlier pharn-ci comment (${errorText(err)}); it may still show an earlier run's verdict`
+      `could not update the earlier pharn-ci comment (${errorText2(err)}); it may still show an earlier run's verdict`
     );
   }
 }
@@ -50484,7 +50061,7 @@ async function removeRaceDuplicates(deps, issueNumber, createdLogin, body, scope
       deps.info(`updated pharn-ci comment ${keep.id}`);
     }
   } catch (err) {
-    deps.warning(`could not remove duplicate pharn-ci comments: ${errorText(err)}`);
+    deps.warning(`could not remove duplicate pharn-ci comments: ${errorText2(err)}`);
   }
 }
 async function deleteDuplicates(deps, duplicates) {
@@ -50493,52 +50070,12 @@ async function deleteDuplicates(deps, duplicates) {
       await deps.api.deleteComment(dup.id);
       deps.info(`deleted duplicate pharn-ci comment ${dup.id}`);
     } catch (err) {
-      deps.warning(`could not delete duplicate pharn-ci comment ${dup.id}: ${errorText(err)}`);
+      deps.warning(`could not delete duplicate pharn-ci comment ${dup.id}: ${errorText2(err)}`);
     }
   }
 }
-function errorText(err) {
+function errorText2(err) {
   return err instanceof Error ? err.message : String(err);
-}
-async function loadConfig(explicit, deps) {
-  const path = explicit ?? DEFAULT_CONFIG;
-  const text = await deps.readFile(deps.resolvePath(deps.workspace, path));
-  if (text === null) {
-    if (explicit !== void 0) throw new Error(`config file not found: ${path}`);
-    return {};
-  }
-  try {
-    return parseConfig(text);
-  } catch (err) {
-    throw new Error(`${path}: ${err instanceof Error ? err.message : String(err)}`);
-  }
-}
-async function loadConfigInUse(explicit, deps, from) {
-  const diff = from === void 0 || "unavailable" in from.diff ? null : "parsed" in from.diff ? from.diff.parsed : parseUnifiedDiff(from.diff.text);
-  const copy = await configCopyInUse(deps, {
-    diff,
-    base: from?.localBase,
-    configPath: explicit,
-    repoRoot: deps.workspace
-  });
-  if (copy.source === "working-tree") return { config: await loadConfig(explicit, deps) };
-  const headText = await deps.readFile(deps.resolvePath(deps.workspace, explicit ?? DEFAULT_CONFIG));
-  const headConfigExclude = headExclusions(headText);
-  const head = headConfigExclude === void 0 ? {} : { headConfigExclude };
-  if (copy.source !== "merge-base") return { config: {}, configSource: copy.source, ...head };
-  try {
-    return { config: parseConfig(copy.text), configSource: "merge-base", ...head };
-  } catch (err) {
-    throw new Error(`${copy.path} at the merge base: ${err instanceof Error ? err.message : String(err)}`);
-  }
-}
-function headExclusions(text) {
-  if (text === null) return void 0;
-  try {
-    return parseConfig(text).coverage?.exclude;
-  } catch {
-    return void 0;
-  }
 }
 function splitPatternList(value) {
   return value.split(",").flatMap((part) => part.split("\n")).map((entry) => entry.trim()).filter((entry) => entry !== "");
@@ -50585,8 +50122,6 @@ await run({
   hasOidcEnv: Boolean(process.env.ACTIONS_ID_TOKEN_REQUEST_URL) && Boolean(process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN),
   now: () => /* @__PURE__ */ new Date(),
   sleep: (ms) => new Promise((resolve2) => setTimeout(resolve2, ms)),
-  // RUNNER_DEBUG=1: a run (or re-run) with debug logging, where an internal upload error fails the step (upload.ts).
-  debug: isDebug(),
   // The vendored TypeScript parser, loaded on the first parse of a test file: a failed load fails the step (run.ts).
   parserLoadFailure: vendoredTypeScriptFailure
 });

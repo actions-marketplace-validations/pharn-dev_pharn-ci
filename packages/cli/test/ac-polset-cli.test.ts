@@ -2,24 +2,16 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import type { Report } from "@pharn-ci/core";
 import { afterAll, describe, expect, it } from "vitest";
 import { expectValidReport } from "../../core/test/schema.js";
-import { withoutFix } from "../../core/test/v090-codes.js";
+import { withoutFix } from "../../core/test/without-fix.js";
 
 // E3 item 23 (policy settings), AC-27. main() and nodeDeps() are loaded inside the test body: the AC test is written
 // before the CLI reads the agent settings files, so nothing that depends on that may run while this file loads. It
 // runs the CLI with its real Node deps on temporary git repositories and observes every git call by wrapping git and
 // gitBatch, as packages/cli/test/ac-secrets-cli.test.ts does.
 
-type Violation = { id: string; severity: string; path: string | null; line: number | null; detail: string };
-type Message = { level: string; code: string; text: string };
-type Report = { verdict: string; messages: Message[]; policy?: { violations: Violation[] } };
-interface Deps {
-  git(args: string[]): Promise<string>;
-  gitBatch?(args: string[], input: string): Promise<Uint8Array>;
-  stdout(text: string): void;
-  stderr(text: string): void;
-}
 type Call = { args: string[]; input?: string };
 
 const NEW_CODES = ["POLICY_P02", "POLICY_P03", "POLICY_P04", "POLICY_P05", "POLICY_P06", "POLICY_SETTINGS_INVALID"];
@@ -77,7 +69,7 @@ function repo(files: Record<string, string>): { dir: string; put: (path: string,
 async function runCli(dir: string, policy: boolean, failLsTree = false) {
   const { main } = await import("../src/main.js");
   const { nodeDeps } = await import("../src/nodeDeps.js");
-  const deps = nodeDeps(dir) as unknown as Deps;
+  const deps = nodeDeps(dir);
   const calls: Call[] = [];
   const realGit = deps.git;
   deps.git = (args) => {
@@ -101,7 +93,7 @@ async function runCli(dir: string, policy: boolean, failLsTree = false) {
     err += text;
   };
   const args = ["check", "--base", "main", "--coverage", "coverage/lcov.info", "--format", "json"];
-  const code = await main([...args, ...(policy ? ["--policy-file", "policy/org.json"] : [])], deps as never);
+  const code = await main([...args, ...(policy ? ["--policy-file", "policy/org.json"] : [])], deps);
   expect(code, err).not.toBe(2);
   const report = JSON.parse(out) as Report;
   expectValidReport(report);
@@ -157,8 +149,12 @@ describe("pharn-ci check: policy mode reads the committed agent settings files",
     const empty = repo({ "README.md": "# demo\n" }).dir;
     const emptyWith = await runCli(empty, true);
     const emptyWithout = await runCli(empty, false);
+    // The policy file itself is read at the base too (CORE-14 follow-up: the CLI passes `policyFileBase`, as the
+    // Action does): one batch check that names only the policy path and one batch read of its blob. No other call is
+    // added.
+    expect(naming(emptyWith.calls, "policy/org.json"), "the policy file is read at the base").toHaveLength(1);
     expect(emptyWith.calls.length, "no more git calls than without a policy").toBeLessThanOrEqual(
-      emptyWithout.calls.length,
+      emptyWithout.calls.length + 2,
     );
     expect(withoutFix((emptyWith.report.policy?.violations ?? []).filter((v) => v.id === "P03"))).toEqual([
       {

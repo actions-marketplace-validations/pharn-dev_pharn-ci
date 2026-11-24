@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { Report } from "../src/report.js";
 import { fixture } from "./helpers.js";
 import { expectValidReport } from "./schema.js";
 
@@ -35,7 +36,7 @@ function addFile(path: string, lines: string[]): string {
 }
 
 async function run(diff: string) {
-  const { check } = await import("../src/check.js");
+  const { check } = await import("./text-coverage.js");
   const report = check({
     version: "0.1.0",
     coverage: { text: fixture("test-files-deleted/coverage.info"), format: "lcov" },
@@ -44,12 +45,11 @@ async function run(diff: string) {
     threshold: 80,
     repoFiles: REPO_FILES,
     testIntegrityMode: { input: "block" },
-  } as Parameters<typeof check>[0]);
+  });
   expectValidReport(report);
   return report;
 }
 
-type Report = Awaited<ReturnType<typeof run>>;
 const ti13 = (report: Report) => report.testIntegrity.signals.filter((signal) => String(signal.id) === "TI13");
 const ti13Messages = (report: Report) => report.messages.filter((m) => (m.code as string) === "TEST_INTEGRITY_TI13");
 

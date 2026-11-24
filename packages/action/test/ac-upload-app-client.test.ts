@@ -49,15 +49,7 @@ const hang: Answer = (call) =>
 const ok: Answer = () =>
   new Response(JSON.stringify({ hello: "world" }), { status: 200, headers: { "content-type": "application/json" } });
 
-interface AppClient {
-  appRequest(
-    deps: unknown,
-    request: { url: URL; token: string; method?: "GET" | "POST"; body?: string; timeoutMs?: number },
-  ): Promise<unknown>;
-  requestAppToken(deps: unknown, noTokenLine?: string): Promise<string | null>;
-}
-
-const load = async () => (await import("../src/app-client.js")) as unknown as AppClient;
+const load = async () => await import("../src/app-client.js");
 
 function clientDeps(answer: Answer, extra: Record<string, unknown> = {}) {
   const calls: FetchCall[] = [];
@@ -144,10 +136,10 @@ describe("the app client's POST, per-request timeout and no-token line", { timeo
     // requestAppToken logs the given line instead of item 20's fixed one when no token is available.
     const line = "pharn-ci: a caller-chosen no-token line";
     const noToken = clientDeps(ok, { hasOidcEnv: false });
-    expect(await requestAppToken(noToken.deps, line)).toBeNull();
+    expect(await requestAppToken(noToken.deps, line)).toEqual({ kind: "not-offered" });
     expect(noToken.infos).toEqual([line]);
     const fixed = clientDeps(ok, { hasOidcEnv: false });
-    expect(await requestAppToken(fixed.deps)).toBeNull();
+    expect(await requestAppToken(fixed.deps)).toEqual({ kind: "not-offered" });
     expect(fixed.infos).toHaveLength(1);
     expect(fixed.infos[0]).not.toBe(line);
     expect(fixed.infos[0]).toContain("id-token: write");

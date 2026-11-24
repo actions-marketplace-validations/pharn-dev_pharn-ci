@@ -2,23 +2,14 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { DiffFile } from "@pharn-ci/core";
 import { afterEach, describe, expect, it } from "vitest";
 import { gitDiffArgs, parseUnifiedDiff } from "../../core/src/index.js";
 
 // readTestSources, runGitBatch and the new allowlist entries are loaded inside each test body: these tests are
 // written before they exist, so nothing that depends on them may run while the file loads.
 
-type Side = { unavailable: string } | { files: { path: string; text: string }[]; dropped: unknown[] };
-type Sources = { base: Side; head: Side };
-type Reader = (
-  deps: { git(args: string[]): Promise<string>; gitBatch(args: string[], input: string): Promise<Uint8Array> },
-  options: { base: string; head?: string; diff: readonly unknown[] },
-) => Promise<Sources>;
-interface Io {
-  runGit(cwd: string, args: string[]): Promise<string>;
-  runGitBatch(cwd: string, args: string[], input: string): Promise<Uint8Array>;
-  localGitArgs(args: readonly string[]): string[];
-}
+type GitDeps = { git(args: string[]): Promise<string>; gitBatch(args: string[], input: string): Promise<Uint8Array> };
 
 const SLOW = 30_000;
 
@@ -55,8 +46,11 @@ function repoModifying(count: number): string {
 }
 
 async function load() {
-  const { readTestSources } = (await import("../src/index.js")) as unknown as { readTestSources: Reader };
-  const io = (await import("../src/io.js")) as unknown as Io;
+  const { readTestSources: read, runRevisions } = await import("../src/index.js");
+  // The base is resolved by the run's revisions, with the same git runner, as gatherSources does.
+  const readTestSources = (deps: GitDeps, options: { base: string; diff: readonly DiffFile[] }) =>
+    read(deps, { revisions: runRevisions(deps, options.base), diff: options.diff });
+  const io = await import("../src/io.js");
   return { readTestSources, io };
 }
 
@@ -90,7 +84,7 @@ describe("readTestSources: git calls", () => {
             return io.runGitBatch(dir, args, input);
           },
         },
-        { base: "main", head: "HEAD", diff },
+        { base: "main", diff },
       );
 
       // The reader did the work: 30 files on each side.
@@ -139,7 +133,9 @@ describe("readTestSources: git failures", () => {
       const repo = repoModifying(1);
       const notARepo = tempDir();
       // A selected path, so the reader has something to read on both sides.
-      const diff = [{ path: "t/m00.test.ts", oldPath: "t/m00.test.ts", status: "modified", addedLines: [] }];
+      const diff: DiffFile[] = [
+        { path: "t/m00.test.ts", oldPath: "t/m00.test.ts", status: "modified", addedLines: [] },
+      ];
 
       for (const [dir, base] of [
         [repo, "no-such-branch"],
@@ -147,7 +143,7 @@ describe("readTestSources: git failures", () => {
       ] as const) {
         const result = await readTestSources(
           { git: (args) => io.runGit(dir, args), gitBatch: (args, input) => io.runGitBatch(dir, args, input) },
-          { base, head: "HEAD", diff },
+          { base, diff },
         );
         for (const side of [result.base, result.head]) {
           expect(side, `${base} in ${dir === repo ? "the repository" : "a plain directory"}`).toEqual({

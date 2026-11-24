@@ -1,9 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { check } from "../src/check.js";
+
 import { renderMarkdown } from "../src/render/markdown.js";
 import { type Report, type TestIntegritySignal, testIntegritySignalMessages, verdictOf } from "../src/report.js";
 import { fixture } from "./helpers.js";
 import { expectValidReport } from "./schema.js";
+import { check } from "./text-coverage.js";
 
 // The comment layout of product/REPORT-V2.md: the headline counts test-integrity findings, the summary table has a
 // Test integrity column, the section lists blocks first and collapses after 10, and the Messages section does not repeat
@@ -16,7 +17,7 @@ const base = check({
   repoRoot: "/home/runner/work/demo/demo",
   threshold: 80,
   repoFiles: fixture("golden/files.txt").trim().split("\n"),
-} as Parameters<typeof check>[0]);
+});
 
 const signal = (id: string, severity: TestIntegritySignal["severity"], path: string, line: number) =>
   ({ id, severity, path, line, detail: `${id} ${severity} finding.` }) as TestIntegritySignal;

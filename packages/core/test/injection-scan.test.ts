@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { check } from "../src/index.js";
+
 import { MAX_VENDORED_TAIL_SEGMENTS, vendoredInstruction } from "../src/injection/paths.js";
 import { DEFAULT_INJECTION_SEVERITIES, injectionSettingsOf } from "../src/injection/policy.js";
 import {
@@ -14,6 +14,7 @@ import {
 import { fixture } from "./helpers.js";
 import { addedFileDiff, injectionFixture, parseForInjection } from "./injection-fixture.js";
 import { expectValidReport } from "./schema.js";
+import { check } from "./text-coverage.js";
 
 // H4, the prompt-injection surface scan: each signal PI01 to PI05 against its must-trigger and must-not-trigger fixture
 // (fixtures/injection/), the legitimate right-to-left, Persian, Indic and emoji text that must produce nothing, the
@@ -329,7 +330,7 @@ describe("instruction files named like test files (CORE-93)", () => {
       repoRoot: "/home/runner/work/demo/demo",
       threshold: null,
       repoFiles: [".cursor/rules/a.test.mdc"],
-    } as never);
+    });
     expectValidReport(report);
     expect(report.verdict).toBe("fail");
     expect(report.injection?.signals.map((s) => [s.id, s.path, s.severity])).toEqual([

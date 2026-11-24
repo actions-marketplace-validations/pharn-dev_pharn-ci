@@ -1,18 +1,10 @@
 import { describe, expect, it } from "vitest";
+import type { Message, Report, ReportPolicyViolation as Violation } from "../src/report.js";
 import { expectValidReport } from "./schema.js";
 
 // E3 item 22 (policy rules), AC-16. buildReport() and renderMarkdown() are loaded inside the test body: the AC test
 // is written before the build adds the Policy section, so nothing the build adds may run while this file loads. The
 // report is hand-built: a buildReport() report given a policy object and a POLICY_OVERRIDE_IGNORED message.
-
-type Violation = { id: string; severity: string; path: string | null; line: number | null; detail: string };
-type Message = { level: string; code: string; text: string };
-type Report = Record<string, unknown> & { messages: Message[] };
-
-interface Core {
-  buildReport(input: unknown): Report;
-  renderMarkdown(report: Report, options?: { maxRows?: number }): string;
-}
 
 const HEADING = "### 📜 Policy";
 const HOSTILE = "x|y`z\n<script>alert(1)</script> @user/CLAUDE.local.md";
@@ -65,7 +57,10 @@ const live = (line: string) => line.replace(/(`+)[\s\S]*?\1/g, "").replace(/\\[\
 
 describe("the Policy section's violation list", { timeout: 60_000 }, () => {
   it("AC-16: 12 mixed violations list blocks first, 10 open and 2 folded, each with a hint line; maxRows 3 lists 3 and counts the rest; a hostile path stays inert; an ignored setting renders its line", async () => {
-    const core = (await import("@pharn-ci/core")) as unknown as Core;
+    const core = {
+      ...(await import("../src/render/markdown.js")),
+      ...(await import("../src/report.js")),
+    };
     const base = core.buildReport({
       version: "0.1.0",
       threshold: null,
@@ -99,10 +94,11 @@ describe("the Policy section's violation list", { timeout: 60_000 }, () => {
     });
     expect(listed[0]).toBe("- ❌ **P01** — no agent setup files found");
     expect(listed[2]).toContain("a1.env");
-    // Every violation line is followed by its hint line; the P08 hint is the fixed POLICY_P08 hint.
+    // Every violation line is followed by its hint line; the P08 hint is the fixed POLICY_P08 hint (CORE-140: its
+    // fix.hint; CORE-14 follow-up: it names `git rm --cached` and `.gitignore` again).
     for (const i of at) expect(section[i + 1] ?? "", section[i]).toMatch(/^ {2}- Hint: \S/);
     expect(section[(at[2] ?? 0) + 1]).toBe(
-      "  - Hint: Stop tracking the file (`git rm --cached` it and add it to `.gitignore`); the org policy forbids it in the repository.",
+      "  - Hint: Ask a maintainer to stop tracking the files that match the org policy's forbidden patterns (`git rm --cached` them and add them to `.gitignore`).",
     );
 
     // 10 open, then the last 2 in a details block.

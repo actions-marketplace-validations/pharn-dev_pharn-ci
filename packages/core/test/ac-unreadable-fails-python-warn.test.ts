@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
+import type { Report } from "../src/report.js";
 import { fixture } from "./helpers.js";
 import { expectValidReport } from "./schema.js";
+import type { TextCheckInput } from "./text-coverage.js";
 
 // CORE-69. check() is loaded inside the test body: the AC test is written before a reported python-not-found index
 // with a modified `.py` test file becomes the whole-run form, so nothing the build changes may run while the file
@@ -9,16 +11,6 @@ import { expectValidReport } from "./schema.js";
 
 const CODE = "TEST_INTEGRITY_INDEX_UNAVAILABLE";
 const PATH = "tests/test_c.py";
-
-interface Message {
-  code: string;
-  level: string;
-  text: string;
-}
-interface Report {
-  verdict: string;
-  messages: Message[];
-}
 
 const PY_BASE =
   "from cart import total\n\n\ndef test_adds():\n    assert total([2, 3]) == 5\n\n\ndef test_empty():\n    assert total([]) == 0\n";
@@ -40,8 +32,8 @@ const READABLE = {
   head: { files: [{ path: PATH, text: PY_HEAD }], dropped: [] },
 };
 
-async function run(input: Record<string, unknown>): Promise<Report> {
-  const { check } = await import("../src/check.js");
+async function run(input: Partial<TextCheckInput>): Promise<Report> {
+  const { check } = await import("./text-coverage.js");
   const report = check({
     version: "0.1.0",
     coverage: { text: fixture("test-files-deleted/coverage.info"), format: "lcov" },
@@ -51,9 +43,9 @@ async function run(input: Record<string, unknown>): Promise<Report> {
     repoFiles: [PATH, "src/cart.ts"],
     testIntegrityMode: { input: "block" },
     ...input,
-  } as unknown as Parameters<typeof check>[0]);
+  });
   expectValidReport(report);
-  return report as unknown as Report;
+  return report;
 }
 
 describe("CORE-69: a modified Python test file keeps the per-file warning unless python3 was reported missing", () => {
@@ -61,14 +53,14 @@ describe("CORE-69: a modified Python test file keeps the per-file warning unless
     // Control: readable text with a python-not-found index is the whole-run error.
     const control = await run({
       testSources: READABLE,
-      pythonTestIndex: { available: false, reason: "python-not-found", detail: "python3: command not found" },
+      pythonTestIndex: { available: false, reason: "python-not-found" },
     });
     const controlMessages = control.messages.filter((m) => m.code === CODE);
     expect(controlMessages, "the control has one message").toHaveLength(1);
     expect(controlMessages[0]?.text, "the control is the whole-run form").toContain("TI02 and TI05 did not run");
     expect(controlMessages[0]?.level, "the control is an error").toBe("error");
 
-    const cases: [string, Record<string, unknown>][] = [
+    const cases: [string, Partial<TextCheckInput>][] = [
       [
         "no index, dropped as too-large on both sides",
         {
@@ -79,13 +71,6 @@ describe("CORE-69: a modified Python test file keeps the per-file warning unless
         },
       ],
       ["no index, readable on both sides", { testSources: READABLE }],
-      [
-        "python-too-old index",
-        {
-          testSources: READABLE,
-          pythonTestIndex: { available: false, reason: "python-too-old", detail: "Python 3.6.9" },
-        },
-      ],
     ];
     for (const [name, input] of cases) {
       const report = await run(input);
@@ -100,5 +85,18 @@ describe("CORE-69: a modified Python test file keeps the per-file warning unless
       ).toEqual([]);
       expect(report.verdict, `${name}: verdict`).toBe("warn");
     }
+
+    // CORE-351: a python-too-old index (a Python run that gave no index, python-not-found aside) fails the file closed
+    // in mode block: the per-file form is an error naming the file, and the verdict is fail.
+    const tooOld = await run({
+      testSources: READABLE,
+      pythonTestIndex: { available: false, reason: "python-too-old" },
+    });
+    const tooOldMessages = tooOld.messages.filter((m) => m.code === CODE);
+    expect(tooOldMessages, "python-too-old: one message").toHaveLength(1);
+    expect(tooOldMessages[0]?.level, "python-too-old: level").toBe("error");
+    expect(tooOldMessages[0]?.text, "python-too-old: names the file").toContain(PATH);
+    expect(tooOldMessages[0]?.text, "python-too-old: the per-file form").not.toContain("did not run");
+    expect(tooOld.verdict, "python-too-old: verdict").toBe("fail");
   });
 });

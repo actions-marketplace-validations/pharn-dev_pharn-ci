@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { TestIntegritySignal as Signal } from "../src/report.js";
 import { fixture } from "./helpers.js";
 import { expectValidReport } from "./schema.js";
 
@@ -7,18 +8,6 @@ import { expectValidReport } from "./schema.js";
 
 const REPO_ROOT = "/home/runner/work/demo/demo";
 const PATH = "jest.config.js";
-
-interface Signal {
-  id: string;
-  severity: string;
-  path: string;
-  line: number | null;
-  detail: string;
-}
-interface Report {
-  testIntegrity: { signals: Signal[] };
-  messages: { code: string; level: string; text: string }[];
-}
 
 const linesOf = (text: string) => text.replace(/\n$/, "").split("\n");
 
@@ -33,7 +22,7 @@ function diffOf(path: string, base: string, head: string): string {
 
 /** check() in mode block over a modified jest.config.js with this base and head text; its TI09 signals. */
 async function run(base: string, head: string): Promise<Signal[]> {
-  const { check } = await import("@pharn-ci/core");
+  const { check } = await import("./text-coverage.js");
   const report = check({
     version: "0.1.0",
     coverage: { text: fixture("test-files-deleted/coverage.info"), format: "lcov" },
@@ -46,9 +35,9 @@ async function run(base: string, head: string): Promise<Signal[]> {
       base: { files: [{ path: PATH, text: base }], dropped: [] },
       head: { files: [{ path: PATH, text: head }], dropped: [] },
     },
-  } as unknown as Parameters<typeof check>[0]);
+  });
   expectValidReport(report);
-  return (report as unknown as Report).testIntegrity.signals.filter((s) => String(s.id) === "TI09");
+  return report.testIntegrity.signals.filter((s) => String(s.id) === "TI09");
 }
 
 /** A jest.config.js whose exported object holds these JS source lines (each one a `key: value`). */

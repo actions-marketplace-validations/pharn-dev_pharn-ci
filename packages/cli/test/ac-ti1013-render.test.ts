@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { expectValidReport } from "../../core/test/schema.js";
+import { requiredDeps, type StreamedFake } from "../../node-io/test/required-deps.js";
 
 // check(), renderMarkdown(), readDiffChunks() and main() are loaded inside the test body: the AC tests are written
 // before TI10 and TI13 exist, so nothing the build adds may run while the file loads.
@@ -51,8 +52,11 @@ function fakeRepo(diff: string) {
   const err: string[] = [];
   const contents = new Map([[resolve(REPO_ROOT, "coverage/lcov.info"), fixture("test-files-deleted/coverage.info")]]);
   const deps = {
+    ...requiredDeps((): StreamedFake => deps),
     cwd: REPO_ROOT,
     git: async (args: string[]) => {
+      // No history (CORE-143): the run's revisions stay unresolved, so no test file is read from git.
+      if (args.includes("HEAD^{commit}")) throw new Error("fatal: no history in this fake");
       if (args.includes("ls-files")) {
         return args.includes("-z") ? `${REPO_FILES.join("\0")}\0` : `${REPO_FILES.join("\n")}\n`;
       }
@@ -74,7 +78,8 @@ function fakeRepo(diff: string) {
 
 describe("TI10 and TI13 in the PR comment, the streaming reader and the CLI", () => {
   it("AC-10: the section lists each signal with a hint, both message hints exist, streamed equals whole text, the CLI JSON holds TI10", async () => {
-    const { check, renderMarkdown, readDiffChunks } = await import("@pharn-ci/core");
+    const { renderMarkdown, readDiffChunks } = await import("@pharn-ci/core");
+    const { check } = await import("../../core/test/text-coverage.js");
 
     const base = {
       version: "0.1.0",
@@ -135,7 +140,8 @@ describe("TI10 and TI13 in the PR comment, the streaming reader and the CLI", ()
     expect(ti10Hint).toMatch(/\bPR\b/);
     const ti13Hint = hints.get("TI13") ?? "";
     expect(ti13Hint).toMatch(/\btest\b/i);
-    expect(ti13Hint).toMatch(/ignore comment/i);
+    // CORE-140: the hint is the code's fix.hint, which may not use the word "ignore", so it names the coverage pragma.
+    expect(ti13Hint).toMatch(/coverage pragma/i);
     for (const hint of [ti10Hint, ti13Hint]) {
       expect(hint).toMatch(/accept label/i);
       expect(hint).toMatch(/review/i);

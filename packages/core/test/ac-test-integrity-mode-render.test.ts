@@ -1,22 +1,13 @@
-import { execFileSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { fixture, foldCoverageBar, foldIntegrityColumn } from "./helpers.js";
-import { withoutFix } from "./v090-codes.js";
+import { fixture } from "./helpers.js";
 
 // check() and renderMarkdown() are loaded inside each test body: these tests are written before CheckInput has
 // `testIntegrityMode` and before the section exists, so nothing that depends on them may run while the file loads.
 
-const ROOT = fileURLToPath(new URL("../../../", import.meta.url));
-/** The commit before this increment: Report v2 skeleton, no test-integrity section. */
-const BEFORE = "e39cda3780c7df9c14c84018d187c2c9adfc7f9a";
 const HEADING = "### 🔍 Test integrity";
 
-const gitShow = (path: string) =>
-  execFileSync("git", ["show", `${BEFORE}:${path}`], { cwd: ROOT, encoding: "utf8", maxBuffer: 16 * 1024 * 1024 });
-
 async function render(mode?: "block" | "warn" | "off") {
-  const { check } = await import("../src/check.js");
+  const { check } = await import("./text-coverage.js");
   const { renderMarkdown } = await import("../src/render/markdown.js");
   const report = check({
     version: "0.1.0",
@@ -26,7 +17,7 @@ async function render(mode?: "block" | "warn" | "off") {
     threshold: 80,
     repoFiles: fixture("golden/files.txt").trim().split("\n"),
     ...(mode === undefined ? {} : { testIntegrityMode: { input: mode } }),
-  } as never);
+  });
   return { report, markdown: renderMarkdown(report) };
 }
 
@@ -60,18 +51,16 @@ describe("renderMarkdown: the Test integrity section", () => {
     }
   });
 
-  it("AC-8: with no testIntegrityMode the report JSON is the golden one and the markdown differs by only the section", async () => {
+  // CORE-132: the report and the markdown were compared with the golden files at an old commit (a history pin, with the
+  // later edits folded out); they are now compared with the committed golden files.
+  it("AC-8: with no testIntegrityMode the report JSON and the markdown are the golden ones, with the section in warn mode", async () => {
     const { report, markdown } = await render();
-    // fix-hints (H6): the report now carries a `fix` on each message; it is taken out, so the base golden stays pinned.
-    expect(`${JSON.stringify(withoutFix(report), null, 2)}\n`).toBe(gitShow("fixtures/golden/report.json"));
+    expect(`${JSON.stringify(report, null, 2)}\n`).toBe(fixture("golden/report.json"));
 
     const lines = markdown.split("\n");
     const at = lines.indexOf(HEADING);
     expect(at).toBeGreaterThanOrEqual(0);
     expect(lines.slice(at, at + 4)).toEqual([HEADING, "", "No test-integrity findings (mode: warn).", ""]);
-    lines.splice(at, 4);
-    // The comment-layout change added the summary table's Test integrity column on purpose: it is folded out too.
-    // The comment-coverage-bar change added the diff-coverage bar line on purpose: it is folded out too.
-    expect(foldCoverageBar(foldIntegrityColumn(lines.join("\n")))).toBe(gitShow("fixtures/golden/report.md"));
+    expect(markdown).toBe(fixture("golden/report.md"));
   });
 });

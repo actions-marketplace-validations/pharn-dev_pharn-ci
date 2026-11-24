@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import type { Report } from "../src/report.js";
+import type { TestSourceDrop, TestSourceDropReason } from "../src/testSources.js";
 import { fixture } from "./helpers.js";
 import { expectValidReport } from "./schema.js";
 
@@ -8,16 +10,7 @@ import { expectValidReport } from "./schema.js";
 // Every large input (nested literal, text over the size cap, a diff past 5000 changed lines) is built here.
 
 type Mode = "block" | "warn" | "off";
-type Side = { files: { path: string; text: string }[]; dropped: { path: string; reason: string }[] };
-interface Message {
-  code: string;
-  level: string;
-  text: string;
-}
-interface Report {
-  verdict: string;
-  messages: Message[];
-}
+type Side = { files: { path: string; text: string }[]; dropped: TestSourceDrop[] };
 interface Row {
   name: string;
   code: "TEST_INTEGRITY_INDEX_UNAVAILABLE" | "TEST_INTEGRITY_TEXT_TRUNCATED";
@@ -60,7 +53,7 @@ const cutLines = (text: (i: number) => string) => Array.from({ length: CUT }, (_
 
 const indexed = (path: string): Side => ({ files: [{ path, text: BASE }], dropped: [] });
 const text = (path: string, body: string): Side => ({ files: [{ path, text: body }], dropped: [] });
-const drop = (path: string, reason: string): Side => ({ files: [], dropped: [{ path, reason }] });
+const drop = (path: string, reason: TestSourceDropReason): Side => ({ files: [], dropped: [{ path, reason }] });
 const empty = (): Side => ({ files: [], dropped: [] });
 
 type HeadOf = { label: string; side: (path: string) => Side };
@@ -99,21 +92,34 @@ function rows(): Row[] {
     });
   };
 
-  const baseDropped = (reason: string) => (p: string) => drop(p, reason);
+  const baseDropped = (reason: TestSourceDropReason) => (p: string) => drop(p, reason);
   for (const head of [HEAD_TOO_DEEP, HEAD_TOO_LARGE_TEXT, HEAD_TOO_LARGE, HEAD_OVER_FILE_CAP]) {
     modifiedRow("a modified file indexed at the merge base", indexed, head, true);
   }
   for (const head of THREE) {
     modifiedRow("a modified file dropped at base as over-file-cap", baseDropped("over-file-cap"), head, true);
   }
+  // CORE-351: a side dropped as too-large fails closed against a side with text (here the refused too-deep head) and
+  // against an over-file-cap head, but not against a head dropped as too-large too (both out of reach).
   for (const head of THREE) {
-    modifiedRow("a modified file dropped at base as too-large", baseDropped("too-large"), head, false);
+    modifiedRow(
+      "a modified file dropped at base as too-large",
+      baseDropped("too-large"),
+      head,
+      head !== HEAD_TOO_LARGE,
+    );
   }
+  // CORE-351: over-total-cap is a budget the pull request can spend, so a drop on either side fails closed.
   for (const head of THREE) {
-    modifiedRow("a modified file dropped at base as over-total-cap", baseDropped("over-total-cap"), head, false);
+    modifiedRow("a modified file dropped at base as over-total-cap", baseDropped("over-total-cap"), head, true);
   }
   for (const head of CONTROLS) {
-    modifiedRow("control: a modified file indexed at the merge base", indexed, head, false);
+    modifiedRow(
+      "control: a modified file indexed at the merge base",
+      indexed,
+      head,
+      head.label === "dropped over-total-cap",
+    );
   }
   for (const head of THREE) {
     const p = path();
@@ -166,7 +172,7 @@ function rows(): Row[] {
 }
 
 async function run(row: Row, mode: Mode): Promise<Report> {
-  const { check } = (await import("../src/index.js")) as unknown as { check(input: unknown): unknown };
+  const { check } = await import("./text-coverage.js");
   const report = check({
     version: "0.1.0",
     coverage: { text: fixture("test-files-deleted/coverage.info"), format: "lcov" },
@@ -189,7 +195,7 @@ const levelFor = (report: Report, row: Row): string | null => {
 
 describe("CORE-69: the level of the unreadable and cut messages, by mode", () => {
   it("AC-15: HEAD_UNREADABLE_ERROR_REASONS is the one list of HEAD reasons that make the per-file form an error", async () => {
-    const core = (await import("../src/index.js")) as unknown as { HEAD_UNREADABLE_ERROR_REASONS?: unknown };
+    const core = await import("../src/testIntegrityUnreadable.js");
     // CORE-50 (binary-diff-not-blind) appends `binary`, as the list's own doc comment says it would.
     expect(core.HEAD_UNREADABLE_ERROR_REASONS).toEqual(["too-deep", "too-large", "over-file-cap", "binary"]);
   });

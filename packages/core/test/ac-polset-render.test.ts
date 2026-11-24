@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { Message, MessageCode, ReportPolicyViolation as Violation } from "../src/report.js";
 import { fixture } from "./helpers.js";
 
 // E3 item 23 (policy settings), AC-24. check() and renderMarkdown() are loaded inside the test body, and the golden
@@ -6,16 +7,8 @@ import { fixture } from "./helpers.js";
 // the Settings line, the hints and the golden. The structural lines are asserted here as well, so the golden alone
 // cannot satisfy the test.
 
-type Violation = { id: string; severity: string; path: string | null; line: number | null; detail: string };
-type Message = { level: string; code: string; text: string };
-type Report = Record<string, unknown> & { messages: Message[] };
-interface Core {
-  check(input: unknown): Report;
-  renderMarkdown(report: unknown): string;
-}
-
 const HOSTILE = "x`y|<b>z</b>*w*/.claude/settings.json";
-const v = (id: string, severity: string, path: string, line: number, detail: string): Violation => ({
+const v = (id: string, severity: Violation["severity"], path: string, line: number, detail: string): Violation => ({
   id,
   severity,
   path,
@@ -50,14 +43,16 @@ const IGNORED: Message = {
   code: "POLICY_OVERRIDE_IGNORED",
   text: "The policy file sets policy.rules.P02 lower than the default, so it was not applied.",
 };
+// CORE-140: the hints are each code's fix.hint. CORE-14 follow-up: P02 to P06 each have their own again, with the
+// setting or key to change.
 const HINTS: Record<string, string> = {
-  P02: "Narrow or remove the allow rule (or the defaultMode or additionalDirectories key) in the settings file, or ask the policy owner to change setup.forbidden_permissions.",
-  P04: "Remove the server, or ask the policy owner to add it to setup.allowed_mcp_servers.",
-  P05: "Remove the server from the MCP file.",
-  P06: "Add a command hook for the event whose matcher covers the required one (`*` or the same tool names), without an if condition.",
+  P02: "Ask a maintainer to narrow or remove the allow rule (or the `defaultMode` or `additionalDirectories` key) that the settings file sets against the org policy's `setup.forbidden_permissions`.",
+  P04: "Ask a maintainer to remove the MCP server that the org policy's `setup.allowed_mcp_servers` does not list, or the `enableAllProjectMcpServers` setting.",
+  P05: "Ask a maintainer to remove the MCP server the org policy forbids from the file that names it.",
+  P06: "Ask a maintainer to add the required command hook, with a matcher that covers the required one (`*` or the same tool names) and no `if` condition, or remove `disableAllHooks`.",
 };
 const INVALID_HINT =
-  "Keep agent settings files valid JSON and regular files under 512 KiB, and run on a checkout of the pull request head, so the org policy can check them.";
+  "Check that the agent settings files the report names are valid JSON and regular files under 512 KiB, on a checkout of the pull request head.";
 
 /** The section from `### 📜 Policy` up to and including the newline before the next `### ` line. */
 function policySection(markdown: string): string {
@@ -87,7 +82,10 @@ const lineOf = (x: Violation) =>
 
 describe("the Policy section with P02–P06 and the Settings line", { timeout: 60_000 }, () => {
   it("AC-24: each violation as path:line with its hint, past 10 folded, the Settings line and hint before Ignored, the new codes out of Messages, the hostile path escaped, equal to the golden; no policy renders as before", async () => {
-    const core = (await import("@pharn-ci/core")) as unknown as Core;
+    const core = {
+      ...(await import("@pharn-ci/core")),
+      check: (await import("./text-coverage.js")).check,
+    };
     const base = core.check({
       version: "0.1.0",
       coverage: { text: fixture("golden/coverage.info"), format: "lcov" },
@@ -102,7 +100,7 @@ describe("the Policy section with P02–P06 and the Settings line", { timeout: 6
 
     const report = {
       ...base,
-      policy: { source: "input", version: null, violations: V },
+      policy: { source: "input" as const, version: null, violations: V },
       messages: [...base.messages, SETTINGS, IGNORED],
     };
     const markdown = core.renderMarkdown(report);
@@ -148,8 +146,8 @@ describe("the Policy section with P02–P06 and the Settings line", { timeout: 6
       messages: [
         ...report.messages,
         ...["P02", "P03", "P04", "P05", "P06"].map((id) => ({
-          level: "error",
-          code: `POLICY_${id}`,
+          level: "error" as const,
+          code: `POLICY_${id}` as MessageCode,
           text: `${id} rule message marker text.`,
         })),
       ],

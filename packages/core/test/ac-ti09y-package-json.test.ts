@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { TestIntegritySignal as Signal } from "../src/report.js";
 import { fixture } from "./helpers.js";
 import { expectValidReport } from "./schema.js";
 
@@ -6,18 +7,6 @@ import { expectValidReport } from "./schema.js";
 // may run while the file loads. The removed and newly added jest keys run in the same test as the cases that trigger.
 
 const REPO_ROOT = "/home/runner/work/demo/demo";
-
-interface Signal {
-  id: string;
-  severity: string;
-  path: string;
-  line: number | null;
-  detail: string;
-}
-interface Report {
-  testIntegrity: { signals: Signal[] };
-  messages: { code: string; level: string; text: string }[];
-}
 
 const linesOf = (text: string) => text.replace(/\n$/, "").split("\n");
 
@@ -36,7 +25,7 @@ function diffOf(path: string, base: string | undefined, head: string): string {
 
 /** check() in mode block over one touched file with this base (absent when added) and head text; its TI09 signals. */
 async function run(path: string, base: string | undefined, head: string): Promise<Signal[]> {
-  const { check } = await import("@pharn-ci/core");
+  const { check } = await import("./text-coverage.js");
   const report = check({
     version: "0.1.0",
     coverage: { text: fixture("test-files-deleted/coverage.info"), format: "lcov" },
@@ -49,9 +38,9 @@ async function run(path: string, base: string | undefined, head: string): Promis
       base: { files: base === undefined ? [] : [{ path, text: base }], dropped: [] },
       head: { files: [{ path, text: head }], dropped: [] },
     },
-  } as unknown as Parameters<typeof check>[0]);
+  });
   expectValidReport(report);
-  return (report as unknown as Report).testIntegrity.signals.filter((s) => String(s.id) === "TI09");
+  return report.testIntegrity.signals.filter((s) => String(s.id) === "TI09");
 }
 
 const pkg = (jest?: unknown) =>

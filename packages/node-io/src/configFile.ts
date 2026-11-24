@@ -1,20 +1,23 @@
 import {
+  ConfigError,
+  type ConfigSource,
   configDiffState,
   configRepoPath,
   type DiffFile,
   decodeTestSourceText,
   isUnsafeTestSourcePath,
+  type PharnConfig,
+  parseConfig,
 } from "@pharn-ci/core";
-import { batchCheck, batchRead, type GitBatchDeps, OBJECT_ID } from "./gitBlobs.js";
+import { batchCheck, batchRead, type GitBatchDeps } from "./gitBlobs.js";
 import { isUsableRevision } from "./policyFile.js";
+import type { RunRevisions } from "./revisions.js";
 
 /** The largest pharn-ci config read from git objects, in bytes, judged by the blob's size before it is read. */
 export const CONFIG_FILE_MAX_BYTES = 1_048_576;
 
-/** The git calls the reader makes: whole text out (`rev-parse`, `merge-base`), and bytes out for a call given stdin. */
-export interface ConfigFileGitDeps extends GitBatchDeps {
-  git(args: string[]): Promise<string>;
-}
+/** The git call the reader makes: bytes out for a call given stdin. */
+export type ConfigFileGitDeps = GitBatchDeps;
 
 /**
  * The pharn-ci config as it is at the merge base: its text, `absent` when no entry has that path there, or
@@ -24,13 +27,6 @@ export type ConfigFileBase = { kind: "text"; text: string } | { kind: "absent" }
 
 /** The tree entry modes of a regular file (`100644`, `100755`); a symbolic link is `120000`. */
 const REGULAR_FILE_MODES: ReadonlySet<string> = new Set(["100644", "100755"]);
-
-/** The commit id `revision` names, or null. */
-async function commitOf(deps: ConfigFileGitDeps, revision: string): Promise<string | null> {
-  const out = await deps.git(["rev-parse", "--verify", "--quiet", "--end-of-options", `${revision}^{commit}`]);
-  const oid = out.trim();
-  return OBJECT_ID.test(oid) ? oid : null;
-}
 
 /** The mode and object id of the entry named `name` in a git tree object's bytes, or null when it has none. */
 function treeEntry(tree: Uint8Array, name: string, oidBytes: number): { mode: string; oid: string } | null {
@@ -49,8 +45,8 @@ function treeEntry(tree: Uint8Array, name: string, oidBytes: number): { mode: st
 }
 
 /**
- * The pharn-ci config at `path` as it is at the merge base of `base` and `head` (default `HEAD`), read from committed
- * objects only, never the working tree (CORE-95). One `rev-parse` per revision and one `merge-base` find the commit; one
+ * The pharn-ci config at `path` as it is at the merge base of the run's base and HEAD, read from committed objects only,
+ * never the working tree (CORE-95). The run's revisions find the commit (see `RunRevisions`); one
  * `cat-file --batch-check` asks for the merge base's tree, the directory that holds the file and the file itself; one
  * `cat-file --batch` reads that directory's tree, so the entry's mode is known; one more reads the blob. No symbolic link
  * is followed: a link at the path, or on the way to it, is `unreadable` or `absent`, never its target. A path git has no
@@ -61,18 +57,15 @@ function treeEntry(tree: Uint8Array, name: string, oidBytes: number): { mode: st
  */
 export async function readConfigFileAt(
   deps: ConfigFileGitDeps,
-  options: { base: string; head?: string; path: string },
+  options: { revisions: RunRevisions; path: string },
 ): Promise<ConfigFileBase> {
   const unreadable: ConfigFileBase = { kind: "unreadable" };
   try {
-    const { base, path } = options;
-    const head = options.head ?? "HEAD";
-    if (isUnsafeTestSourcePath(path) || !isUsableRevision(base) || !isUsableRevision(head)) return unreadable;
-    const baseOid = await commitOf(deps, base);
-    const headOid = await commitOf(deps, head);
-    if (baseOid === null || headOid === null) return unreadable;
-    const mergeBase = (await deps.git(["merge-base", baseOid, headOid])).trim();
-    if (!OBJECT_ID.test(mergeBase)) return unreadable;
+    const { revisions, path } = options;
+    if (isUnsafeTestSourcePath(path) || !isUsableRevision(revisions.base)) return unreadable;
+    const resolved = await revisions.resolve();
+    if ("unresolved" in resolved) return unreadable;
+    const { mergeBase } = resolved;
 
     const slash = path.lastIndexOf("/");
     const dir = slash === -1 ? "" : path.slice(0, slash);
@@ -120,15 +113,15 @@ export type ConfigCopy =
  * The copy of the config in use a check runs with, decided by the change's diff (CORE-95), the same way for the CLI
  * and the Action. No diff (`null`): the working tree. A change that does not touch the config: the working tree. One
  * that adds it (or renames a file to it): `absent`, so the defaults and the inputs apply. One that modifies or deletes
- * it (or renames it away): its copy at the merge base of `base` and HEAD, read from git objects by `readConfigFileAt`;
- * with no `base`, no `gitBatch`, or a copy that cannot be read or is not there, `unreadable`. The text is not parsed
+ * it (or renames it away): its copy at the merge base of the run's base and HEAD, read from git objects by
+ * `readConfigFileAt`; with no `revisions`, or a copy that cannot be read or is not there, `unreadable`. The text is not parsed
  * here: a copy that does not parse fails the run where the caller parses it.
  */
 export async function configCopyInUse(
-  deps: { git(args: string[]): Promise<string>; gitBatch?: GitBatchDeps["gitBatch"] | undefined },
+  deps: ConfigFileGitDeps,
   options: {
     diff: readonly DiffFile[] | null;
-    base: string | undefined;
+    revisions: RunRevisions | undefined;
     configPath: string | undefined;
     repoRoot: string;
   },
@@ -138,8 +131,93 @@ export async function configCopyInUse(
   if (state === "untouched") return { source: "working-tree" };
   if (state === "added") return { source: "absent" };
   const path = configRepoPath(options.configPath, options.repoRoot);
-  const { gitBatch } = deps;
-  if (path === null || options.base === undefined || gitBatch === undefined) return { source: "unreadable" };
-  const copy = await readConfigFileAt({ git: (args) => deps.git(args), gitBatch }, { base: options.base, path });
+  if (path === null || options.revisions === undefined) return { source: "unreadable" };
+  const copy = await readConfigFileAt(deps, { revisions: options.revisions, path });
   return copy.kind === "text" ? { source: "merge-base", path, text: copy.text } : { source: "unreadable" };
+}
+
+/** Where the config in use is and how errors name it; the same for the CLI and the Action. */
+export interface ConfigFileLocation {
+  /** The absolute path of the config file. */
+  path: string;
+  /** How an error names the file (the CLI: the absolute path; the Action: the path as the input or the default writes it). */
+  name: string;
+  /** Named by a flag or an input: a missing file is then an error, so a typo cannot drop a threshold held only there. */
+  explicit: boolean;
+}
+
+/** The config a check runs with, which copy it is when not the working tree's, and that copy's exclusions for TI14. */
+export interface ConfigInUse {
+  config: PharnConfig;
+  configSource?: ConfigSource;
+  headConfigExclude?: string[];
+}
+
+/**
+ * The working tree's config: a missing default file is no config; a missing file a flag or an input names, or one that
+ * does not parse, is a `ConfigError`.
+ */
+export async function loadConfig(
+  deps: { readFile(path: string): Promise<string | null> },
+  location: ConfigFileLocation,
+): Promise<PharnConfig> {
+  const text = await deps.readFile(location.path);
+  if (text === null) {
+    if (location.explicit) throw new ConfigError(`config file not found: ${location.name}`);
+    return {};
+  }
+  try {
+    return parseConfig(text);
+  } catch (err) {
+    throw new ConfigError(`${location.name}: ${errorText(err)}`);
+  }
+}
+
+/**
+ * The config the check runs with, and which copy it is (CORE-95), the same for the CLI and the Action: a change that
+ * edits the config in use is checked with its copy at the merge base (`configCopyInUse`), one that adds it with none;
+ * with no diff, or a diff that leaves it alone, the working tree's copy is read as `loadConfig` reads it. A copy at the
+ * merge base that cannot be read runs with none, and core says so; one that does not parse is a `ConfigError`. When the
+ * check does not run with the working tree's copy, that copy's exclusions are kept for TI14 alone (`headConfigExclude`);
+ * a copy that does not parse gives none.
+ */
+export async function loadConfigInUse(
+  deps: ConfigFileGitDeps & { readFile(path: string): Promise<string | null> },
+  location: ConfigFileLocation & {
+    /** The config path as check() is given it (`CheckInput.configPath`); undefined for the default file. */
+    configPath: string | undefined;
+    repoRoot: string;
+    diff: readonly DiffFile[] | null;
+    revisions: RunRevisions | undefined;
+  },
+): Promise<ConfigInUse> {
+  const copy = await configCopyInUse(deps, {
+    diff: location.diff,
+    revisions: location.revisions,
+    configPath: location.configPath,
+    repoRoot: location.repoRoot,
+  });
+  if (copy.source === "working-tree") return { config: await loadConfig(deps, location) };
+  const headConfigExclude = headExclusions(await deps.readFile(location.path));
+  const head = headConfigExclude === undefined ? {} : { headConfigExclude };
+  if (copy.source !== "merge-base") return { config: {}, configSource: copy.source, ...head };
+  try {
+    return { config: parseConfig(copy.text), configSource: "merge-base", ...head };
+  } catch (err) {
+    throw new ConfigError(`${copy.path} at the merge base: ${errorText(err)}`);
+  }
+}
+
+/** The `coverage.exclude` patterns of a config's text, or undefined when there is no text or it does not parse. */
+function headExclusions(text: string | null): string[] | undefined {
+  if (text === null) return undefined;
+  try {
+    return parseConfig(text).coverage?.exclude;
+  } catch {
+    return undefined;
+  }
+}
+
+function errorText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }

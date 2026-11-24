@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { Report } from "../src/report.js";
 import { fixture } from "./helpers.js";
 import { expectValidReport } from "./schema.js";
 
@@ -8,18 +9,8 @@ import { expectValidReport } from "./schema.js";
 
 const CODE = "DIFF_UNAVAILABLE";
 
-interface Message {
-  code: string;
-  level: string;
-  text: string;
-}
-interface Report {
-  verdict: string;
-  messages: Message[];
-}
-
 async function run(mode: "warn" | "block"): Promise<Report> {
-  const { check } = await import("@pharn-ci/core");
+  const { check } = await import("./text-coverage.js");
   const report = check({
     version: "0.1.0",
     coverage: { text: fixture("golden/coverage.info"), format: "lcov", file: "coverage/lcov.info" },
@@ -28,9 +19,9 @@ async function run(mode: "warn" | "block"): Promise<Report> {
     threshold: null,
     repoFiles: fixture("golden/files.txt").trim().split("\n"),
     testIntegrityMode: { input: mode },
-  } as unknown as Parameters<typeof check>[0]);
+  });
   expectValidReport(report);
-  return report as unknown as Report;
+  return report;
 }
 
 const diffUnavailable = (report: Report) => report.messages.filter((m) => m.code === CODE);

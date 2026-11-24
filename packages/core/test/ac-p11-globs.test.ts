@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import type { AgentPrFacts } from "../src/agents.js";
+import type { Report } from "../src/report.js";
 import { fixture } from "./helpers.js";
 import { expectValidReport } from "./schema.js";
 
@@ -6,12 +8,8 @@ import { expectValidReport } from "./schema.js";
 // too: the AC test is written before the build adds rule P11 and its fixtures, so nothing the build adds may run while
 // this file loads.
 
-type Violation = { id: string; severity: string; path: string | null; line: number | null; detail: string };
-type Message = { level: string; code: string; text: string };
-type Report = { verdict: string; messages: Message[]; policy?: { violations: Violation[] } };
-
 const REPO_ROOT = "/home/runner/work/demo/demo";
-const AGENT_FACTS = {
+const AGENT_FACTS: AgentPrFacts = {
   pr: {
     author: { login: "claude[bot]", type: "Bot" },
     labels: [],
@@ -20,7 +18,7 @@ const AGENT_FACTS = {
 };
 
 async function run(diffName: string): Promise<Report> {
-  const { check } = await import("@pharn-ci/core");
+  const { check } = await import("./text-coverage.js");
   const report = check({
     version: "0.1.0",
     coverage: { text: fixture("golden/coverage.info"), format: "lcov" },
@@ -35,9 +33,9 @@ async function run(diffName: string): Promise<Report> {
       document: JSON.parse(fixture("policy-rules/p11/globs/policy.json")),
     },
     agentPrFacts: AGENT_FACTS,
-  } as never);
+  });
   expectValidReport(report);
-  return report as unknown as Report;
+  return report;
 }
 
 const p11 = (report: Report) => (report.policy?.violations ?? []).filter((v) => v.id === "P11");

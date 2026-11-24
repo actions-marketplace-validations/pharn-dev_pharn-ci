@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { fixture, foldCallout, foldCoverageBar, foldIntegrityColumn } from "./helpers.js";
+import { foldHintsToBase } from "./hints-at-base.js";
 import { expectValidReport } from "./schema.js";
 
 // pr-comment-logo-2 AC-2. check() and the renderer are loaded inside the test body: the AC tests are written before the
@@ -8,7 +9,7 @@ import { expectValidReport } from "./schema.js";
 
 /** The one fixed logo line, written here so the test does not reuse the renderer's own constant. */
 const LOGO =
-  '<img src="https://raw.githubusercontent.com/pharn-dev/pharn-ci/main/docs/assets/pharn-logo.svg" alt="pharn" width="48" height="48">';
+  '<img src="https://raw.githubusercontent.com/pharn-dev/pharn-ci/515998146a22a1886341d94236e4138e1777c13a/docs/assets/pharn-logo.svg" alt="pharn" width="48" height="48">';
 
 /** U+1F6E1 U+FE0F, the brand mark, and U+00B7, the separator, as the SPEC writes them. */
 const HEADING = "## \u{1F6E1}\u{FE0F} pharn-ci · ❌ Fail";
@@ -27,7 +28,7 @@ function foldTestIntegrity(markdown: string): string {
 
 describe("renderMarkdown(): the golden report opens with the logo line", () => {
   it("AC-2: the golden rendering is the logo line, an empty line, then the committed report.md unchanged", async () => {
-    const { check } = await import("../src/check.js");
+    const { check } = await import("./text-coverage.js");
     const { renderMarkdown } = await import("../src/render/markdown.js");
 
     const report = check({
@@ -56,7 +57,10 @@ describe("renderMarkdown(): the golden report opens with the logo line", () => {
     // test-integrity-mode added the "🔍 Test integrity" section on purpose: its four lines are folded out first.
     // The comment-layout change added the summary table's Test integrity column on purpose: it is folded out too.
     // The comment-coverage-bar change added the diff-coverage bar line on purpose: it is folded out too.
-    const rendered = foldCallout(foldTestIntegrity(foldIntegrityColumn(foldCoverageBar(lines.slice(2).join("\n")))));
+    // CORE-140 made each hint its code's fix.hint on purpose: the hint lines are folded back too.
+    const rendered = foldHintsToBase(
+      foldCallout(foldTestIntegrity(foldIntegrityColumn(foldCoverageBar(lines.slice(2).join("\n"))))),
+    );
     expect(rendered).toContain("· report schema v2");
     const rest = rendered.replace("· report schema v2", "· report schema v1");
     expect(createHash("sha256").update(rest).digest("hex")).toBe(GOLDEN_MD_BEFORE_SHA256);

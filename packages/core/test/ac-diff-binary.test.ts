@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
+import type { Message } from "../src/report.js";
 import { fixture } from "./helpers.js";
 import { expectValidReport } from "./schema.js";
+import type { TextCheckInput } from "./text-coverage.js";
 
 // parseUnifiedDiff(), check() and the fixtures are loaded inside each test body: the AC tests are written before the
 // binary flag, the binary-covered-file warning and fixtures/gate-tamper/ exist, so nothing that depends on them may
@@ -8,14 +10,12 @@ import { expectValidReport } from "./schema.js";
 
 const REPO_ROOT = "/home/runner/work/demo/demo";
 
-type Message = { level: string; code: string; text: string };
-
 const lines = (path: string) => fixture(path).trim().split("\n");
 const withCode = (messages: readonly Message[], code: string) => messages.filter((message) => message.code === code);
 
 async function runCheck(diff: string) {
-  const { check } = await import("../src/check.js");
-  const input = {
+  const { check } = await import("./text-coverage.js");
+  const input: TextCheckInput = {
     version: "0.1.0",
     coverage: { text: fixture("gate-tamper/coverage.info"), format: "lcov" as const },
     diff: { text: fixture(`gate-tamper/${diff}`) },
@@ -23,7 +23,7 @@ async function runCheck(diff: string) {
     threshold: 80,
     repoFiles: lines("gate-tamper/files.txt"),
   };
-  return check(input as Parameters<typeof check>[0]);
+  return check(input);
 }
 
 describe("binary diff entries for covered files", () => {

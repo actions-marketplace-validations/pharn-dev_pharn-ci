@@ -13,18 +13,6 @@ const COUNT = 25;
 const MESSAGE_PREFIX =
   "This change edits only the expected values of tests while it also edits source files, so the tests may have been made to agree with the code: ";
 
-interface Signal {
-  id: string;
-  severity: string;
-  path: string;
-  line: number | null;
-  detail: string;
-}
-interface Report {
-  testIntegrity: { signals: Signal[] };
-  messages: { code: string; level: string; text: string }[];
-}
-
 /** One test file of 25 tests; at head each test's `toBe(<n>)` expected value differs, and nothing else does. */
 function texts(): { base: string[]; head: string[]; changed: number[]; testLines: number[] } {
   const header = ['import { describe, expect, it } from "vitest";', 'import { price } from "./cart.js";', ""];
@@ -66,7 +54,7 @@ function diffOf(base: string[], head: string[], changed: number[]): string {
 describe("TI07: at most 20 findings per file", () => {
   it("AC-5: 25 tests of one file that each change only an expected value, with a source file changed, give 20 TI07 signals for that file, a message naming it that ends with the cap's Not listed sentence giving 5, and no TI02 or TI05", async () => {
     const { base, head, changed, testLines } = texts();
-    const { check } = await import("../src/check.js");
+    const { check } = await import("./text-coverage.js");
     const report = check({
       version: "0.1.0",
       coverage: { text: fixture("test-files-deleted/coverage.info"), format: "lcov" },
@@ -79,7 +67,7 @@ describe("TI07: at most 20 findings per file", () => {
         head: { files: [{ path: CART, text: head.join("\n") }], dropped: [] },
       },
       testIntegrityMode: { input: "block" },
-    } as unknown as Parameters<typeof check>[0]) as unknown as Report;
+    });
     expectValidReport(report);
 
     const ti07 = report.testIntegrity.signals.filter((s) => String(s.id) === "TI07");

@@ -7,12 +7,10 @@ import { expectValidReport } from "./schema.js";
 
 describe("golden: fixture diff + lcov + exclusions -> Report v2", () => {
   it("AC-17: excludes the fixture's generated files and matches the golden JSON and markdown", async () => {
-    const { check } = await import("../src/check.js");
+    const { check } = await import("./text-coverage.js");
     const { parseConfig } = await import("../src/config.js");
     const { renderMarkdown } = await import("../src/render/markdown.js");
-    const { matchGlob } = (await import("../src/index.js")) as unknown as {
-      matchGlob: (pattern: string, path: string) => boolean;
-    };
+    const { matchGlob } = await import("../src/glob.js");
 
     const config = parseConfig(fixture("golden-exclusions/ci.yml")) as {
       coverage?: { exclude?: string[]; threshold?: number };
@@ -26,7 +24,7 @@ describe("golden: fixture diff + lcov + exclusions -> Report v2", () => {
       threshold: config.coverage?.threshold ?? null,
       repoFiles: fixture("golden-exclusions/files.txt").trim().split("\n"),
       exclude,
-    } as Parameters<typeof check>[0]);
+    });
 
     // Asserted before the snapshots, so a wrong report fails here instead of being written as a new snapshot.
     expectValidReport(report);

@@ -1,17 +1,16 @@
 import { describe, expect, it } from "vitest";
 import {
-  check,
   MAX_ADDED_TEXT_LINES,
   MAX_OTHER_ADDED_TEXT_CHARS,
   MAX_PRIORITY_ADDED_TEXT_CHARS,
-  type Report,
-  readDiffChunks,
-} from "../src/index.js";
+} from "../src/diff/unified.js";
+import { type Report, readDiffChunks } from "../src/index.js";
 import { DEFAULT_INJECTION_SEVERITIES } from "../src/injection/policy.js";
 import { fixture } from "./helpers.js";
 import { addedFileDiff, injectionFixture } from "./injection-fixture.js";
 import { expectValidReport } from "./schema.js";
-import { withoutFix } from "./v090-codes.js";
+import { check, type TextCheckInput } from "./text-coverage.js";
+import { withoutFix } from "./without-fix.js";
 
 // H4 through check(): the optional `injection` object and the INJECTION_ messages, PI01's block failing the verdict,
 // the streamed and whole-text diff giving the same result, the cut-scan warning, and no trace of the scan on a clean
@@ -19,7 +18,7 @@ import { withoutFix } from "./v090-codes.js";
 
 const REPO_ROOT = "/home/runner/work/demo/demo";
 
-function run(diff: Parameters<typeof check>[0]["diff"], over: Record<string, unknown> = {}): Report {
+function run(diff: TextCheckInput["diff"], over: Partial<TextCheckInput> = {}): Report {
   const report = check({
     version: "0.1.0",
     coverage: { text: fixture("golden/coverage.info"), format: "lcov" },
@@ -28,7 +27,7 @@ function run(diff: Parameters<typeof check>[0]["diff"], over: Record<string, unk
     threshold: null,
     repoFiles: ["AGENTS.md", "src/a.ts"],
     ...over,
-  } as never);
+  });
   expectValidReport(report);
   return report;
 }

@@ -12,7 +12,7 @@ import {
   type UploadOutcome,
   VERSION,
 } from "@pharn-ci/core";
-import { type AppResult, appRequest, requestAppToken } from "./app-client.js";
+import { type AppResult, appRequest, errorClassOf, requestAppToken } from "./app-client.js";
 import type { ActionDeps, IssueComment } from "./run.js";
 import type { UploadChoice } from "./upload-input.js";
 
@@ -57,7 +57,6 @@ export type UploadDeps = Pick<
   | "timeoutMs"
   | "uploadDeadlineMs"
   | "sleep"
-  | "debug"
   | "info"
   | "warning"
 >;
@@ -89,37 +88,22 @@ interface Step {
   errorClass?: string;
 }
 
-/** A constructor name as a log line may carry it; anything else reads as `unknown`. */
-const ERROR_CLASS = /^[A-Za-z_$][A-Za-z0-9_$]{0,63}$/;
-
-/** The class name of a thrown value: an Error subclass's constructor name, or its `typeof`. Never its message. */
-function errorClassOf(err: unknown): string {
-  if (typeof err !== "object" || err === null) return typeof err;
-  const name = (err as { constructor?: { name?: unknown } }).constructor?.name;
-  return typeof name === "string" && ERROR_CLASS.test(name) ? name : "unknown";
-}
-
 /**
- * Uploads the run to pharn.dev and says how it went. It never throws and never fails the check: whatever goes wrong is
- * an outcome (and one log line), and an exception is `failed` with the reason `internal`, its class named in the log
- * line. Nothing here puts the token, the signed URL or what the app answered into a log line, an error or the outcome.
- *
- * The one exception is debug logging (`deps.debug`, set from `RUNNER_DEBUG=1`, a run re-run with debug logging): there
- * an exception is logged as above and then thrown, so the step fails with its message and the bug can be found.
+ * Uploads the run to pharn.dev and says how it went. It never throws and never fails the check, under debug logging
+ * (`RUNNER_DEBUG=1`) too (CORE-123): whatever goes wrong is an outcome (and one log line), and an exception is `failed`
+ * with the reason `internal`, its class named in the log line (`errorClassOf`, never its message). Nothing here puts
+ * the token, the signed URL or what the app answered into a log line, an error or the outcome.
  */
 export async function runUpload(deps: UploadDeps, input: UploadInput): Promise<UploadOutcome> {
   let step: Step;
-  let thrown: { err: unknown } | undefined;
   try {
     const clock = () => (deps.now?.() ?? new Date()).getTime();
     const deadlineAt = clock() + (deps.uploadDeadlineMs ?? UPLOAD_DEADLINE_MS);
     step = await uploadSteps(deps, input, () => deadlineAt - clock());
   } catch (err) {
     step = { outcome: { status: "failed", reason: "internal" }, errorClass: errorClassOf(err) };
-    thrown = { err };
   }
   logOutcome(deps, step);
-  if (thrown !== undefined && deps.debug === true) throw thrown.err;
   return step.outcome;
 }
 
@@ -153,8 +137,11 @@ async function uploadSteps(deps: UploadDeps, input: UploadInput, remainingMs: ()
   if (input.pullRequestTarget === true) return { outcome: { status: "skipped", reason: "pull-request-target" } };
   if (input.report.meta === undefined) return { outcome: { status: "skipped", reason: "no-meta" } };
 
-  const token = await requestAppToken(deps, UPLOAD_NO_TOKEN_LINE);
-  if (token === null) return { outcome: { status: "skipped", reason: "no-oidc" } };
+  // Not offered and offered-but-failed are both `no-oidc`: an upload never fails the check, so a failed token request
+  // stays out of the verdict and the one info line `requestAppToken` logs is all the job says about it.
+  const tokenResult = await requestAppToken(deps, UPLOAD_NO_TOKEN_LINE);
+  if (tokenResult.kind !== "token") return { outcome: { status: "skipped", reason: "no-oidc" } };
+  const { token } = tokenResult;
 
   const commentUrl = await findCommentUrl(deps, input.findOwnComment);
   const createdAt = (deps.now?.() ?? new Date()).toISOString();
@@ -258,9 +245,17 @@ async function uploadSteps(deps: UploadDeps, input: UploadInput, remainingMs: ()
   if (runsResult.kind !== "response" || ![200, 201, 202].includes(runsResult.status)) {
     return failed(failReason("runs", runsResult, remainingMs()), runsId);
   }
-  const runUrl = readRunsAnswer(runsResult, input.appOrigin);
-  if (runUrl === null) return failed("runs:malformed", runsId);
-  return { outcome: { status: "ok", runUrl, ...(junitXml === undefined ? {} : { junit: true }) }, ...runsId };
+  const runs = readRunsAnswer(runsResult, input.appOrigin);
+  if (runs === null) return failed("runs:malformed", runsId);
+  return {
+    outcome: {
+      status: "ok",
+      runUrl: runs.runUrl,
+      ...(junitXml === undefined ? {} : { junit: true }),
+      ...(runs.appCommented ? { appCommented: true } : {}),
+    },
+    ...runsId,
+  };
 }
 
 const failed = (reason: string, id: { requestId?: string }): Step => ({ outcome: { status: "failed", reason }, ...id });
@@ -345,12 +340,29 @@ function readUploadUrlAnswer(result: Extract<AppResult, { kind: "response" }>): 
   return { uploadUrl, objectKey, maxBytes };
 }
 
-/** The run's page URL of a runs answer: an https URL on the app's own origin, as the URL class writes it, or null. */
-function readRunsAnswer(result: Extract<AppResult, { kind: "response" }>, origin: URL): string | null {
+interface RunsAnswer {
+  runUrl: string;
+  /** The answer's `commentUrl` is a usable URL: the App posted or edited the pull request comment before answering. */
+  appCommented: boolean;
+}
+
+/**
+ * The run's page URL of a runs answer (an https URL on the app's own origin, as the URL class writes it), or null when
+ * there is none, and whether the App commented. `commentUrl` counts only as a string that is an https URL of at most
+ * 2048 characters (`httpsUrl`, a fragment allowed); null, absent (an older app), another type, `http:` or a longer
+ * string all read as "the App did not comment", so the Action comments itself. Only that yes or no is kept: the value
+ * never reaches a log line, the report, the comment or an output.
+ */
+function readRunsAnswer(result: Extract<AppResult, { kind: "response" }>, origin: URL): RunsAnswer | null {
   const answer = jsonObject(result);
   if (answer === null || typeof answer.url !== "string") return null;
   const url = httpsUrl(answer.url, 2048);
-  return url !== null && url.origin === origin.origin ? url.href : null;
+  if (url === null || url.origin !== origin.origin) return null;
+  const { commentUrl } = answer;
+  return {
+    runUrl: url.href,
+    appCommented: typeof commentUrl === "string" && httpsUrl(commentUrl, 2048, true) !== null,
+  };
 }
 
 /**
@@ -365,7 +377,6 @@ async function putBundle(
   bytes: Uint8Array,
   remainingMs: () => number,
 ): Promise<string | null> {
-  if (deps.fetch === undefined) return "put:network";
   const signal = AbortSignal.timeout(Math.min(deps.timeoutMs ?? PUT_TIMEOUT_MS, remainingMs()));
   let response: Response;
   try {

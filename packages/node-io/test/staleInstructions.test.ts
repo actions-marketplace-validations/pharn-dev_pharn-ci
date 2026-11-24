@@ -3,12 +3,15 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { type DiffFile, detectStaleInstructions, scanAgentSetup } from "../../core/src/index.js";
+import { type DiffFile, scanAgentSetup } from "../../core/src/index.js";
+import { detectStaleInstructions } from "../../core/src/setup/stale.js";
 import { runGit, runGitBatch } from "../src/io.js";
+import { runRevisions } from "../src/revisions.js";
 import { readStaleInstructionSources } from "../src/staleInstructions.js";
 
 // Stale instructions (Horizon 2 item H3): the node-io reader against a real repository. The base commit is dated two
-// years before the feature commit, so AGENTS.md is old for SI04; the feature branch removes the `format` script.
+// years before the feature commit, so AGENTS.md is old (SI04 reported it until CORE-144, which stopped emitting SI04 and
+// removed its `git log` calls); the feature branch removes the `format` script.
 
 let dir: string;
 const OLD = "2024-01-01T00:00:00Z";
@@ -64,9 +67,13 @@ const deps = () => ({
 });
 
 describe("readStaleInstructionSources", () => {
-  it("reads the instruction files at HEAD, the touched package.json at the merge base too, and SI04's commit times", async () => {
+  it("reads the instruction files at HEAD and the touched package.json at the merge base too, and no commit time", async () => {
     const files = repoFiles();
-    const sources = await readStaleInstructionSources(deps(), { repoFiles: files, diff: DIFF, base: "main" });
+    const sources = await readStaleInstructionSources(deps(), {
+      repoFiles: files,
+      diff: DIFF,
+      revisions: runRevisions(deps(), "main"),
+    });
     expect(sources).toBeDefined();
     if (sources === undefined || "unavailable" in sources.instructions) throw new Error("no sources");
     expect(sources.instructions.files.map((f) => f.path)).toEqual(["AGENTS.md", "CLAUDE.md"]);
@@ -74,35 +81,30 @@ describe("readStaleInstructionSources", () => {
     expect(sources.packageJson?.head).not.toContain('"format"');
     expect(sources.packageJson?.base).toContain('"format"');
     expect(sources.makefile).toEqual({ head: "build:\n\techo build\n" });
-    expect(sources.commitTimes).toEqual({
-      head: Date.parse(NEW) / 1000,
-      files: [{ path: "AGENTS.md", time: Date.parse(OLD) / 1000 }],
-    });
+    // CORE-144: SI04's commit times are no longer read.
+    expect(Object.keys(sources).sort()).toEqual(["instructions", "makefile", "packageJson"]);
 
-    // Through the detector: the removed script (SI01) and the old AGENTS.md (SI04).
+    // Through the detector: the removed script (SI01); the old AGENTS.md gives nothing since SI04 is not emitted.
     const { findings } = detectStaleInstructions({
       sources,
       diff: DIFF,
       repoFiles: files,
       agentSetup: scanAgentSetup(files),
     });
-    expect(findings.map((f) => `${f.id} ${f.path}:${f.line} ${f.token}`)).toEqual([
-      "SI04 AGENTS.md:1 src/index.ts",
-      "SI01 CLAUDE.md:1 pnpm run format",
-    ]);
+    expect(findings.map((f) => `${f.id} ${f.path}:${f.line} ${f.token}`)).toEqual(["SI01 CLAUDE.md:1 pnpm run format"]);
   });
 
-  it("reads nothing without instruction files; without a git runner it has no times and no base side", async () => {
+  it("reads nothing without instruction files; without the run's revisions it has no base side", async () => {
     expect(await readStaleInstructionSources(deps(), { repoFiles: ["src/index.ts"], diff: DIFF })).toBeUndefined();
     const batchOnly = await readStaleInstructionSources(
       { gitBatch: deps().gitBatch },
-      { repoFiles: repoFiles(), diff: DIFF, base: "main" },
+      { repoFiles: repoFiles(), diff: DIFF },
     );
-    expect(batchOnly?.commitTimes).toBeUndefined();
     expect(batchOnly?.packageJson).toEqual({ head: expect.stringContaining('"build"') });
   });
 
-  it("a failing batch git leaves the instructions unavailable; a failing git log leaves the times out", async () => {
+  // CORE-144: the "a failing git log leaves the times out" half of this case left with SI04's git log calls.
+  it("a failing batch git leaves the instructions unavailable", async () => {
     const failing = await readStaleInstructionSources(
       { gitBatch: () => Promise.reject(new Error("fatal: simulated")) },
       { repoFiles: repoFiles(), diff: DIFF },
@@ -110,37 +112,35 @@ describe("readStaleInstructionSources", () => {
     expect(failing?.instructions).toEqual({
       unavailable: expect.stringContaining("git cat-file --batch-check failed"),
     });
-    const noLog = await readStaleInstructionSources(
-      {
-        gitBatch: deps().gitBatch,
-        git: (args) => (args[0] === "log" ? Promise.reject(new Error("fatal: log")) : runGit(dir, args)),
-      },
-      { repoFiles: repoFiles(), diff: DIFF, base: "main" },
-    );
-    expect(noLog?.commitTimes).toBeUndefined();
-    expect(noLog?.packageJson?.base).toContain('"format"');
   });
 
-  it("names each timed path as a top-level literal pathspec after --, and never asks for an unsafe path", async () => {
+  it("runs no git log (CORE-144): with a fake git that records every call, only the run's revisions are asked for", async () => {
     const calls: string[][] = [];
-    await readStaleInstructionSources(
-      {
-        gitBatch: deps().gitBatch,
-        git: (args) => {
-          calls.push(args);
-          return runGit(dir, args);
-        },
-      },
-      { repoFiles: repoFiles(), diff: DIFF, base: "main" },
+    const mergeBase = (await runGit(dir, ["merge-base", "main", "HEAD"])).trim();
+    const recording = async (args: string[]) => {
+      calls.push(args);
+      if (args[0] === "merge-base") return `${mergeBase}\n`;
+      if (args[0] === "rev-parse") return runGit(dir, args);
+      throw new Error(`unexpected git call: ${args.join(" ")}`);
+    };
+    const sources = await readStaleInstructionSources(
+      { gitBatch: deps().gitBatch },
+      { repoFiles: repoFiles(), diff: DIFF, revisions: runRevisions({ git: recording }, "main") },
     );
+    const oid = expect.stringMatching(/^[0-9a-f]{40}$/);
     expect(calls).toEqual([
-      ["merge-base", "main", "HEAD"],
-      ["log", "-1", "--format=%ct", "HEAD"],
-      ["log", "-1", "--format=%ct", "HEAD", "--", ":(top,literal)AGENTS.md"],
+      ["rev-parse", "--verify", "--quiet", "--end-of-options", "main^{commit}"],
+      ["rev-parse", "--verify", "--quiet", "--end-of-options", "HEAD^{commit}"],
+      ["merge-base", oid, oid],
     ]);
+    expect(calls.some((args) => args[0] === "log")).toBe(false);
+    expect(sources?.packageJson?.base).toContain('"format"');
+  });
+
+  it("never passes a revision that starts with a dash to git", async () => {
     const dashed = await readStaleInstructionSources(
-      { gitBatch: deps().gitBatch, git: (args) => runGit(dir, args) },
-      { repoFiles: repoFiles(), diff: DIFF, base: "--output=x" },
+      { gitBatch: deps().gitBatch },
+      { repoFiles: repoFiles(), diff: DIFF, revisions: runRevisions(deps(), "--output=x") },
     );
     expect(dashed?.packageJson?.base).toBeUndefined();
   });

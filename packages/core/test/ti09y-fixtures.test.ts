@@ -1,9 +1,10 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { check } from "../src/check.js";
+import type { TestSourceFile as SourceFile } from "../src/testSources.js";
 import { FIXTURES, fixture } from "./helpers.js";
 import { expectValidReport } from "./schema.js";
+import { check } from "./text-coverage.js";
 
 // Every case of fixtures/test-integrity/TI09/ runs through check() in mode block, with the test sources read from the
 // case's base/ and head/ directories (an absent directory gives no files on that side), as the Skylos tests read them.
@@ -12,11 +13,6 @@ import { expectValidReport } from "./schema.js";
 
 const REPO_ROOT = "/home/runner/work/demo/demo";
 const TI09 = `${FIXTURES}test-integrity/TI09`;
-
-interface SourceFile {
-  path: string;
-  text: string;
-}
 
 const byPath = (a: SourceFile, b: SourceFile) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
 

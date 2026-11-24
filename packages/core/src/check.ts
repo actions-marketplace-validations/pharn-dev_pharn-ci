@@ -1,10 +1,9 @@
 import { type AgentPrFacts, agentPrMetaFields, detectAgentPr } from "./agents.js";
 import { parseAgentToolNames, parseCoverageRoot, parseExcludePattern } from "./config.js";
-import { chooseCoverageFormat, type DetectedCoverageFormat } from "./coverage/detect.js";
-import { parseCoverageCounted } from "./coverage/index.js";
+import type { DetectedCoverageFormat } from "./coverage/detect.js";
 import { matchCoveragePaths, resolveBackslashPaths } from "./coverage/match.js";
 import { mergeCoverageMaps } from "./coverage/merge.js";
-import type { CoverageFormat, CoverageFormatSelection, CoverageMap } from "./coverage/types.js";
+import type { CoverageFormat, CoverageMap } from "./coverage/types.js";
 import type { CoverageDiscoveryNotFound } from "./coverageDiscovery.js";
 import { checkDependencies } from "./dependencies/check.js";
 import type { DependencyLookups } from "./dependencies/lookup.js";
@@ -26,7 +25,12 @@ import { detectInjection, injectionTextPriority, keepInjectionText } from "./inj
 import { junitReport } from "./junit/flaky.js";
 import type { JunitResults } from "./junit/results.js";
 import { agentPolicyOf, type PolicyFileBase } from "./policy/agents.js";
-import { agentPrIncompleteMessage, policyOverrideIgnoredMessage, policyUnavailableMessage } from "./policy/messages.js";
+import {
+  agentPrIncompleteMessage,
+  policyKeysUnknownMessage,
+  policyOverrideIgnoredMessage,
+  policyUnavailableMessage,
+} from "./policy/messages.js";
 import type { IgnoredSetting, ResolvedPolicy, SignalOverrides } from "./policy/resolved.js";
 import { evaluatePolicyRules } from "./policy/rules/evaluate.js";
 import { policyRuleMessages } from "./policy/rules/messages.js";
@@ -34,6 +38,7 @@ import { NO_SETUP_DETAIL } from "./policy/rules/p01.js";
 import { levelOf, strongest } from "./policy/rules/severity.js";
 import type { PolicySettingsSources } from "./policy/settings/types.js";
 import {
+  type BuildReportInput,
   buildReport,
   type Message,
   type OmittedSignals,
@@ -57,8 +62,7 @@ import { keepSignalFileText, textCutModifiedTestFiles, textCutSignalFiles } from
 import { summarizeTestChanges } from "./signals/testChanges.js";
 import { matchTests } from "./signals/testMatch.js";
 import { binaryTouchedTestFiles, indexTouchedTestFiles, withBinaryTestFiles } from "./signals/testPairs.js";
-import { detectTI01 } from "./signals/ti01.js";
-import { movedTestFiles } from "./signals/ti01Moved.js";
+import { detectTI01, indexDeletedTestFiles } from "./signals/ti01.js";
 import { detectTI02 } from "./signals/ti02.js";
 import { detectTI03 } from "./signals/ti03.js";
 import { detectTI03Pairs, type Ti03Finding } from "./signals/ti03Pairs.js";
@@ -73,7 +77,6 @@ import { detectTI11 } from "./signals/ti11.js";
 import { detectTI12 } from "./signals/ti12.js";
 import { detectTI13 } from "./signals/ti13.js";
 import { detectTI14 } from "./signals/ti14.js";
-import { detectTI15 } from "./signals/ti15.js";
 import { detectTI16 } from "./signals/ti16.js";
 import { detectTI17 } from "./signals/ti17.js";
 import { deletedTestFiles } from "./testFiles.js";
@@ -83,35 +86,27 @@ import type { TestSources } from "./testSources.js";
 import { byCodeUnit } from "./text.js";
 
 /**
- * One coverage file of a multi-file input: its contents (and the path it came from, for messages); or the map an
- * adapter already parsed from it, with the format that was chosen on the start of that file (`empty` and `unknown`
- * included, with an empty map); or the path that was not found. The `format` of the enclosing input applies to text
- * entries only; a parsed entry carries its own. A parsed entry may also carry `skipped`, the number of malformed
- * records the adapter dropped while parsing it (from `readCoverageChunks`); absent means 0.
+ * One coverage file of a multi-file input: the map an adapter parsed from it (`readCoverageFiles`, through
+ * `readCoverageChunks`), with the format that was chosen on the start of that file (`empty` and `unknown` included,
+ * with an empty map) and the path it came from, for messages; or the path that was not found. A parsed entry may also
+ * carry `skipped`, the number of malformed records the adapter dropped while parsing it; absent means 0.
  */
 export type CoverageFileInput =
-  | { text: string; file?: string }
-  | { parsed: CoverageMap; format: DetectedCoverageFormat; file?: string; skipped?: number }
+  | { parsed: CoverageMap; format: DetectedCoverageFormat; file?: string | undefined; skipped?: number | undefined }
   | { missingFile: string };
 
 export interface CheckInput {
   version: string;
   /**
-   * Coverage report contents (and, optionally, the path it was read from, for messages), or the
-   * path that was looked for when it is missing; or several of them in the order they were read, which
-   * are merged with hit counts summed. `format` applies to every file (`auto` detects it per file). Or the
-   * not-found outcome of coverage auto-discovery (`chooseDiscoveredCoverage`), which reports that no report was
-   * found at any of the candidate paths.
+   * The coverage files as the adapter parsed them, in the order they were read, which are merged with hit counts
+   * summed; or the path that was looked for when it is missing; or the not-found outcome of coverage auto-discovery
+   * (`chooseDiscoveredCoverage`), which reports that no report was found at any of the candidate paths.
    */
-  coverage:
-    | { text: string; format: CoverageFormatSelection; file?: string }
-    | { missingFile: string }
-    | CoverageDiscoveryNotFound
-    | { files: readonly CoverageFileInput[]; format: CoverageFormatSelection };
+  coverage: { files: readonly CoverageFileInput[] } | { missingFile: string } | CoverageDiscoveryNotFound;
   /** Unified diff text, or the files an adapter already parsed from it, or why no diff is available. */
   diff: { text: string } | { parsed: readonly DiffFile[] } | { unavailable: string };
-  /** Absolute repo root, used to relativize absolute coverage paths. */
-  repoRoot?: string;
+  /** Absolute repo root, used to relativize an absolute config path and coverage file path. */
+  repoRoot?: string | undefined;
   threshold: number | null;
   /** Repo-relative tracked paths (e.g. `git ls-files`). */
   repoFiles: readonly string[];
@@ -119,31 +114,32 @@ export interface CheckInput {
    * Glob patterns of changed files to leave out of diff coverage, from every source (config, flag, input) in
    * any order. Validated and de-duplicated here; an unsupported pattern throws a ConfigError.
    */
-  exclude?: readonly string[];
+  exclude?: readonly string[] | undefined;
   /**
    * Sizes in bytes of tracked files in HEAD, from `git ls-tree -r -l` (see `parseLsTreeSizes`). A path missing
    * from the map has an unknown size; an absent map means sizes are unknown for every file.
    */
-  repoFileBytes?: ReadonlyMap<string, number>;
+  repoFileBytes?: ReadonlyMap<string, number> | undefined;
   /** When true, a repo with no agent setup files fails the check. Off when absent. */
-  requireAgentSetup?: boolean;
+  requireAgentSetup?: boolean | undefined;
   /**
    * Agent tools the report names when no setup file configures them, from every source (config, flag, input).
    * Validated here against the fixed tool list; an unknown name throws a ConfigError. Absent or empty means
    * nothing is expected.
    */
-  expectAgentSetup?: readonly string[];
+  expectAgentSetup?: readonly string[] | undefined;
   /**
    * Repo-relative directory that relative coverage paths start from (package-relative coverage in a
-   * monorepo). Validated here; an invalid value throws a ConfigError. Absent means the repo root.
+   * monorepo), as the adapter parsed the coverage with it; here it suggests the root a report whose paths match no
+   * tracked file needs. Validated here; an invalid value throws a ConfigError. Absent means the repo root.
    */
-  coverageRoot?: string;
+  coverageRoot?: string | undefined;
   /**
    * Repo-relative path of the pharn-ci config in use (an absolute path under `repoRoot` is made relative; one
    * outside the repo matches no diff path). Absent means `.pharn/ci.yml`. Used only to warn when the change
    * under review edits it.
    */
-  configPath?: string;
+  configPath?: string | undefined;
   /**
    * Where the caller read the config in use from when the change touches it (CORE-95): `merge-base` (its copy at the
    * merge base: the change modifies or deletes it), `absent` (no config: the change adds it) or `unreadable` (no config:
@@ -151,28 +147,28 @@ export interface CheckInput {
    * the `CONFIG_CHANGED_IN_DIFF` message, and only when that message names the config in use: its text says which copy
    * was used, and for `unreadable` under a threshold or in test-integrity mode block its level is error.
    */
-  configSource?: ConfigSource;
+  configSource?: ConfigSource | undefined;
   /**
    * The `coverage.exclude` patterns of the copy of the config in use that this change leaves, when the check did not run
    * with that copy (`configSource` set). TI14 reads them, with `exclude`, only to tell which added list items of the
    * config are exclusions, so an exclusion the change appends is still reported for the pull requests after it. They
    * never reach diff coverage or any other gate.
    */
-  headConfigExclude?: readonly string[];
+  headConfigExclude?: readonly string[] | undefined;
   /** Run metadata from the caller (the Action), copied into the report as given. Absent adds no `meta`. */
-  meta?: ReportMeta;
+  meta?: ReportMeta | undefined;
   /**
    * The test-integrity mode settings: the `test-integrity` input (or flag) and `test_integrity.mode` from the
    * config. The input is the base (default `warn`); the config can only raise it. Absent means the default.
    */
-  testIntegrityMode?: TestIntegrityModeSettings;
+  testIntegrityMode?: TestIntegrityModeSettings | undefined;
   /**
    * The text of the test and test-config files the change touches, at the merge base and at HEAD, gathered by the
    * CLI and the Action for the base-and-head test-integrity signals (TI02, TI05, TI06, TI07, TI09 and TI12) and for
    * TI01's moved-test check. TI02, TI05, TI06, TI07 and TI12 compare the JS/TS (and, with `pythonTestIndex`, Python)
    * test files the diff modifies, and the report's `testChanges` summarizes that comparison; TI09 compares the touched
    * test-runner config files. TI01 indexes the base text of a deleted test file to find its tests again in a new test
-   * of this change (`movedTestFiles`), which makes the deletion `info`. TI03 judges the compared test pairs, and reads the top-level imports of
+   * of this change (`indexDeletedTestFiles` and `matchTests`), which makes the deletion `info`. TI03 judges the compared test pairs, and reads the top-level imports of
    * the Python test files in it to resolve `import pytest as pt` style aliases; without them it reads the literal
    * spellings only. The tests-exercise check reads the imports of the added and modified JS/TS test files at HEAD
    * (`detectUnexercisedChanges`) and adds one `TESTS_NOT_EXERCISING_CHANGES` warn message for the changed source files
@@ -182,107 +178,125 @@ export interface CheckInput {
    * message names a modified test file that could not be compared and an added test file whose tests could not be
    * read. In mode `block` that message is an error when TI02 and TI05 did not run, and also when a modified test file
    * cannot be indexed at HEAD for the reason `too-deep`, `too-large`, `over-file-cap` or `binary` while it was indexed at
-   * the merge base or dropped there as `over-file-cap`; an added test file, or a file already unreadable at the merge
-   * base, stays a warning. A modified or added JS/TS or Python test file whose diff entry git shows as binary is named
-   * with the reason `binary` even with no sources for it (a modified one is an error in mode `block` whatever the merge
-   * base held, an added one a warning); it is still compared when both its sides index.
+   * the merge base or dropped there as `over-file-cap`; when the sources dropped a side of a compared file as
+   * `over-file-cap` or `over-total-cap` (either side), or as `too-large`, `binary` or `unsafe-path` while the other side's
+   * text was held; and when the Python index did not read the head of a modified or added `.py` test file (see
+   * `pythonTestIndex`). A file already unreadable at the merge base for another reason, a drop that hit both sides, and
+   * an added JS/TS test file stay a warning. A renamed file whose new path is a test file and whose old path is not one
+   * counts as an added test file. A modified or added JS/TS or Python test file whose diff entry git shows as binary is
+   * named with the reason `binary` even with no sources for it (a modified one is an error in mode `block` whatever the
+   * merge base held, an added one a warning); it is still compared when both its sides index.
    */
-  testSources?: TestSources;
+  testSources?: TestSources | undefined;
   /**
    * The Python test index of the `.py` test files in `testSources` (see `pythonTestSourceFiles` and
    * `pythonTestIndexFromRun`), built by the CLI and the Action. Absent means no `.py` text was read or the caller gave
    * none: the modified `.py` test files are then named per file, as a warning. An index that says `python-not-found`
    * (the CLI and the Action pass it only after trying to start an interpreter) with a modified `.py` test file means
-   * TI02 and TI05 did not run, which is an error in mode `block`.
+   * TI02 and TI05 did not run, which is an error in mode `block`. Any other run that gave no index (`python-too-old`,
+   * `python-failed`, `timeout`, `output-too-large`, `bad-output`), and a per-file refusal of the index (`syntax-error`,
+   * `too-deep`, `too-large`, `parser-threw`) for the head of a modified or added `.py` test file whose text was read,
+   * name the file and are an error in mode `block` too. A head the index read, with a base only it refused, stays a
+   * warning.
    */
-  pythonTestIndex?: PythonTestIndex;
+  pythonTestIndex?: PythonTestIndex | undefined;
   /**
    * The text of the agent config files (the machine-readable agent setup kinds) as committed at HEAD, gathered by the
    * CLI and the Action for the secret scan of check A7: the files read and the files dropped with a reason, or why
    * none could be read. Absent means nothing is scanned and the report is the one it was: no message.
    */
-  agentConfigSources?: AgentConfigSources;
+  agentConfigSources?: AgentConfigSources | undefined;
   /**
    * The text of the agent instruction files at HEAD (the Markdown instruction kinds) for org-policy rule P07, gathered
    * by the CLI and the Action only under a policy with P07 in effect: the files read and the files dropped with a
    * reason, or why none could be read. It is never merged into `agentConfigSources`, so check A7 never sees Markdown.
    * Absent means P07 adds nothing and the report is the one it was.
    */
-  agentInstructionSources?: AgentConfigSources;
+  agentInstructionSources?: AgentConfigSources | undefined;
   /**
    * The org policy of the run (see `ResolvedPolicy`), after `applyPolicy` gave the effective settings the other fields
-   * carry. Its document runs the org-policy rules (P01 to P11), its `unavailable` reason adds one
-   * POLICY_UNAVAILABLE message, and the report carries a `policy` object for an app or file policy or an unavailable
+   * carry; the adapters pass `PolicyApplication.policy`, which for a `file:` policy is united with its merge-base copy.
+   * `check()` itself does not unite: a head-only policy with `policyFileBase` gets the base's lists and phrases only.
+   * Its document runs the org-policy rules (P01 to P11, P13 and P14; P12 is validated and not run), its
+   * `unavailable` reason adds one POLICY_UNAVAILABLE message, the unknown keys of an app policy add one
+   * POLICY_KEYS_UNKNOWN message, and the report carries a `policy` object for an app or file policy or an unavailable
    * one. Absent, or a policy of source `none` with no reason, adds nothing and the report is the one it was.
    */
-  policy?: ResolvedPolicy;
+  policy?: ResolvedPolicy | undefined;
   /**
    * The settings the policy beat or may not set (`PolicyApplication.ignored`). Together with the policy-file signal
    * severities that were lower than the computed ones, they add one POLICY_OVERRIDE_IGNORED message. Absent or empty adds nothing.
    */
-  policyIgnored?: readonly IgnoredSetting[];
+  policyIgnored?: readonly IgnoredSetting[] | undefined;
   /**
    * The committed agent settings and MCP files for policy mode, gathered by the CLI and the Action when a policy is in
    * force (E3 item 23, policy settings). Absent: P02 to P06 emit nothing, there is no POLICY_SETTINGS_INVALID message,
    * and P09 class 4 is item 22's warn.
    */
-  policySettingsSources?: PolicySettingsSources;
-  /** Per-signal severities from the policy (`PolicyApplication.signalOverrides`), applied to the signals found. */
-  signalOverrides?: SignalOverrides;
+  policySettingsSources?: PolicySettingsSources | undefined;
+  /**
+   * Per-signal severities from the policy (`PolicyApplication.signalOverrides`), applied to the signals found. For a
+   * `file:` policy united with its merge-base copy they carry the two copies, so a head value looser than the base's is
+   * named in POLICY_OVERRIDE_IGNORED.
+   */
+  signalOverrides?: SignalOverrides | undefined;
   /**
    * What the Action read of the pull request (see `AgentPrFacts`). Absent means no facts were gathered: no agent PR
    * detection runs, so there is no P11, no AGENT_PR_DETECTION_INCOMPLETE message and `meta` is left as it was.
    * `{ pr: null }` means a run with no pull request. With facts, one detection (the default lists united with the org
    * policy's `agents.labels` and `agents.extra_logins`) feeds the agent fields of `meta`, rule P11 and the message.
    */
-  agentPrFacts?: AgentPrFacts;
+  agentPrFacts?: AgentPrFacts | undefined;
   /**
-   * The `file:` policy as the merge base has it (see `PolicyFileBase`), read by the Action from committed objects. Its
-   * lists are united with the head lists; an unreadable one with an edited policy file makes the pull request an agent PR.
-   * Absent means it was not read.
+   * The `file:` policy as the base commit of the local diff has it (see `PolicyFileBase`), read from committed objects by
+   * the CLI and the Action (node-io `gatherPolicyFileBase`) before `applyPolicy`, which unites it with the head copy for
+   * every key a file may set. Here its lists, caps and injection phrases are united again with the policy's document
+   * (idempotent on a united one); an unreadable one with an edited policy file makes the pull request an agent PR. Absent
+   * means it was not read.
    */
-  policyFileBase?: PolicyFileBase;
+  policyFileBase?: PolicyFileBase | undefined;
   /**
    * The text of the agent settings, MCP, workflow and CODEOWNERS files the change touches, at the merge base and at
-   * HEAD (`selectSelfModificationPaths`), gathered by the Action under a policy in force for org-policy rule P13. Absent
-   * means P13 adds nothing and the report is the one it was.
+   * HEAD (`selectSelfModificationPaths`), gathered by the CLI and the Action (node-io `gatherSources`) under a policy in
+   * force for org-policy rule P13. P13 judges only an agent pull request, so without the Action's `agentPrFacts` it adds
+   * nothing. Absent means P13 adds nothing and the report is the one it was.
    */
-  selfModificationSources?: TestSources;
+  selfModificationSources?: TestSources | undefined;
   /**
-   * What the stale-instruction signals (SI01 to SI04) read, gathered by the CLI and the Action when the diff is
-   * available: the instruction files at HEAD, the root package.json and Makefile, and SI04's commit times (see
+   * What the stale-instruction signals (SI01 to SI03; SI04 is not emitted) read, gathered by the CLI and the Action
+   * when the diff is available: the instruction files at HEAD and the root package.json and Makefile (see
    * `StaleInstructionSources`). Only a diff starts them, and a finding is kept only when the change touches the
    * instruction file or removes what it names. Absent means the signals add nothing and the report is the one it was.
    */
-  staleInstructionSources?: StaleInstructionSources;
+  staleInstructionSources?: StaleInstructionSources | undefined;
   /**
    * The run's JUnit results (`parseJunitSources` of what the CLI or the Action read for the JUnit paths). They fill the
    * report's `flaky` object when at least one file was parsed and add the JUnit messages (`junitReport`); none of them
    * is an error, so test results never change a passing verdict into a failing one. Absent (no JUnit paths) adds
    * nothing and the report is the one it was.
    */
-  junit?: JunitResults;
+  junit?: JunitResults | undefined;
   /**
    * The test ids the org quarantines (the app's policy response, or the CLI's `--quarantine-file`). Applied to `junit`
    * unless the org policy sets `flaky.quarantine: false`. Absent quarantines nothing.
    */
-  quarantine?: readonly string[];
+  quarantine?: readonly string[] | undefined;
   /**
    * The layers of the dependency safety settings (the `dependencies` input, `.pharn/ci.yml` and the org policy; see
    * `resolveDependencySettings`). Absent means the defaults: mode `auto`.
    */
-  dependencySettings?: DependencySettingsLayers;
+  dependencySettings?: DependencySettingsLayers | undefined;
   /**
    * The text of the manifests and lockfiles the change touches, at the merge base and at HEAD
    * (`selectDependencyPaths`), gathered by the CLI and the Action unless the mode is `never`. Absent means dependency
    * safety adds nothing and the report is the one it was.
    */
-  dependencySources?: TestSources;
+  dependencySources?: TestSources | undefined;
   /**
    * The registry lookups the Action made for the packages `planDependencyLookups` named, with the HEAD commit time. Only
    * read in mode `lookup`; absent there (the CLI never looks up) leaves `dependencies.lookups` at `off`.
    */
-  dependencyLookups?: DependencyLookups;
+  dependencyLookups?: DependencyLookups | undefined;
 }
 
 /** Signals sorted by id, then path, then line (none first), then detail, in code-unit order. */
@@ -327,15 +341,14 @@ export function check(input: CheckInput): Report {
     parsedDiff !== null && testIntegrity.mode !== "off" && input.testSources !== undefined
       ? indexTouchedTestFiles(parsedDiff, input.testSources, input.pythonTestIndex)
       : null;
-  const movedTests =
-    touched === null || parsedDiff === null || input.testSources === undefined
+  // The pairing runs once, when the touched files could be compared; it also finds the deleted test files whose tests
+  // moved, which TI01 reads. `touched !== null` implies a diff and the sources.
+  const deletedFiles =
+    touched === null || touched.notRun !== null || parsedDiff === null || input.testSources === undefined
       ? undefined
-      : movedTestFiles(parsedDiff, input.testSources, input.pythonTestIndex, touched);
-  // Mode off computes nothing; the signals carry their effective severity for the mode.
-  const sourceMatches =
-    parsedDiff === null || testIntegrity.mode === "off"
-      ? { signals: [], omitted: [] }
-      : detectTI15(parsedDiff, { repoFiles: input.repoFiles });
+      : indexDeletedTestFiles(parsedDiff, input.testSources, input.pythonTestIndex);
+  const match = touched === null || touched.notRun !== null ? undefined : matchTests(touched, deletedFiles);
+  // Mode off computes nothing; the signals carry their effective severity for the mode. TI15 is not emitted (CORE-144).
   const testIntegritySignals =
     parsedDiff === null || testIntegrity.mode === "off"
       ? []
@@ -343,9 +356,9 @@ export function check(input: CheckInput): Report {
           ...detectTI01(
             parsedDiff,
             testIntegrity.mode,
-            movedTests?.files,
-            movedTests?.compared,
-            movedTests?.unparsed,
+            match?.movedFiles.moved,
+            match?.movedFiles.compared,
+            deletedFiles?.unparsed,
             input.repoFiles,
           ),
           ...detectTI04(parsedDiff, testIntegrity.mode),
@@ -363,7 +376,6 @@ export function check(input: CheckInput): Report {
             exclude: [...(input.exclude ?? []), ...(input.headConfigExclude ?? [])],
             mode: testIntegrity.mode,
           }),
-          ...sourceMatches.signals,
           ...detectTI16(parsedDiff),
           ...detectTI17(parsedDiff),
         ]);
@@ -396,18 +408,19 @@ export function check(input: CheckInput): Report {
         unavailable: { notRun: touched.notRun },
         configUnavailable,
       };
-    } else {
-      const match = matchTests(touched);
+    } else if (match !== undefined) {
       testChanges = summarizeTestChanges(touched, match) ?? undefined;
       // A test of a deleted file that TI01 found again in another file is judged like any other pair, unless the match
       // already pairs that head test.
       const matchedHeads = new Set([...match.pairs, ...match.moved, ...match.replaced].map((pair) => pair.head));
-      const movedPairs = (movedTests?.pairs ?? []).filter((pair) => !matchedHeads.has(pair.head));
+      const movedPairs = match.movedFiles.pairs.filter((pair) => !matchedHeads.has(pair.head));
       const judged = movedPairs.length === 0 ? match : { ...match, pairs: [...match.pairs, ...movedPairs] };
       ti03Pairs = detectTI03Pairs({
         match: judged,
         touched,
-        ...(movedTests?.groups === undefined ? {} : { movedGroups: movedTests.groups }),
+        ...(deletedFiles === undefined
+          ? {}
+          : { movedGroups: new Map(deletedFiles.files.map((file) => [file.path, file.groups])) }),
         diff: parsedDiff,
         sources: input.testSources,
       });
@@ -472,28 +485,11 @@ export function check(input: CheckInput): Report {
   // a weakened test. Computed from the diff alone, so it holds without `testSources`.
   const textTruncatedTestFiles =
     parsedDiff === null || testIntegrity.mode === "off" ? [] : textCutModifiedTestFiles(parsedDiff);
-  // The single-file forms are several files with one entry, so there is one path through the check.
+  // A missing single file is several files with one entry, so there is one path through the check; discovery that found
+  // no report has no file to read or name.
   const coverageInput = input.coverage;
-  let files: readonly CoverageFileInput[];
-  let selection: CoverageFormatSelection;
-  if ("files" in coverageInput) {
-    files = coverageInput.files;
-    selection = coverageInput.format;
-  } else if ("missingFile" in coverageInput) {
-    files = [coverageInput];
-    selection = "auto";
-  } else if ("kind" in coverageInput) {
-    // Discovery found no report: there is no file to read or name.
-    files = [];
-    selection = "auto";
-  } else {
-    files = [
-      coverageInput.file === undefined
-        ? { text: coverageInput.text }
-        : { text: coverageInput.text, file: coverageInput.file },
-    ];
-    selection = coverageInput.format;
-  }
+  const files: readonly CoverageFileInput[] =
+    "files" in coverageInput ? coverageInput.files : "missingFile" in coverageInput ? [coverageInput] : [];
 
   // With several files, the first tracked one the diff adds, modifies or renames to is named, else the first tracked
   // one: one is enough for the change to grade itself. A tracked file the diff writes fails a gated run (CORE-92), so
@@ -514,7 +510,7 @@ export function check(input: CheckInput): Report {
   const bytes = input.repoFileBytes;
   const emptyAgentSetupFiles =
     bytes === undefined ? [] : agentSetup.files.filter((file) => bytes.get(file.path) === 0).map((file) => file.path);
-  const omittedBeforePolicy: OmittedSignals[] = [...(comparison?.omitted ?? []), ...sourceMatches.omitted];
+  const omittedBeforePolicy: OmittedSignals[] = [...(comparison?.omitted ?? [])];
   // Per-signal severities from the org policy, applied to what the detectors computed (mode off computed nothing).
   const overridden =
     input.signalOverrides === undefined || testIntegrity.mode === "off"
@@ -538,7 +534,7 @@ export function check(input: CheckInput): Report {
           extraLogins: [...(agentFacts.extraLogins ?? []), ...agentPolicy.extraLogins],
           listsIncomplete: agentFacts.listsIncomplete === true || agentPolicy.listsIncomplete,
         });
-  // The org-policy rules (P01 to P11) run once, only when a policy was asked for.
+  // The org-policy rules (P01 to P11, P13 and P14; no P12) run once, only when a policy was asked for.
   const policyEvaluation =
     input.policy === undefined
       ? null
@@ -568,10 +564,10 @@ export function check(input: CheckInput): Report {
     ...(input.policyIgnored ?? []),
     ...injectionSettings.ignored,
     ...(overridden?.lowered ?? []).map(
-      (id): IgnoredSetting => ({ setting: `test_integrity.signals.${id}`, layer: "policy-file", reason: "looser" }),
+      (id): IgnoredSetting => ({ setting: `test_integrity.signals.${id}`, reason: "looser" }),
     ),
     ...(policyEvaluation?.lowered ?? []).map(
-      (id): IgnoredSetting => ({ setting: `policy.rules.${id}`, layer: "policy-file", reason: "looser" }),
+      (id): IgnoredSetting => ({ setting: `policy.rules.${id}`, reason: "looser" }),
     ),
     ...(policyEvaluation?.ignored ?? []),
   ];
@@ -589,6 +585,10 @@ export function check(input: CheckInput): Report {
       : [];
   const policyMessages: Message[] = [
     ...(input.policy?.unavailable === undefined ? [] : [policyUnavailableMessage(input.policy.unavailable)]),
+    // Only an app policy can carry keys this build skipped: a file: policy with an unknown key never validates.
+    ...(input.policy?.source === "app" && input.policy.unknownKeys !== undefined && input.policy.unknownKeys.total > 0
+      ? [policyKeysUnknownMessage(input.policy.unknownKeys)]
+      : []),
     ...(policyEvaluation === null ? [] : policyRuleMessages(policyEvaluation)),
     ...incompleteMessage,
     ...(policyIgnored.length === 0 ? [] : [policyOverrideIgnoredMessage(policyIgnored)]),
@@ -597,11 +597,12 @@ export function check(input: CheckInput): Report {
   const p01 = (policyEvaluation?.violations ?? []).filter((violation) => violation.id === "P01");
   const noFilesViolation = p01.find((violation) => violation.detail === NO_SETUP_DETAIL);
   const expectedViolations = p01.filter((violation) => violation.detail !== NO_SETUP_DETAIL);
-  const agentSetupLevels: NonNullable<Parameters<typeof buildReport>[0]["agentSetupLevels"]> = {
-    ...(noFilesViolation === undefined ? {} : { noFiles: levelOf(noFilesViolation.severity) }),
-    ...(expectedViolations.length === 0
-      ? {}
-      : { expectedMissing: levelOf(strongest(expectedViolations.map((violation) => violation.severity))) }),
+  const agentSetupLevels: NonNullable<BuildReportInput["agentSetupLevels"]> = {
+    noFiles: noFilesViolation === undefined ? undefined : levelOf(noFilesViolation.severity),
+    expectedMissing:
+      expectedViolations.length === 0
+        ? undefined
+        : levelOf(strongest(expectedViolations.map((violation) => violation.severity))),
   };
   // With the policy's expected tools in the report, a direct caller that did not pass them as `expectAgentSetup` still
   // gets the expected-tools message (and the verdict) for a P01 violation.
@@ -635,7 +636,7 @@ export function check(input: CheckInput): Report {
     input.agentConfigSources === undefined
       ? []
       : agentConfigSecretMessages(input.agentConfigSources, agentConfigSecretPaths(agentSetup));
-  // Stale instructions (SI01 to SI04) need the diff: without one nothing runs, so there is no finding and no message.
+  // Stale instructions (SI01 to SI03) need the diff: without one nothing runs, so there is no finding and no message.
   const stale =
     parsedDiff === null || input.staleInstructionSources === undefined
       ? null
@@ -668,50 +669,47 @@ export function check(input: CheckInput): Report {
     parsedDiff === null || testIntegrity.mode === "off"
       ? comparison?.unavailable
       : withBinaryTestFiles(comparison?.unavailable, binaryTouchedTestFiles(parsedDiff));
-  const base = {
+  // An empty list and an absent one read the same in buildReport.
+  const base: BuildReportInput = {
     version: input.version,
+    diffCoverage: null,
     threshold: input.threshold,
-    ...(input.configPath === undefined ? {} : { configRepoPath: configRepoPath(input.configPath, input.repoRoot) }),
+    configRepoPath: input.configPath === undefined ? undefined : configRepoPath(input.configPath, input.repoRoot),
     agentSetup,
     requireAgentSetup: input.requireAgentSetup === true,
-    ...(reportedTools.length > 0 ? { expectedAgentTools: reportedTools } : {}),
-    ...(Object.keys(agentSetupLevels).length > 0 ? { agentSetupLevels } : {}),
-    ...(reportPolicy === undefined ? {} : { policy: reportPolicy }),
-    ...(configPaths.length > 0 ? { changedConfigPaths: configPaths } : {}),
-    ...(configPaths.length > 0 && input.configSource !== undefined ? { configSource: input.configSource } : {}),
-    ...(testPaths.length > 0 ? { deletedTestFiles: testPaths } : {}),
-    ...(trackedCoverage === null ? {} : { trackedCoverageFile: trackedCoverage }),
-    ...(trackedCoverageChanged ? { trackedCoverageChanged: true } : {}),
-    ...(emptyAgentSetupFiles.length > 0 ? { emptyAgentSetupFiles } : {}),
-    ...(input.meta === undefined
-      ? {}
-      : {
-          meta:
-            detection === undefined || agentFacts === undefined
-              ? input.meta
-              : { ...input.meta, ...agentPrMetaFields(detection, agentFacts) },
-        }),
+    expectedAgentTools: reportedTools,
+    agentSetupLevels,
+    policy: reportPolicy,
+    changedConfigPaths: configPaths,
+    // Only read when the change touches the config in use.
+    configSource: input.configSource,
+    deletedTestFiles: testPaths,
+    trackedCoverageFile: trackedCoverage ?? undefined,
+    trackedCoverageChanged,
+    emptyAgentSetupFiles,
+    meta:
+      input.meta === undefined || detection === undefined || agentFacts === undefined
+        ? input.meta
+        : { ...input.meta, ...agentPrMetaFields(detection, agentFacts) },
     testIntegrity,
-    ...(finalSignals.length > 0 ? { testIntegritySignals: finalSignals } : {}),
-    ...(textTruncatedFiles.length > 0 ? { textTruncatedFiles } : {}),
-    ...(textTruncatedTestFiles.length > 0 ? { textTruncatedTestFiles } : {}),
-    ...(comparison === null || comparison.languages.length === 0
-      ? {}
-      : { testIntegrityLanguages: comparison.languages }),
-    ...(omittedSignals.length === 0 ? {} : { omittedSignals }),
-    ...(testIndexUnavailable === undefined ? {} : { testIndexUnavailable }),
-    ...(testChanges === undefined ? {} : { testChanges }),
-    ...(testExercise === undefined ? {} : { testExercise }),
-    ...(comparison?.configUnavailable === undefined ? {} : { testConfigUnavailable: comparison.configUnavailable }),
-    ...(stale === null || stale.findings.length === 0 ? {} : { staleInstructions: stale.findings }),
-    ...(staleMessages.length === 0 ? {} : { staleInstructionMessages: staleMessages }),
-    ...(agentConfigMessages.length === 0 ? {} : { agentConfigSecretMessages: agentConfigMessages }),
-    ...(injectionMessageList.length === 0 ? {} : { injectionMessages: injectionMessageList }),
-    ...(injection === null || injection.signals.length === 0 ? {} : { injectionSignals: injection.signals }),
-    ...(dependencyResult === undefined ? {} : { dependencies: dependencyResult }),
-    ...(policyMessages.length === 0 ? {} : { policyMessages }),
-    ...(junit?.flaky === undefined ? {} : { flaky: junit.flaky }),
-    ...(junit === null || junit.messages.length === 0 ? {} : { flakyMessages: junit.messages }),
+    testIntegritySignals: finalSignals,
+    textTruncatedFiles,
+    textTruncatedTestFiles,
+    testIntegrityLanguages: comparison?.languages,
+    omittedSignals,
+    testIndexUnavailable,
+    testChanges,
+    testExercise,
+    testConfigUnavailable: comparison?.configUnavailable,
+    staleInstructions: stale?.findings,
+    staleInstructionMessages: staleMessages,
+    agentConfigSecretMessages: agentConfigMessages,
+    injectionMessages: injectionMessageList,
+    injectionSignals: injection?.signals,
+    dependencies: dependencyResult,
+    policyMessages,
+    flaky: junit?.flaky,
+    flakyMessages: junit?.messages,
   };
 
   // The unavailable diff first: DIFF_UNAVAILABLE is the reason that fails closed under test-integrity block, and a
@@ -737,7 +735,7 @@ export function check(input: CheckInput): Report {
     }
   }
 
-  // Each file in order, with its own format under `auto`; the first bad one is the one reported.
+  // Each file in order, with the format chosen on its start; the first bad one is the one reported.
   const maps: CoverageMap[] = [];
   const formats = new Set<CoverageFormat>();
   let skippedLines = 0;
@@ -746,37 +744,25 @@ export function check(input: CheckInput): Report {
   for (const file of files) {
     if ("missingFile" in file) continue;
     const coverageFile = file.file ?? null;
-    const choice = "parsed" in file ? { format: file.format } : chooseCoverageFormat(file.text, selection);
-    if (choice.format === "empty") {
+    const { format } = file;
+    if (format === "empty") {
       return buildReport({
         ...base,
         diffCoverage: null,
         missing: { reason: "coverage-file-empty", coverageFile },
       });
     }
-    if (choice.format === "unknown") {
+    if (format === "unknown") {
       return buildReport({
         ...base,
         diffCoverage: null,
         missing: { reason: "coverage-format-unsupported", coverageFile },
       });
     }
-    let parsed: CoverageMap;
-    if ("parsed" in file) {
-      parsed = file.parsed;
-      const count = file.skipped;
-      if (count !== undefined && Number.isSafeInteger(count) && count > 0) skippedLines += count;
-    } else {
-      const counted = parseCoverageCounted(file.text, choice.format, {
-        ...(input.repoRoot === undefined ? {} : { repoRoot: input.repoRoot }),
-        ...(coverageRoot === undefined ? {} : { coverageRoot }),
-        literalBackslashes: true,
-      });
-      parsed = counted.map;
-      skippedLines += counted.skipped;
-    }
+    const count = file.skipped;
+    if (count !== undefined && Number.isSafeInteger(count) && count > 0) skippedLines += count;
     // Merged within the file by the format's own rule, as the parser merges a file it lists twice.
-    parsed = resolveBackslashPaths(parsed, tracked, choice.format === "lcov" ? (a, b) => a + b : Math.max);
+    const parsed = resolveBackslashPaths(file.parsed, tracked, format === "lcov" ? (a, b) => a + b : Math.max);
     // An empty or unreadable report would otherwise make every change look uncovered-but-untracked
     // and pass as NO_COVERABLE_CHANGES. Say so instead.
     if (parsed.size === 0) {
@@ -786,7 +772,7 @@ export function check(input: CheckInput): Report {
         missing: { reason: "coverage-file-empty", coverageFile },
       });
     }
-    formats.add(choice.format);
+    formats.add(format);
     maps.push(parsed);
   }
   // No file at all cannot be told from an unreadable one: fail closed.
@@ -820,17 +806,17 @@ export function check(input: CheckInput): Report {
           example: match.unmatched[0] ?? "",
           suggestedRoot: match.suggestedRoot,
         },
-        ...(binaryPaths.length > 0 ? { binaryCoveredPaths: binaryPaths } : {}),
+        binaryCoveredPaths: binaryPaths,
       });
     }
     untrackedCoveragePaths = match.unmatched.length;
   }
   return buildReport({
     ...base,
-    ...(coverageFormat === undefined ? {} : { coverageFormat }),
+    coverageFormat,
     diffCoverage: computeDiffCoverage(diff, coverage, input.threshold, isExcluded),
-    ...(untrackedCoveragePaths > 0 ? { untrackedCoveragePaths } : {}),
-    ...(skippedLines > 0 ? { skippedCoverageLines: skippedLines } : {}),
-    ...(binaryPaths.length > 0 ? { binaryCoveredPaths: binaryPaths } : {}),
+    untrackedCoveragePaths,
+    skippedCoverageLines: skippedLines,
+    binaryCoveredPaths: binaryPaths,
   });
 }

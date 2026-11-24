@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
+import type { ReportDependencies } from "../src/dependencies/check.js";
 import { renderMarkdown } from "../src/render/markdown.js";
-import type { Report } from "../src/report.js";
 import { dependencyCase, run } from "./dependencies-helpers.js";
 
 // A13 (dependency safety): the "📦 Dependencies" section of the comment. It appears only when the change added or changed
@@ -24,7 +24,7 @@ describe("the Dependencies section", () => {
         "5 added or changed dependencies checked · registry lookups off",
         "",
         "- ❌ **D05** `package.json:7` `from-git` — declared from a git repository",
-        "  - Hint: Depend on a published registry version instead, or have a person review where the code comes from; a git, URL or local source is not covered by the registry's checks. For a registry your team runs (Artifactory, Nexus, a private PyPI index), name its host in the dependency-allowed-hosts input or the org policy's dependencies.allowed_hosts.",
+        "  - Hint: Depend on a published registry version, or name the host of a registry your team runs in the dependency-allowed-hosts input; otherwise remove the dependency.",
         "- ❌ **D05** `package.json:8` `from-tarball` — declared from a URL outside the allowed registries",
         "- ❌ **D05** `package.json:9` `from-disk` — declared from a local file",
         "",
@@ -45,8 +45,11 @@ describe("the Dependencies section", () => {
     expect(text).toContain(
       "- ⚠️ Not checked: 1 manifest or lockfile file could not be read, so dependency safety did not check it: \\`package.json\\` (unavailable).",
     );
-    // Re-pinned for CORE-100 part 2: the per-file cap is 32 MiB now, and the hint names it.
-    expect(text).toContain("  - Hint: Keep manifests and lockfiles valid and under 32 MiB");
+    // Re-pinned for CORE-100 part 2: the per-file cap is 32 MiB now, and the hint names it. CORE-140: the hint is the
+    // code's fix.hint, which names the cap too. CORE-14 follow-up: it names `fetch-depth: 0` again.
+    expect(text).toContain(
+      "  - Hint: Check that the manifest or lockfile the report names parses and stays under 32 MiB, on a checkout of the pull request head with `fetch-depth: 0`.",
+    );
   });
 
   it("CORE-100: shows an unread line the pull request can cause with the error icon", () => {
@@ -61,7 +64,11 @@ describe("the Dependencies section", () => {
   it("has no section without a dependencies object, and treats a hand-built one as untrusted", () => {
     const report = run(dependencyCase("d05-manifest", { dependencySettings: { input: "never" } }));
     expect(renderMarkdown(report)).not.toContain("📦");
-    const odd = { ...report, dependencies: { checked: 2, lookups: "weird", signals: "nope" } } as unknown as Report;
+    // Not a ReportDependencies on purpose: the renderer must treat a hand-built object as untrusted.
+    const odd = {
+      ...report,
+      dependencies: { checked: 2, lookups: "weird", signals: "nope" } as unknown as ReportDependencies,
+    };
     expect(section(renderMarkdown(odd))).toBe(
       "### 📦 Dependencies\n\n2 added or changed dependencies checked · registry lookups off\n\nNo dependency findings.\n",
     );

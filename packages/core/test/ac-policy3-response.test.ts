@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import type { PolicyResponseValidation as Validation } from "../src/policy/response.js";
+import type { PolicyError } from "../src/policy/types.js";
 import { fixture } from "./helpers.js";
 
 // validatePolicyResponse() and the fixtures under fixtures/policy-response/ are loaded inside the test body: the AC
@@ -6,18 +8,21 @@ import { fixture } from "./helpers.js";
 // fixtures/policy-response/invalid.json maps a case name to an invalid envelope; the three large cases are built here
 // from valid.json.
 
-type PolicyError = { path: string; message: string };
-type Validation = { ok: true; response: Record<string, unknown> } | { ok: false; errors: PolicyError[] };
-
 /** RFC 6901: "" or a sequence of `/`-prefixed reference tokens, `~` only as `~0` or `~1`. */
 const POINTER = /^(\/([^~/]|~[01])*)*$/;
 
-const SMALL_CASES = [
-  "missing-key",
-  "unknown-key",
-  "version-0",
-  "version-1.5",
-  "version-string",
+// CORE-118 (R5.1): a key the envelope (or its settings) does not know no longer voids it: a newer app may serve one to a
+// pinned build. Those two cases of invalid.json are accepted with the key left out and named (SKIPPED_CASES below);
+// every other case still fails as before.
+const SKIPPED_CASES: Record<string, string> = {
+  "unknown-key": "zzz-unknown",
+  "settings-extra-key": "settings.zzz-extra",
+};
+
+// CORE-123 (R5.6): `etag`, `updatedAt` and `settings.redactMessages` are not read by the Action, so they are optional
+// and not validated: these cases of invalid.json are accepted, with nothing named as unknown and the response holding
+// only the keys the Action reads. Every other case still fails as before.
+const UNREAD_CASES = [
   "etag-empty",
   "etag-201",
   "etag-e-acute",
@@ -26,15 +31,28 @@ const SMALL_CASES = [
   "updatedAt-no-z",
   "updatedAt-lower-t",
   "updatedAt-hour-24",
+  "settings-missing-redact",
+];
+
+const SMALL_CASES = [
+  "missing-key",
+  "version-0",
+  "version-1.5",
+  "version-string",
   "policy-threshold",
   "quarantine-empty-item",
   "quarantine-u0085",
-  "settings-missing-redact",
-  "settings-extra-key",
   "max-bytes-255",
   "max-bytes-65537",
   "max-bytes-300.5",
 ];
+
+/** The envelope as the Action reads it: no `etag`, `updatedAt` or `settings.redactMessages`. */
+function asRead(envelope: Record<string, unknown>): Record<string, unknown> {
+  const { etag: _etag, updatedAt: _updatedAt, settings, ...rest } = envelope;
+  const { redactMessages: _redact, ...used } = settings as Record<string, unknown>;
+  return { ...rest, settings: used };
+}
 
 /** The leaf values and keys of `invalid` that differ from `valid`, as strings of at least three characters. */
 function offendingValues(valid: unknown, invalid: unknown): string[] {
@@ -73,9 +91,9 @@ function expectFixedErrors(result: Validation, name: string, offending: string[]
 
 describe("the policy response envelope", () => {
   it("AC-13: validatePolicyResponse accepts the valid envelope and refuses each invalid one with RFC 6901 paths and fixed messages, capped at POLICY_MAX_ERRORS", async () => {
-    const { validatePolicyResponse, POLICY_MAX_ERRORS } = (await import("@pharn-ci/core")) as unknown as {
-      validatePolicyResponse: (value: unknown) => Validation;
-      POLICY_MAX_ERRORS: number;
+    const { validatePolicyResponse, POLICY_MAX_ERRORS } = {
+      ...(await import("../src/policy/limits.js")),
+      ...(await import("../src/policy/response.js")),
     };
     const valid = JSON.parse(fixture("policy-response/valid.json"));
     expect(Object.keys(valid).sort()).toEqual(["etag", "policy", "quarantine", "settings", "updatedAt", "version"]);
@@ -83,12 +101,30 @@ describe("the policy response envelope", () => {
     const accepted = validatePolicyResponse(valid);
     expect(accepted.ok).toBe(true);
     if (accepted.ok) {
-      expect(Object.keys(accepted.response).sort()).toEqual(Object.keys(valid).sort());
-      expect(accepted.response).toEqual(valid);
+      expect(Object.keys(accepted.response).sort()).toEqual(["policy", "quarantine", "settings", "version"]);
+      expect(accepted.response).toEqual(asRead(valid));
     }
 
     const invalid = JSON.parse(fixture("policy-response/invalid.json")) as Record<string, unknown>;
-    expect(Object.keys(invalid).sort()).toEqual([...SMALL_CASES].sort());
+    expect(Object.keys(invalid).sort()).toEqual(
+      [...SMALL_CASES, ...UNREAD_CASES, ...Object.keys(SKIPPED_CASES)].sort(),
+    );
+    for (const [name, unknownName] of Object.entries(SKIPPED_CASES)) {
+      const skipped = validatePolicyResponse(invalid[name]);
+      expect(skipped.ok, name).toBe(true);
+      if (skipped.ok) {
+        expect(skipped.response, `${name}: the unknown key is left out`).toEqual(asRead(valid));
+        expect(skipped.unknown, name).toEqual({ names: [unknownName], total: 1 });
+      }
+    }
+    for (const name of UNREAD_CASES) {
+      const unread = validatePolicyResponse(invalid[name]);
+      expect(unread.ok, name).toBe(true);
+      if (unread.ok) {
+        expect(unread.response, `${name}: only the keys the Action reads`).toEqual(asRead(valid));
+        expect(unread.unknown, name).toEqual({ names: [], total: 0 });
+      }
+    }
     for (const name of SMALL_CASES) {
       const errors = expectFixedErrors(
         validatePolicyResponse(invalid[name]),

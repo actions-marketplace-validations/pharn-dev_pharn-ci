@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { fixture } from "./helpers.js";
 import { expectValidReport } from "./schema.js";
-import { withoutFix } from "./v090-codes.js";
+import { withoutFix } from "./without-fix.js";
 
 // pr-comment-verdict-callout AC-5. check() and the renderer are loaded inside the test body: the AC tests are written
 // before the build, so nothing the build changes may run while the file loads.
@@ -36,7 +36,7 @@ function asV1File(json: string): string {
 
 describe("check(): report data unchanged by the verdict callout", () => {
   it("AC-5: the golden report equals the committed report.json and validates against the schema", async () => {
-    const { check } = await import("../src/check.js");
+    const { check } = await import("./text-coverage.js");
     const { renderMarkdown } = await import("../src/render/markdown.js");
 
     const committed = fixture("golden/report.json");

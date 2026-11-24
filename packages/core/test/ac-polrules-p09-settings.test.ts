@@ -1,22 +1,21 @@
 import { describe, expect, it } from "vitest";
+import type { ResolvedPolicy } from "../src/policy/resolved.js";
+import type { PolicyDocument } from "../src/policy/types.js";
+import type { Report } from "../src/report.js";
 import { fixture } from "./helpers.js";
 import { expectValidReport } from "./schema.js";
-import { withoutFix } from "./v090-codes.js";
+import { withoutFix } from "./without-fix.js";
 
 // E3 item 22 (policy rules), AC-10. check() is loaded inside the test body and fixtures/policy-rules/ is read there
 // too: the AC test is written before the build adds the rules and the fixtures, so nothing the build adds may run
 // while this file loads.
 
-type Violation = { id: string; severity: string; path: string | null; line: number | null; detail: string };
-type Message = { level: string; code: string; text: string };
-type Report = { verdict: string; messages: Message[]; policy?: { violations: Violation[] } };
-
 const REPO_ROOT = "/home/runner/work/demo/demo";
 const DETAIL = "this change edits a file the policy checks; its direction is not judged yet";
 const PATHS = [".claude/settings.json", ".mcp.json", "packages/a/.claude/settings.local.json"];
 
-async function run(policy: unknown): Promise<Report> {
-  const { check } = await import("@pharn-ci/core");
+async function run(policy: ResolvedPolicy): Promise<Report> {
+  const { check } = await import("./text-coverage.js");
   const report = check({
     version: "0.1.0",
     coverage: { text: fixture("golden/coverage.info"), format: "lcov" },
@@ -25,12 +24,12 @@ async function run(policy: unknown): Promise<Report> {
     threshold: null,
     repoFiles: ["AGENTS.md", "src/a.ts"],
     policy,
-  } as never);
+  });
   expectValidReport(report);
-  return report as unknown as Report;
+  return report;
 }
 
-const app = (document: unknown) => ({
+const app = (document: PolicyDocument): ResolvedPolicy => ({
   source: "app",
   version: 3,
   fetchedAt: "2026-10-26T12:00:00.000Z",

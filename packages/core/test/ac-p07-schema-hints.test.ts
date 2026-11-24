@@ -1,107 +1,34 @@
-import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { withoutCore50SchemaEdits } from "./core50-schema.js";
-import { withoutCore69SchemaEdits } from "./core69-schema.js";
+import type { Message } from "../src/report.js";
+import { codeRow } from "./codeTable.js";
 import { fixture } from "./helpers.js";
-import { withoutSchemaLevelEdits } from "./level-edits.js";
-import { withoutR3SchemaTextEdits } from "./r3-schema-text.js";
 import { expectValidReport } from "./schema.js";
-import { withoutTi17SchemaEdits } from "./ti17-schema.js";
-import { withoutV060CodeText } from "./v060-codes.js";
-import { withoutV070SchemaEdits } from "./v070-codes.js";
-import { withoutV080SchemaEdits } from "./v080-codes.js";
-import { withoutV090SchemaEdits } from "./v090-codes.js";
 
-// E3 item 24 (P07), AC-20. Reads the schemas as text, and at the base commit with git; check() and renderMarkdown() are
-// loaded inside the test body: the AC test is written before the build adds the code, so nothing the build adds may
-// run while this file loads. The base is c6b685b (E3 item 24a part B, main when this was written).
+// E3 item 24 (P07), AC-20. Reads the schema as text; check() and renderMarkdown() are loaded inside the test body: the
+// AC test is written before the build adds the code, so nothing the build adds may run while this file loads.
 
 const ROOT = fileURLToPath(new URL("../../../", import.meta.url));
-const BASE = "c6b685b";
 const read = (path: string) => readFileSync(join(ROOT, path), "utf8");
-const atCommit = (commit: string, path: string) =>
-  execFileSync("git", ["show", `${commit}:${path}`], { cwd: ROOT, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
 
+// CORE-140: the comment's hint is the code's fix.hint, the one advice text of POLICY_P07.
+// CORE-14 follow-up: the hint says "in one directory" and offers moving a file again.
 const P07_HINT =
-  "Make the instruction files in one directory name the same package manager and test runner, or move a file into the package it describes; an agent follows whichever file it reads first.";
-
-/** The upper-case code words of a text (as the pyparity2 pin collects them). */
-const words = (text: string) =>
-  [...new Set([...text.matchAll(/\b(?:TI\d\d|[A-Z][A-Z0-9]*_[A-Z0-9_]+)\b/g)].map((m) => m[0]))].sort();
-
-const codeDescription = (schemaText: string): string =>
-  (JSON.parse(schemaText) as { $defs: { message: { properties: { code: { description: string } } } } }).$defs.message
-    .properties.code.description;
-
-type Message = { level: string; code: string; text: string };
-type Report = Record<string, unknown> & { messages: Message[] };
-interface Core {
-  check(input: unknown): Report;
-  renderMarkdown(report: Report): string;
-}
+  "A maintainer should make the agent instruction files in one directory agree on one package manager and test runner, or move a file into the package it describes.";
 
 describe("the schema sentence and the hint for POLICY_P07", { timeout: 60_000 }, () => {
-  it("AC-20: report.v2.json appends exactly one POLICY_P07 sentence and changes no other byte; report.v1.json is unchanged; a report with POLICY_P07 validates; the hint is the fixed text", async () => {
-    // report.v2.json: the code description is the base one plus the one appended sentence; nothing else changes.
-    const baseText = atCommit(BASE, "schema/report.v2.json");
-    // Re-pinned by docs-schema-levels: the two insertions that state the block-mode levels of DIFF_UNAVAILABLE and
-    // TEST_INTEGRITY_INDEX_UNAVAILABLE are taken out first (level-edits.ts); every other byte stays pinned.
-    // Re-pinned for policy-p13 (Horizon 2 item H1) and policy rule P14 (agent PR size cap): the appended v0.6.0 code
-    // text (POLICY_P13, POLICY_P14) after the P07 sentence appears once and is taken out too, so the P07 sentence is
-    // still judged as the last one; v060-codes.ts pins it exactly.
-    // Re-pinned for A8 step 1 (TESTS_NOT_EXERCISING_CHANGES): the v0.7.0 code text after it and the optional
-    // testIntegrity.exercise property are taken out first; v070-codes.ts pins both exactly.
-    // Re-pinned for H4 (prompt-injection scan): withoutV070SchemaEdits also takes out its `injection` object, and its
-    // codes are in the same v0.7.0 code text.
-    // Re-pinned for flaky tests (A6, v0.8.0): its code text and the flaky description are taken out first (v080-codes.ts).
-    // Re-pinned for dependency safety (A13, v0.8.0): its part of the v0.8.0 code text and its top-level `dependencies`
-    // object are taken out the same way (v080-codes.ts pins both exactly).
-    // Re-pinned for fix-hints (H6): the `$defs.fix` object and the six `fix` properties are taken out first
-    // (v090-codes.ts pins them exactly).
-    // Re-pinned for ti17-always-true-matcher-2: the TI17 id pattern and code text are taken out first (ti17-schema.ts).
-    const nowText = withoutV060CodeText(
-      withoutSchemaLevelEdits(
-        withoutV070SchemaEdits(
-          // Re-pinned for CORE-69: its three description insertions are taken out first (core69-schema.ts).
-          // Re-pinned for the R3 schema text follow-up: its six description edits are put back first (r3-schema-text.ts).
-          withoutV080SchemaEdits(
-            withoutV090SchemaEdits(
-              withoutTi17SchemaEdits(
-                withoutCore69SchemaEdits(
-                  withoutCore50SchemaEdits(withoutR3SchemaTextEdits(read("schema/report.v2.json"))),
-                ),
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-    const base = codeDescription(baseText);
-    const now = codeDescription(nowText);
-    expect(now.startsWith(base)).toBe(true);
-    // Re-pinned on the rebase onto E3 item 23 (policy settings): its sentence (POLICY_P02 to POLICY_P06 and
-    // POLICY_SETTINGS_INVALID) comes first, right after the base; ac-polrules-docs and ac-upload-schema pin it exactly.
-    // The P07 sentence is the last one, and only it is judged here.
-    const all = now.slice(base.length);
-    expect(all.startsWith(" POLICY_P02, POLICY_P03, POLICY_P04, POLICY_P05 and POLICY_P06 ("), all).toBe(true);
-    const appended = all.slice(all.indexOf(" POLICY_P07 ("));
-    expect(appended.startsWith(" POLICY_P07 ("), appended).toBe(true);
-    expect(appended.endsWith("never the file's text)."), appended).toBe(true);
-    expect(words(appended)).toEqual(["POLICY_P07"]);
-    // Exactly one sentence: no sentence end before the final one outside the parenthesis.
-    expect(appended.slice(1).includes(" POLICY_"), appended).toBe(false);
-    const encode = (s: string) => JSON.stringify(s).slice(1, -1);
-    expect(baseText.split(encode(base))).toHaveLength(2);
-    expect(nowText).toBe(baseText.replace(encode(base), () => encode(now)));
-
-    // report.v1.json: byte-identical to the base commit.
-    expect(read("schema/report.v1.json")).toBe(atCommit(BASE, "schema/report.v1.json"));
+  it("AC-20: the code table documents POLICY_P07; a report with POLICY_P07 validates; the hint is the fixed text", async () => {
+    // CORE-132: the comparison of the code description and of report.v1.json with an old commit was a history pin and
+    // is removed. CORE-140: the code description is one sentence and a link to the code table, which names the code.
+    expect(codeRow("POLICY_P07")).toContain("(`warn` by default;");
 
     // A report carrying POLICY_P07 validates and renders the hint.
-    const core = (await import("@pharn-ci/core")) as unknown as Core;
+    const core = {
+      ...(await import("@pharn-ci/core")),
+      check: (await import("./text-coverage.js")).check,
+    };
     const report = core.check({
       version: "0.1.0",
       coverage: { text: fixture("golden/coverage.info"), format: "lcov" },
@@ -124,12 +51,13 @@ describe("the schema sentence and the hint for POLICY_P07", { timeout: 60_000 },
 
     const markdown = core.renderMarkdown(report);
     expect(markdown).toContain(`  - Hint: ${P07_HINT}`);
-    const source = read("packages/core/src/render/markdown.ts");
-    const hints = source.indexOf("MESSAGE_HINTS");
-    expect(hints, "MESSAGE_HINTS in markdown.ts").toBeGreaterThanOrEqual(0);
-    const entry = source.indexOf("POLICY_P07:", hints);
-    expect(entry, "MESSAGE_HINTS.POLICY_P07 in markdown.ts").toBeGreaterThan(hints);
+    // The hint is written once, in the fix table's P07 entry, and is the message's fix.hint.
+    const source = read("packages/core/src/fix/table.ts");
+    const entry = source.indexOf("  P07: {");
+    expect(entry, "SIGNAL_FIXES.P07 in fix/table.ts").toBeGreaterThanOrEqual(0);
     expect(source.slice(entry, entry + 400)).toContain(JSON.stringify(P07_HINT));
+    const message = report.messages.find((m) => m.code === "POLICY_P07") as Message & { fix?: { hint: string } };
+    expect(message.fix?.hint).toBe(P07_HINT);
     // CORE-133: the README row check moved to docs-contract.test.ts, which checks a row for every code.
   });
 });

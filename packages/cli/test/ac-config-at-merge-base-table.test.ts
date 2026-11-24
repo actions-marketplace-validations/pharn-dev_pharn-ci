@@ -1,7 +1,9 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import type { Report } from "@pharn-ci/core";
 import { describe, expect, it } from "vitest";
 import { expectValidReport } from "../../core/test/schema.js";
+import { requiredDeps, type StreamedFake } from "../../node-io/test/required-deps.js";
 import { BASE_OID, type BaseEntry, fakeConfigGit, HEAD_OID } from "./config-git-fake.js";
 
 // CORE-95, the table test: config state (untouched, edited, added, deleted, base unreadable) x threshold (set, unset) x
@@ -19,13 +21,6 @@ const CONFIG = ".pharn/ci.yml";
 
 type State = "untouched" | "edited" | "added" | "deleted" | "unreadable";
 type Mode = "block" | "warn";
-type Message = { level: string; code: string; text: string };
-type Report = {
-  verdict: string;
-  messages: Message[];
-  diffCoverage: { percent: number | null; threshold: number | null; excludedFiles?: string[] } | null;
-  testIntegrity: { signals: { id: string; severity: string }[] };
-};
 
 interface Scenario {
   diff: string;
@@ -80,6 +75,7 @@ async function actionReport(state: State, threshold: boolean, mode: Mode): Promi
   const outputs: Record<string, string> = {};
   const failed: string[] = [];
   const deps = {
+    ...requiredDeps((): StreamedFake => deps),
     getInput: (name: string) => inputs[name] ?? "",
     context: {
       eventName: "pull_request",
@@ -127,6 +123,7 @@ async function cliReport(state: State, threshold: boolean, mode: Mode): Promise<
   const r = repo(scenario(state));
   let out = "";
   const deps = {
+    ...requiredDeps((): StreamedFake => deps),
     cwd: REPO_ROOT,
     git: r.git,
     gitBatch: r.gitBatch,

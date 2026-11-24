@@ -1,8 +1,11 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import type { Report, TestIntegritySignal as Signal } from "../src/report.js";
+import type { TestSourceDrop, TestSourceDropReason } from "../src/testSources.js";
 import { FIXTURES } from "./helpers.js";
 import { expectValidReport } from "./schema.js";
+import type { TextCheckInput } from "./text-coverage.js";
 
 // CORE-50 (binary-diff-not-blind). check() and renderMarkdown() are loaded inside each test body: the AC tests are
 // written before the binary findings and their hints exist, so nothing the build changes may run while the file loads.
@@ -19,27 +22,9 @@ const BINARY = "git shows this file as binary, so its changes could not be read.
 const FIXED = [DELETED, RENAMED, BINARY];
 const IDS = ["TI01", "TI10", "TI11", "TI14"];
 
-interface Signal {
-  id: string;
-  severity: string;
-  path: string;
-  line: number | null;
-  detail: string;
-}
-interface Message {
-  code: string;
-  level: string;
-  text: string;
-  fix?: { hint?: string };
-}
-interface Report {
-  verdict: string;
-  messages: Message[];
-  testIntegrity: { signals: Signal[] };
-}
 interface Side {
   files: { path: string; text: string }[];
-  dropped: { path: string; reason: string }[];
+  dropped: TestSourceDrop[];
 }
 interface Sources {
   base: Side;
@@ -58,7 +43,7 @@ function readSide(dir: string): Side | null {
     const text = readFileSync(join(dir, name), "utf8");
     if (name.endsWith(".txt")) side.files.push({ path: name.slice(0, -".txt".length), text });
     else if (name.endsWith(".dropped"))
-      side.dropped.push({ path: name.slice(0, -".dropped".length), reason: text.trim() });
+      side.dropped.push({ path: name.slice(0, -".dropped".length), reason: text.trim() as TestSourceDropReason });
   }
   side.files.sort(byPath);
   side.dropped.sort(byPath);
@@ -76,8 +61,8 @@ function loadCase(name: string): { diff: string; sources: Sources | undefined } 
   };
 }
 
-async function run(diff: string, sources?: Sources, extra: Record<string, unknown> = {}): Promise<Report> {
-  const { check } = await import("../src/check.js");
+async function run(diff: string, sources?: Sources, extra: Partial<TextCheckInput> = {}): Promise<Report> {
+  const { check } = await import("./text-coverage.js");
   const report = check({
     version: "0.1.0",
     coverage: { text: readFileSync(`${FIXTURES}test-files-deleted/coverage.info`, "utf8"), format: "lcov" },
@@ -96,9 +81,9 @@ async function run(diff: string, sources?: Sources, extra: Record<string, unknow
     configPath: CONFIG,
     ...(sources === undefined ? {} : { testSources: sources }),
     ...extra,
-  } as unknown as Parameters<typeof check>[0]);
+  });
   expectValidReport(report);
-  return report as unknown as Report;
+  return report;
 }
 
 /** The `  - Hint:` line under the finding line of signal `id` at `path` in the rendered comment. */
@@ -121,12 +106,15 @@ function messageHint(markdown: string, code: string, name: string): string {
   return hint as string;
 }
 
-/** Comment hints of a report with no binary finding, as the base commit 0942691 renders them. */
+/**
+ * Comment hints of a report with no binary finding. The base commit 0942691 recorded them; CORE-140 made each the
+ * code's fix.hint (with the accept-label clause at its end for TI10), so these are the fix hints.
+ */
 const BASE_HINTS: Record<string, string> = {
-  TI01: "  - Hint: Restore the deleted tests, or say in the PR why they go so a reviewer can confirm it.",
-  TI10: "  - Hint: Restore the test script, or say in the PR why it changes so a reviewer can confirm it; a reviewer who is not the PR author can record that sign-off by applying the accept label `pharn/accepted`.",
-  TI11: "  - Hint: Restore the test step or trigger, or say in the PR why CI stops running these tests so a reviewer can confirm it.",
-  TI14: "  - Hint: Restore the threshold or the exclusions, or say in the PR why they change so a reviewer can confirm it.",
+  TI01: "  - Hint: Restore the deleted test file, or move its tests to a test file that still runs them.",
+  TI10: "  - Hint: Restore the test script in package.json so it runs the whole suite and fails when a test fails, or say in the PR why it changes; a reviewer who is not the PR author can record that sign-off by applying the accept label `pharn/accepted`.",
+  TI11: "  - Hint: Revert the workflow change so CI runs the tests on pull requests as before.",
+  TI14: "  - Hint: Revert the change to the coverage settings of the pharn-ci config so the gate measures the same files as before.",
 };
 
 const textEdit = (path: string, header: string, removed: string, added: string) =>
@@ -142,7 +130,7 @@ const textEdit = (path: string, header: string, removed: string, added: string) 
 
 /** The base-commit inputs of BASE_HINTS: one text finding per id, with the inputs the literals were recorded with. */
 async function textReport(diff: string): Promise<Report> {
-  const { check } = await import("../src/check.js");
+  const { check } = await import("./text-coverage.js");
   const report = check({
     version: "0.1.0",
     coverage: { text: readFileSync(`${FIXTURES}test-files-deleted/coverage.info`, "utf8"), format: "lcov" },
@@ -151,9 +139,9 @@ async function textReport(diff: string): Promise<Report> {
     threshold: 80,
     repoFiles: readFileSync(`${FIXTURES}test-files-deleted/files.txt`, "utf8").trim().split("\n"),
     testIntegrityMode: { input: "block" },
-  } as unknown as Parameters<typeof check>[0]);
+  });
   expectValidReport(report);
-  return report as unknown as Report;
+  return report;
 }
 
 /** Every binary case of AC-1 to AC-14; `noText` marks a case whose binary entries no signal can read text for. */

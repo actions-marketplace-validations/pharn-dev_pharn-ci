@@ -1,4 +1,4 @@
-<img src="https://raw.githubusercontent.com/pharn-dev/pharn-ci/main/docs/assets/pharn-logo.svg" alt="pharn" width="48" height="48">
+<img src="https://raw.githubusercontent.com/pharn-dev/pharn-ci/515998146a22a1886341d94236e4138e1777c13a/docs/assets/pharn-logo.svg" alt="pharn" width="48" height="48">
 
 ## 🛡️ pharn-ci · ❌ Fail
 
@@ -20,9 +20,9 @@ No test-integrity findings (mode: warn).
 ### 💬 Messages (2)
 
 - ❌ `COVERAGE_FILE_MISSING` Coverage file not found: coverage/lcov.info
-  - Hint: Run the tests with coverage before pharn-ci, and check the path (`coverage.file`, `coverage-file` or `--coverage`).
+  - Hint: Check that a test step with coverage runs before this check and writes the file where it reads it (`coverage.file`, the `coverage-file` input or `--coverage`).
 - ℹ️ `NO_AGENT_SETUP_FILES` No agent setup files (CLAUDE.md, AGENTS.md, .cursor/rules, ...) were found.
-  - Hint: Add an AGENTS.md or CLAUDE.md at the repository root that tells agents how to build and test.
+  - Hint: Check whether the repository should have an agent instruction file, such as AGENTS.md or CLAUDE.md at its root, that tells agents how to build and test.
 
 ### 🤖 Agent setup (no files)
 

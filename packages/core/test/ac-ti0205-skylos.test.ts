@@ -1,6 +1,8 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import type { TestIntegritySignal as Signal } from "../src/report.js";
+import type { TestSourceFile as SourceFile } from "../src/testSources.js";
 import { FIXTURES, fixture } from "./helpers.js";
 import { expectValidReport } from "./schema.js";
 
@@ -43,18 +45,6 @@ const WITH_SOURCES = new Set([
   "edited-expected-value",
 ]);
 
-interface SourceFile {
-  path: string;
-  text: string;
-}
-interface Signal {
-  id: string;
-  severity: string;
-  path: string;
-  line: number | null;
-  detail: string;
-}
-
 const byPath = (a: SourceFile, b: SourceFile) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
 
 /** The `<logical path>.txt` files under one side of a case, as test-source files sorted by logical path. */
@@ -67,7 +57,7 @@ function sideFiles(dir: string): SourceFile[] {
 }
 
 async function runNine(): Promise<Map<string, Signal[]>> {
-  const { check } = await import("../src/check.js");
+  const { check } = await import("./text-coverage.js");
   const out = new Map<string, Signal[]>();
   for (const name of NINE) {
     const sources = WITH_SOURCES.has(name)
@@ -87,9 +77,9 @@ async function runNine(): Promise<Map<string, Signal[]>> {
       repoFiles: fixture(`skylos-nine/${name}/files.txt`).trim().split("\n"),
       testIntegrityMode: { input: "block" },
       ...sources,
-    } as unknown as Parameters<typeof check>[0]);
+    });
     expectValidReport(report);
-    out.set(name, report.testIntegrity.signals as unknown as Signal[]);
+    out.set(name, report.testIntegrity.signals);
   }
   return out;
 }

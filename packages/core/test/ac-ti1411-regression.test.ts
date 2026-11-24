@@ -27,7 +27,7 @@ const TI01_FIXTURES: Array<[string, "block" | "info" | "none"]> = [
 ];
 
 async function run(diff: string, files: string, coverage: string, mode: "block" | "warn" = "block") {
-  const { check } = await import("../src/check.js");
+  const { check } = await import("./text-coverage.js");
   const report = check({
     version: "0.1.0",
     coverage: { text: fixture(coverage), format: "lcov" },
@@ -36,7 +36,7 @@ async function run(diff: string, files: string, coverage: string, mode: "block" 
     threshold: 80,
     repoFiles: fixture(files).trim().split("\n"),
     testIntegrityMode: { input: mode },
-  } as Parameters<typeof check>[0]);
+  });
   expectValidReport(report);
   return report;
 }

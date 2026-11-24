@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { Report } from "../src/report.js";
 import { fixture } from "./helpers.js";
 import { expectValidReport } from "./schema.js";
 
@@ -7,16 +8,6 @@ import { expectValidReport } from "./schema.js";
 // loads. The warn run is the control; the block run, in the same test, must give the error.
 
 const CODE = "TEST_INTEGRITY_INDEX_UNAVAILABLE";
-
-interface Message {
-  code: string;
-  level: string;
-  text: string;
-}
-interface Report {
-  verdict: string;
-  messages: Message[];
-}
 
 /** A `--unified=0` diff that adds one assertion to the existing test file `src/app.test.ts`. */
 const MODIFIES_TEST = `${[
@@ -29,7 +20,8 @@ const MODIFIES_TEST = `${[
 ].join("\n")}\n`;
 
 async function run(mode: "warn" | "block"): Promise<Report> {
-  const { check, unavailableTestSources } = await import("@pharn-ci/core");
+  const { unavailableTestSources } = await import("@pharn-ci/core");
+  const { check } = await import("./text-coverage.js");
   const report = check({
     version: "0.1.0",
     coverage: { text: fixture("test-files-deleted/coverage.info"), format: "lcov" },
@@ -39,9 +31,9 @@ async function run(mode: "warn" | "block"): Promise<Report> {
     repoFiles: ["src/app.test.ts", "src/app.ts"],
     testIntegrityMode: { input: mode },
     testSources: unavailableTestSources("the base commit is not in the checkout"),
-  } as unknown as Parameters<typeof check>[0]);
+  });
   expectValidReport(report);
-  return report as unknown as Report;
+  return report;
 }
 
 const unavailable = (report: Report) => report.messages.filter((m) => m.code === CODE);

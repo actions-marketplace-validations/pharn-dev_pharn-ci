@@ -1,20 +1,18 @@
 import { describe, expect, it } from "vitest";
+import type { PolicyDocument } from "../src/policy/types.js";
+import type { ReportPolicyViolation as Violation } from "../src/report.js";
 import { fixture } from "./helpers.js";
 import { expectValidReport } from "./schema.js";
-import { withoutFix } from "./v090-codes.js";
+import { withoutFix } from "./without-fix.js";
 
 // E3 item 23 (policy settings), AC-9. check() is loaded inside the test body: the AC test is written before the build
 // adds the settings rules, so nothing the build adds may run while this file loads.
 
-type Violation = { id: string; severity: string; path: string | null; line: number | null; detail: string };
-type Message = { level: string; code: string; text: string };
-type Report = { verdict: string; messages: Message[]; policy?: { violations: Violation[] } };
-
 const REPO_ROOT = "/home/runner/work/demo/demo";
-const DOCUMENT = { version: 1, setup: { required_permissions_deny: ["Bash(rm -rf:*)", "Read(.env)"] } };
+const DOCUMENT: PolicyDocument = { version: 1, setup: { required_permissions_deny: ["Bash(rm -rf:*)", "Read(.env)"] } };
 
 async function p03Of(files: Record<string, string>): Promise<Violation[]> {
-  const { check } = await import("@pharn-ci/core");
+  const { check } = await import("./text-coverage.js");
   const report = check({
     version: "0.1.0",
     coverage: { text: fixture("golden/coverage.info"), format: "lcov" },
@@ -24,10 +22,10 @@ async function p03Of(files: Record<string, string>): Promise<Violation[]> {
     repoFiles: ["AGENTS.md", "src/a.ts", ...Object.keys(files)],
     policy: { source: "file", version: null, path: "policy/org.json", document: DOCUMENT },
     policySettingsSources: { files: Object.entries(files).map(([path, text]) => ({ path, text })), dropped: [] },
-  } as never);
+  });
   expectValidReport(report);
   // fix-hints (H6): every finding now carries a `fix`; the pinned literals are unchanged, so they are read without it.
-  return withoutFix(((report as unknown as Report).policy?.violations ?? []).filter((v) => v.id === "P03"));
+  return withoutFix((report.policy?.violations ?? []).filter((v) => v.id === "P03"));
 }
 
 const deny = (...rules: string[]) => `${JSON.stringify({ permissions: { deny: rules } }, null, 2)}\n`;

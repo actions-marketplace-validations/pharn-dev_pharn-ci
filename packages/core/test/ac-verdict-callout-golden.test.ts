@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { fixture, foldCoverageBar, foldIntegrityColumn } from "./helpers.js";
+import { foldHintsToBase } from "./hints-at-base.js";
 import { expectValidReport } from "./schema.js";
 
 // pr-comment-verdict-callout AC-1. check(), the config parser and the renderer are loaded inside the test body: the AC
@@ -11,13 +12,15 @@ const REPO_ROOT = "/home/runner/work/demo/demo";
 /**
  * sha256 of each golden markdown file as committed before this increment. The build regenerates the files, so the
  * test pins the earlier content by hash: folding the callout back into the bare overview line must give it back.
+ * CORE-124 updated every hash on purpose: each is the same earlier file with the logo line's raw URL naming a commit
+ * SHA instead of `main`, and nothing else changed.
  */
 const BEFORE_SHA256 = {
-  golden: "d0b78ab8646489dcc38cbe54790eb29d599a318cb1888a46e23648579ffee184",
-  "golden-multi": "d0b78ab8646489dcc38cbe54790eb29d599a318cb1888a46e23648579ffee184",
-  "golden-cobertura": "457bad3073d1f78261cdc0e5f5511fc4c63fe903f6a3056f49a1c9ec04da9bd7",
-  "golden-exclusions": "d470c10cfb7ca3d50ba370fccae4176615db8036f96168cc5c61063925562ce7",
-  "coverage-paths/package-relative": "4c6c42ea20d6b16186891978429e1bb5d7775d135787c8e9fe0af8e83e616224",
+  golden: "0d77ffaef143ab97ff456d78688a11f63308217ae20932f0e7b1f6deef3454dc",
+  "golden-multi": "0d77ffaef143ab97ff456d78688a11f63308217ae20932f0e7b1f6deef3454dc",
+  "golden-cobertura": "fa083a7379c04242b897aa038b2c99818aeaeda74117d01be7ff90f81295a0e0",
+  "golden-exclusions": "ef238821e9357aa7fa96c678a67e5e44949c46d68bf54cb8a11357922ddf774f",
+  "coverage-paths/package-relative": "d3f9d4874927a0b4a37309188e5fd73669bcffed1277a9fde9e4b74309a30c4c",
 } as const;
 
 type Golden = keyof typeof BEFORE_SHA256;
@@ -36,14 +39,13 @@ function foldTestIntegrity(markdown: string): string {
 const lines = (path: string) => fixture(path).trim().split("\n");
 
 async function load() {
-  const { check } = await import("../src/check.js");
+  const { check } = await import("./text-coverage.js");
   const { parseConfig } = await import("../src/config.js");
   const { renderMarkdown } = await import("../src/render/markdown.js");
   return { check, parseConfig, renderMarkdown };
 }
 
 type Loaded = Awaited<ReturnType<typeof load>>;
-type Input = Parameters<Loaded["check"]>[0];
 
 /** Each golden's report, built from its inputs exactly as the test that writes that golden builds it. */
 function goldenReport({ check, parseConfig }: Loaded, golden: Golden) {
@@ -55,7 +57,7 @@ function goldenReport({ check, parseConfig }: Loaded, golden: Golden) {
         coverage: { text: fixture("golden/coverage.info"), format: "lcov" },
         diff: { text: fixture("golden/pr.diff") },
         repoFiles: lines("golden/files.txt"),
-      } as Input);
+      });
     case "golden-multi":
       return check({
         ...base,
@@ -68,14 +70,14 @@ function goldenReport({ check, parseConfig }: Loaded, golden: Golden) {
         },
         diff: { text: fixture("golden-multi/pr.diff") },
         repoFiles: lines("golden-multi/files.txt"),
-      } as Input);
+      });
     case "golden-cobertura":
       return check({
         ...base,
         coverage: { text: fixture("golden-cobertura/coverage.xml"), format: "auto" },
         diff: { text: fixture("golden-cobertura/pr.diff") },
         repoFiles: lines("golden-cobertura/files.txt"),
-      } as Input);
+      });
     case "golden-exclusions": {
       const config = parseConfig(fixture("golden-exclusions/ci.yml")) as {
         coverage?: { exclude?: string[]; threshold?: number };
@@ -87,7 +89,7 @@ function goldenReport({ check, parseConfig }: Loaded, golden: Golden) {
         threshold: config.coverage?.threshold ?? null,
         repoFiles: lines("golden-exclusions/files.txt"),
         exclude: config.coverage?.exclude ?? [],
-      } as Input);
+      });
     }
     case "coverage-paths/package-relative":
       return check({
@@ -95,7 +97,7 @@ function goldenReport({ check, parseConfig }: Loaded, golden: Golden) {
         coverage: { text: fixture("coverage-paths/package-relative/coverage.info"), format: "lcov" },
         diff: { text: fixture("coverage-paths/package-relative/pr.diff") },
         repoFiles: lines("coverage-paths/package-relative/files.txt"),
-      } as Input);
+      });
   }
 }
 
@@ -123,7 +125,8 @@ describe("renderMarkdown(): the golden renderings gain the verdict callout and n
       // package-relative golden's diff coverage is not computed, so it has no bar.
       const markdown = loaded.renderMarkdown(report);
       const unbarred = golden === "coverage-paths/package-relative" ? markdown : foldCoverageBar(markdown);
-      const rendered = foldTestIntegrity(foldIntegrityColumn(unbarred)).split("\n");
+      // CORE-140 made each hint its code's fix.hint on purpose: the hint lines are folded back too.
+      const rendered = foldHintsToBase(foldTestIntegrity(foldIntegrityColumn(unbarred))).split("\n");
       expect(rendered[2]?.endsWith(heading), `${golden}: heading ${rendered[2]}`).toBe(true);
       expect(rendered[4], `${golden}: the alert marker on line 5`).toBe(marker);
       const content = rendered[5] ?? "";

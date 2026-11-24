@@ -1,24 +1,19 @@
 import { describe, expect, it } from "vitest";
+import type { AgentPrFacts } from "../src/agents.js";
+import type { ResolvedPolicy } from "../src/policy/resolved.js";
+import type { PolicyDocument } from "../src/policy/types.js";
+import type { MessageCode, Report, ReportMeta } from "../src/report.js";
 import { fixture } from "./helpers.js";
 import { expectValidReport } from "./schema.js";
-import { withoutFix } from "./v090-codes.js";
+import { withoutFix } from "./without-fix.js";
 
 // E3 item 24a part B (P11), AC-13. check() is loaded inside the test body and fixtures/policy-rules/p11/ is read there
 // too: the AC test is written before the build adds rule P11 and its fixtures, so nothing the build adds may run while
 // this file loads.
 
-type Violation = { id: string; severity: string; path: string | null; line: number | null; detail: string };
-type Message = { level: string; code: string; text: string };
-type Report = {
-  verdict: string;
-  messages: Message[];
-  policy?: { violations: Violation[] };
-  meta?: Record<string, unknown>;
-};
-
 const REPO_ROOT = "/home/runner/work/demo/demo";
 const FETCHED_AT = "2026-10-26T12:00:00.000Z";
-const META = {
+const META: ReportMeta = {
   event: "pull_request",
   repository: "pharn-dev/pharn-ci",
   repositoryId: 123,
@@ -32,12 +27,14 @@ const META = {
   upload: { status: "skipped" },
 };
 /** A person's PR labelled ai-generated whose commits could not be read. */
-const FACTS = { pr: { author: { login: "octocat", type: "User" }, labels: ["ai-generated"], commits: null } };
+const FACTS: AgentPrFacts = {
+  pr: { author: { login: "octocat", type: "User" }, labels: ["ai-generated"], commits: null },
+};
 const INCOMPLETE_TEXT =
   "This pull request counts as an agent PR because pharn-ci could not read all of its evidence (`commits-unreadable`), so the org policy's protected paths apply to it.";
 
-async function run(policy: unknown, agentPrFacts: unknown): Promise<Report> {
-  const { check } = await import("@pharn-ci/core");
+async function run(policy: ResolvedPolicy, agentPrFacts: AgentPrFacts): Promise<Report> {
+  const { check } = await import("./text-coverage.js");
   const report = check({
     version: "0.1.0",
     coverage: { text: fixture("golden/coverage.info"), format: "lcov" },
@@ -48,15 +45,20 @@ async function run(policy: unknown, agentPrFacts: unknown): Promise<Report> {
     meta: META,
     policy,
     agentPrFacts,
-  } as never);
+  });
   expectValidReport(report);
-  return report as unknown as Report;
+  return report;
 }
 
 // fix-hints (H6): every message and finding now carries a `fix`; the pinned literals are unchanged, so these read without it.
 const p11 = (report: Report) => withoutFix((report.policy?.violations ?? []).filter((v) => v.id === "P11"));
 const withCode = (report: Report, code: string) => withoutFix(report.messages.filter((m) => m.code === code));
-const app = (document: unknown) => ({ source: "app", version: 3, fetchedAt: FETCHED_AT, document });
+const app = (document: PolicyDocument): ResolvedPolicy => ({
+  source: "app",
+  version: 3,
+  fetchedAt: FETCHED_AT,
+  document,
+});
 
 describe("the AGENT_PR_DETECTION_INCOMPLETE message", { timeout: 60_000 }, () => {
   it("AC-13: incomplete evidence under protected paths gives one warn naming the reason and a P11 violation; no protected paths or no pull request gives none; under a file: policy the messages come POLICY_P11, then the incomplete message, then POLICY_OVERRIDE_IGNORED", async () => {
@@ -86,7 +88,7 @@ describe("the AGENT_PR_DETECTION_INCOMPLETE message", { timeout: 60_000 }, () =>
       FACTS,
     );
     const codes = file.messages.map((m) => m.code);
-    const order = ["POLICY_P11", "AGENT_PR_DETECTION_INCOMPLETE", "POLICY_OVERRIDE_IGNORED"];
+    const order: MessageCode[] = ["POLICY_P11", "AGENT_PR_DETECTION_INCOMPLETE", "POLICY_OVERRIDE_IGNORED"];
     for (const code of order)
       expect(
         codes.filter((c) => c === code),

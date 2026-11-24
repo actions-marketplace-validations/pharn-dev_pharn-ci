@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import type { ResolvedPolicy } from "../src/policy/resolved.js";
+import type { Report } from "../src/report.js";
 import { fixture } from "./helpers.js";
 import { expectValidReport } from "./schema.js";
 
@@ -6,14 +8,10 @@ import { expectValidReport } from "./schema.js";
 // too: the AC test is written before the build adds the rules and the fixtures, so nothing the build adds may run
 // while this file loads.
 
-type Violation = { id: string; severity: string; path: string | null; line: number | null; detail: string };
-type Message = { level: string; code: string; text: string };
-type Report = { verdict: string; messages: Message[]; policy?: { violations: Violation[] } };
-
 const REPO_ROOT = "/home/runner/work/demo/demo";
 
-async function run(policy: unknown): Promise<Report> {
-  const { check } = await import("@pharn-ci/core");
+async function run(policy: ResolvedPolicy | undefined): Promise<Report> {
+  const { check } = await import("./text-coverage.js");
   const report = check({
     version: "0.1.0",
     coverage: { text: fixture("golden/coverage.info"), format: "lcov" },
@@ -23,9 +21,9 @@ async function run(policy: unknown): Promise<Report> {
     repoFiles: fixture("policy-rules/p01-violates/files.txt").trim().split("\n"),
     requireAgentSetup: true,
     ...(policy === undefined ? {} : { policy }),
-  } as never);
+  });
   expectValidReport(report);
-  return report as unknown as Report;
+  return report;
 }
 
 const withCode = (report: Report, code: string) => report.messages.filter((m) => m.code === code);
@@ -35,7 +33,7 @@ describe("org policy rule P01: severity from policy.rules", { timeout: 60_000 },
   it("AC-4: app warn lowers P01 and NO_AGENT_SETUP_FILES to warn, app off removes the violation and keeps today's level, a file warn stays block and is reported ignored", async () => {
     const document = JSON.parse(fixture("policy-rules/p01-violates/policy.json"));
     const rules = (P01: string) => ({ ...document, policy: { rules: { P01 } } });
-    const app = (P01: string) => ({
+    const app = (P01: string): ResolvedPolicy => ({
       source: "app",
       version: 3,
       fetchedAt: "2026-10-26T12:00:00.000Z",
@@ -64,6 +62,7 @@ describe("org policy rule P01: severity from policy.rules", { timeout: 60_000 },
     expect(new Set(p01(file).map((v) => v.severity))).toEqual(new Set(["block"]));
     const ignored = withCode(file, "POLICY_OVERRIDE_IGNORED");
     expect(ignored).toHaveLength(1);
-    expect(ignored[0]?.text).toContain("policy.rules.P01 (policy-file)");
+    // CORE-123: the setting and no layer (it was "policy.rules.P01 (policy-file)").
+    expect(ignored[0]?.text).toContain("applies: policy.rules.P01.");
   });
 });

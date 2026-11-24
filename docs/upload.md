@@ -18,22 +18,30 @@ failure messages redacted and cut to 2048 bytes), never the runner's own file or
 warning (the check ran in full).
 
 **What the job sees.** The signed URL and the token are masked and never logged. An upload that succeeds sets the
-`run-url` output and logs one line without a URL. The App then comments on the pull request, so `pharn-ci` posts no
-comment of its own; a comment an earlier run of the same workflow and job left is updated to one line that points to
-the run on pharn.dev, so the pull request never shows that run's verdict beside the App's comment. The job summary
+`run-url` output and logs one line without a URL. The App's answer to `POST /api/v1/runs` says whether it commented:
+only when its `commentUrl` is an `https` URL of at most 2,048 characters (the App posted or edited its comment before
+answering) does `pharn-ci` post no comment of its own, and a comment an earlier run of the same workflow and job left
+is updated to one line that points to the run on pharn.dev, so the pull request never shows that run's verdict beside
+the App's comment. When `commentUrl` is `null`, missing (an older app) or anything else, `pharn-ci` posts or updates
+its own comment exactly as a run without an upload does, so a missing App comment no longer leaves the pull request
+without one (if GitHub refuses that comment too, the run logs one warning, as without an upload). The
+value is only checked, never written to the log, the report, the comment or an output. With `comment: false` nothing
+is posted either way. The job summary
 and `report.json` still carry the report. An upload fails open: whatever goes wrong (a timeout, a non-2xx answer, an
 unexpected answer, an exception) ends in one warning that names a reason, never fails the check and never changes its
 verdict, except that `UPLOAD_TOO_LARGE` can turn a pass into a warn. The whole upload ends within 90 s of its start:
 each request and the `PUT` is cut off at the time left, and running out is one more failed upload (a reason ending
 in `:deadline`).
 
-**When nothing is uploaded.** With `upload: never`, without `id-token: write` (a fork pull request never gets it), or
-on a `pull_request_target` run (its default checkout is the base branch, which pharn-ci refuses to measure),
-nothing is sent and the report says `meta.upload.status: skipped`. A report without a `meta` block (no run metadata)
+**When nothing is uploaded.** With `upload: never`, without `id-token: write` (a fork pull request never gets it), when
+the OIDC token request fails or times out, or on a `pull_request_target` run (its default checkout is the base branch,
+which pharn-ci refuses to measure), nothing is sent and the report says `meta.upload.status: skipped`. A failed token
+request is one info line in the job log and never a message or a verdict change: the upload never fails the check. A report without a `meta` block (no run metadata)
 is never sent and carries no upload status. When the app answers the policy request or the upload with `404`
 (the organization has not installed the Pharn GitHub App for the repository), the PR comment and the job summary
 end with a one-line hint to install it, once, and nothing else changes.
 
 What this does not cover is in [`docs/LIMITS.md`](LIMITS.md), and the trust boundaries are in
-[`docs/THREAT-MODEL.md`](THREAT-MODEL.md). The app comments as `pharn[bot]`; the comment of the Action and the one
-of the App never both appear for one upload.
+[`docs/THREAT-MODEL.md`](THREAT-MODEL.md). The app comments as `pharn[bot]`; for one upload the
+Action's verdict and the App's never both appear: the Action posts no verdict only when the App says it commented, and
+then an earlier Action comment stays only as the one-line pointer to the run.

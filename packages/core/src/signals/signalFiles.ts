@@ -1,6 +1,6 @@
 import type { DiffFile } from "../diff/unified.js";
 import { configRepoPath } from "../gateInputs.js";
-import { JS_TS_EXTENSIONS } from "../jsTsExtensions.js";
+import { sourceLanguage } from "../sourceLanguage.js";
 import { isTestFile, keepTestFileText } from "../testFiles.js";
 import { byCodeUnit } from "../text.js";
 import { testLanguage } from "./testLines.js";
@@ -36,24 +36,18 @@ export function isSnapshotFile(path: string): boolean {
   return segments.slice(0, -1).includes("__snapshots__");
 }
 
-const JS_TS_EXTENSION_SET: ReadonlySet<string> = new Set(JS_TS_EXTENSIONS);
-
 /** Whether a repo-relative path is a `package.json`: its basename is exactly that, at the root or nested. */
 export function isPackageJsonFile(path: string): boolean {
   return path.slice(path.lastIndexOf("/") + 1) === "package.json";
 }
 
 /**
- * The language of a source file by its extension: `jsts` for js, jsx, ts, tsx, mjs, cjs, mts and cts, `python` for py,
- * else null. Case-sensitive. A basename that only starts with a dot has no extension.
+ * The language of a source file by its extension (`sourceLanguage`): `jsts` for js, jsx, ts, tsx, mjs, cjs, mts and cts,
+ * `python` for py, else null. Case-sensitive.
  */
 export function coverageSourceLanguage(path: string): "jsts" | "python" | null {
-  const basename = path.slice(path.lastIndexOf("/") + 1);
-  const dot = basename.lastIndexOf(".");
-  if (dot <= 0) return null;
-  const extension = basename.slice(dot + 1);
-  if (extension === "py") return "python";
-  return JS_TS_EXTENSION_SET.has(extension) ? "jsts" : null;
+  const language = sourceLanguage(path);
+  return language === null ? null : language === "py" ? "python" : "jsts";
 }
 
 /**
@@ -83,9 +77,9 @@ export function keepSignalFileText(
 /**
  * The files whose kept text was cut at the bound (`textTruncated`) where a signal reads the added lines, so a finding
  * past the cut is not seen: a test file in a language TI03 reads (TI03, TI04; this covers the JavaScript and
- * TypeScript test files TI08, TI15, TI16 and TI17 read), a workflow file (TI11), a modified or renamed `package.json` (TI10),
- * a pytest config file (TI08), a JavaScript, TypeScript or Python file that is not a test file (TI13, and TI15's source
- * side) and the pharn-ci config in use (TI14). A deleted file has no added lines and TI01 already counts a cut test
+ * TypeScript test files TI08, TI16 and TI17 read), a workflow file (TI11), a modified or renamed `package.json` (TI10),
+ * a pytest config file (TI08), a JavaScript, TypeScript or Python file that is not a test file (TI13) and the pharn-ci
+ * config in use (TI14). A deleted file has no added lines and TI01 already counts a cut test
  * file, so deleted files are left out; so are files no signal reads past the cut (a large fixture or snapshot under a
  * test directory). Sorted by path.
  */

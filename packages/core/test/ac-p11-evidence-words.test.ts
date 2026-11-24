@@ -1,13 +1,10 @@
 import { describe, expect, it } from "vitest";
+import type { AgentPrFacts } from "../src/agents.js";
 import { fixture } from "./helpers.js";
 import { expectValidReport } from "./schema.js";
 
 // E3 item 24a part B (P11), AC-10. check() is loaded inside the test body: the AC test is written before the build adds
 // rule P11, so nothing the build adds may run while this file loads.
-
-type Violation = { id: string; severity: string; path: string | null; line: number | null; detail: string };
-type Message = { level: string; code: string; text: string };
-type Report = { verdict: string; messages: Message[]; policy?: { violations: Violation[] } };
 
 const REPO_ROOT = "/home/runner/work/demo/demo";
 const DIFF = [
@@ -20,10 +17,10 @@ const DIFF = [
   "",
 ].join("\n");
 const HUMAN_COMMITS = [{ authorLogin: "octocat", committerLogin: "octocat", message: "Fix the parser\n" }];
-const HUMAN = { login: "octocat", type: "User" };
+const HUMAN: { login: string; type: "User" } = { login: "octocat", type: "User" };
 
-async function p11Text(pr: unknown): Promise<string> {
-  const { check } = await import("@pharn-ci/core");
+async function p11Text(pr: AgentPrFacts["pr"]): Promise<string> {
+  const { check } = await import("./text-coverage.js");
   const report = check({
     version: "0.1.0",
     coverage: { text: fixture("golden/coverage.info"), format: "lcov" },
@@ -38,7 +35,7 @@ async function p11Text(pr: unknown): Promise<string> {
       document: { version: 1, agents: { protected_paths: ["infra/**"] } },
     },
     agentPrFacts: { pr },
-  } as never) as unknown as Report;
+  });
   expectValidReport(report);
   expect((report.policy?.violations ?? []).filter((v) => v.id === "P11").map((v) => v.path)).toEqual(["infra/main.tf"]);
   const messages = report.messages.filter((m) => m.code === "POLICY_P11");

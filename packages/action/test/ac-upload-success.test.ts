@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import type { Report } from "@pharn-ci/core";
 import { describe, expect, it } from "vitest";
 import { expectValidReport } from "../../core/test/schema.js";
 import { commentScopeLine } from "../src/run.js";
@@ -40,8 +41,6 @@ const META_CONTEXT = {
     pull_request: { number: 7, base: { sha: "a".repeat(40) }, head: { sha: "b".repeat(40) } },
   },
 };
-
-type Report = { verdict: string; meta?: Record<string, unknown> };
 
 interface FetchCall {
   url: string;
@@ -175,8 +174,21 @@ const commentCalls = (apiCalls: string[]) => apiCalls.filter((c) => /^(create|up
 // The first test of a file loads run() cold, which can take seconds on a loaded host.
 describe("a successful upload", { timeout: 60_000 }, () => {
   it("AC-17: three requests in order, meta.upload ok with the run URL, the run-url output, no comment of its own, one hand-off line, the summary, and no failure", async () => {
-    const runsAnswer = JSON.parse(read("fixtures/upload/responses/runs-created.json")) as { body: string };
+    const runsAnswer = JSON.parse(read("fixtures/upload/responses/runs-created.json")) as {
+      status: number;
+      headers: Record<string, string>;
+      body: string;
+    };
     const runUrl = new URL((JSON.parse(runsAnswer.body) as { url: string }).url).href;
+    // The fixture answer plus the comment the App posted (CORE-119): only then does pharn-ci post no comment of its own.
+    const commented: Answer = () =>
+      new Response(
+        JSON.stringify({
+          ...(JSON.parse(runsAnswer.body) as object),
+          commentUrl: "https://github.com/acme/widgets/pull/7#issuecomment-77",
+        }),
+        { status: runsAnswer.status, headers: runsAnswer.headers },
+      );
     expect(new URL(runUrl).origin, "control: the fixture's run URL is on the app origin").toBe(APP);
 
     const own = {
@@ -190,7 +202,7 @@ describe("a successful upload", { timeout: 60_000 }, () => {
       answers: {
         uploadUrl: [fromFixture("upload-url-ok.json")],
         put: [bare(200)],
-        runs: [fromFixture("runs-created.json")],
+        runs: [commented],
       },
     });
 

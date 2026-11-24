@@ -1,19 +1,17 @@
 import { describe, expect, it } from "vitest";
+import type { PolicyDocument } from "../src/policy/types.js";
+import type { ReportPolicyViolation as Violation } from "../src/report.js";
 import { byCodeUnit } from "../src/text.js";
 import { fixture } from "./helpers.js";
 import { expectValidReport } from "./schema.js";
-import { withoutFix } from "./v090-codes.js";
+import { withoutFix } from "./without-fix.js";
 
 // E3 item 23 (policy settings), AC-12. check() is loaded inside the test body: the AC test is written before the build
 // adds the settings rules, so nothing the build adds may run while this file loads. Each case is its own settings
 // unit (a `.claude/` directory), and every unit but the case's one requirement satisfies the other two.
 
-type Violation = { id: string; severity: string; path: string | null; line: number | null; detail: string };
-type Message = { level: string; code: string; text: string };
-type Report = { verdict: string; messages: Message[]; policy?: { violations: Violation[] } };
-
 const REPO_ROOT = "/home/runner/work/demo/demo";
-const DOCUMENT = {
+const DOCUMENT: PolicyDocument = {
   version: 1,
   setup: {
     required_hooks: [
@@ -70,7 +68,7 @@ describe("org policy rule P06: required hook missing", { timeout: 60_000 }, () =
     const disabledLine = disabledText.split("\n").findIndex((l) => l.includes('"disableAllHooks"')) + 1;
     expect(disabledLine).toBeGreaterThan(0);
 
-    const { check } = await import("@pharn-ci/core");
+    const { check } = await import("./text-coverage.js");
     const report = check({
       version: "0.1.0",
       coverage: { text: fixture("golden/coverage.info"), format: "lcov" },
@@ -80,10 +78,10 @@ describe("org policy rule P06: required hook missing", { timeout: 60_000 }, () =
       repoFiles: ["AGENTS.md", "src/a.ts", ...Object.keys(files)],
       policy: { source: "file", version: null, path: "policy/org.json", document: DOCUMENT },
       policySettingsSources: { files: Object.entries(files).map(([path, text]) => ({ path, text })), dropped: [] },
-    } as never);
+    });
     expectValidReport(report);
     // fix-hints (H6): every finding now carries a `fix`; the pinned literals are unchanged, so they are read without it.
-    const p06 = withoutFix(((report as unknown as Report).policy?.violations ?? []).filter((v) => v.id === "P06"));
+    const p06 = withoutFix((report.policy?.violations ?? []).filter((v) => v.id === "P06"));
 
     const missing = (unit: string, what: string): Violation => ({
       id: "P06",
@@ -93,25 +91,27 @@ describe("org policy rule P06: required hook missing", { timeout: 60_000 }, () =
       detail: `required hook ${what} is missing`,
     });
     const PRE_MISSING = "PreToolUse Write|Edit";
-    const expected: Violation[] = [
-      missing("missing", PRE_MISSING),
-      missing("missing", "PostToolUse Notebook.*"),
-      missing("missing", "Stop (any tool)"),
-      missing("subset", PRE_MISSING),
-      missing("regex", "PostToolUse Notebook.*"),
-      missing("http", PRE_MISSING),
-      missing("prompt", PRE_MISSING),
-      missing("agent", PRE_MISSING),
-      missing("mcptool", PRE_MISSING),
-      missing("iffy", PRE_MISSING),
-      {
-        id: "P06",
-        severity: "block",
-        path: at("disabled"),
-        line: disabledLine,
-        detail: "disableAllHooks turns every hook off",
-      },
-    ].sort(order);
+    const expected: Violation[] = (
+      [
+        missing("missing", PRE_MISSING),
+        missing("missing", "PostToolUse Notebook.*"),
+        missing("missing", "Stop (any tool)"),
+        missing("subset", PRE_MISSING),
+        missing("regex", "PostToolUse Notebook.*"),
+        missing("http", PRE_MISSING),
+        missing("prompt", PRE_MISSING),
+        missing("agent", PRE_MISSING),
+        missing("mcptool", PRE_MISSING),
+        missing("iffy", PRE_MISSING),
+        {
+          id: "P06",
+          severity: "block",
+          path: at("disabled"),
+          line: disabledLine,
+          detail: "disableAllHooks turns every hook off",
+        },
+      ] satisfies Violation[]
+    ).sort(order);
     expect(p06).toEqual(expected);
     for (const unit of ["omitted", "empty", "star", "superset"]) {
       expect(

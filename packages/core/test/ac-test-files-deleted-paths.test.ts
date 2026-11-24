@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
+import type { Message } from "../src/report.js";
 import { fixture } from "./helpers.js";
 import { expectValidReport } from "./schema.js";
+import type { TextCheckInput } from "./text-coverage.js";
 
 // check() and the fixtures are loaded inside each test body: the AC tests are written before the deleted-test-file
 // message and fixtures/test-files-deleted/ exist, so nothing that depends on them may run while the file loads.
@@ -18,7 +20,6 @@ const SEVEN = [
   "tests/six.py",
 ];
 
-type Message = { level: string; code: string; text: string };
 type Coverage =
   | { text: string; format: "lcov" }
   | {
@@ -46,8 +47,8 @@ const coverageOf = (mode: string): Coverage => {
 };
 
 async function runCheck(coverage: Coverage, diff: Diff) {
-  const { check } = await import("../src/check.js");
-  const input = {
+  const { check } = await import("./text-coverage.js");
+  const input: TextCheckInput = {
     version: "0.1.0",
     coverage,
     diff,
@@ -55,7 +56,7 @@ async function runCheck(coverage: Coverage, diff: Diff) {
     threshold: 80,
     repoFiles: lines("test-files-deleted/files.txt"),
   };
-  const report = check(input as Parameters<typeof check>[0]);
+  const report = check(input);
   expectValidReport(report);
   return report;
 }

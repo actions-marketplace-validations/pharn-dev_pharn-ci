@@ -1,24 +1,19 @@
-import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { Report } from "@pharn-ci/core";
 import { describe, expect, it } from "vitest";
 import { VERSION } from "../../core/src/version.js";
 import { expectValidReport } from "../../core/test/schema.js";
+import { requiredDeps, type StreamedFake } from "../../node-io/test/required-deps.js";
 
 // fix-hints (H6), AC-9. main(), the renderer and the core's fix table are loaded inside the test body: the AC test is
 // written before the build adds the `fix` objects and regenerates the golden report.json files. The CLI runs against
 // in-memory deps: a fake repo rooted at REPO_ROOT whose git returns the golden directory's diff and files list.
 
 const ROOT = fileURLToPath(new URL("../../../", import.meta.url));
-const BASE = "7d88076280ec86435c3f84ad3c6102e272ab64d5";
 const REPO_ROOT = "/home/runner/work/demo/demo";
-const git = (...args: string[]) =>
-  execFileSync("git", args, { cwd: ROOT, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
 const fixture = (path: string) => readFileSync(`${ROOT}fixtures/${path}`, "utf8");
-
-type Fix = { kind: string; target?: string; hint: string };
-type Report = { tool: { name: string; version: string }; messages: { code: string; fix?: Fix }[] };
 
 async function runCli(dir: string, argv: string[], files: Record<string, string>) {
   const { main } = await import("../src/main.js");
@@ -27,8 +22,11 @@ async function runCli(dir: string, argv: string[], files: Record<string, string>
   const at = new Map(Object.entries(files).map(([path, text]) => [resolve(REPO_ROOT, path), text]));
   const tracked = fixture(`${dir}/files.txt`).trim().split("\n");
   const deps = {
+    ...requiredDeps((): StreamedFake => deps),
     cwd: REPO_ROOT,
     git: async (args: string[]) => {
+      // No history (CORE-143): the run's revisions stay unresolved, so no test file is read from git.
+      if (args.includes("HEAD^{commit}")) throw new Error("fatal: no history in this fake");
       if (args[0] === "ls-files") return `${tracked.join("\0")}\0`;
       if (args[0] === "ls-tree") return "";
       if (args[0] === "diff") return fixture(`${dir}/pr.diff`);
@@ -80,10 +78,10 @@ const GOLDENS: Array<{ dir: string; argv: string[]; files: Record<string, string
 ];
 
 describe("the goldens with fix hints", { timeout: 120_000 }, () => {
-  it("AC-9: pharn-ci check --format json on each golden fixture equals its regenerated report.json, every message carries fix, and every golden markdown is byte-identical to the base commit", async () => {
-    const core = (await import("@pharn-ci/core")) as unknown as {
-      renderMarkdown(report: unknown): string;
-      MESSAGE_FIXES?: Record<string, { kind: string; hint: string }>;
+  it("AC-9: pharn-ci check --format json on each golden fixture equals its regenerated report.json, every message carries fix, and the rendered report equals each golden markdown", async () => {
+    const core = {
+      ...(await import("../../core/src/fix/table.js")),
+      ...(await import("../../core/src/render/markdown.js")),
     };
     const messages: Array<[string, Report["messages"][number]]> = [];
     for (const { dir, argv, files } of GOLDENS) {
@@ -98,24 +96,12 @@ describe("the goldens with fix hints", { timeout: 120_000 }, () => {
 
       for (const message of report.messages) messages.push([dir, message]);
 
-      // The comment is unchanged: the rendered report equals the golden markdown at the base commit, byte for byte.
+      // The comment: the rendered report equals the committed golden markdown, byte for byte. (CORE-132: it was
+      // compared with the golden markdown at an old commit, a history pin, and every .md under fixtures/ with its copy
+      // there; both are removed.)
       const rendered = core.renderMarkdown({ ...report, tool: { ...report.tool, version: "0.1.0" } });
-      expect(rendered, `${dir}/report.md`).toBe(git("show", `${BASE}:fixtures/${dir}/report.md`));
-      expect(fixture(`${dir}/report.md`), `${dir}/report.md on disk`).toBe(
-        git("show", `${BASE}:fixtures/${dir}/report.md`),
-      );
+      expect(rendered, `${dir}/report.md`).toBe(fixture(`${dir}/report.md`));
     }
-    // No rendered golden anywhere under fixtures/ changed.
-    // Re-pinned for CORE-53: PYTEST-OUTCOMES.md, a hand-written note added (never modified) beside the
-    // python-switch-off cases, is not a rendered golden; every other .md under fixtures/ is still checked.
-    const added = git("diff", "--name-only", "--diff-filter=A", BASE, "--", "fixtures/").split("\n");
-    const changed = git("diff", "--name-only", BASE, "--", "fixtures/")
-      .split("\n")
-      .filter((path) => path.endsWith(".md"))
-      .filter(
-        (path) => !(path === "fixtures/test-integrity/python-switch-off/PYTEST-OUTCOMES.md" && added.includes(path)),
-      );
-    expect(changed).toEqual([]);
 
     // Every message of the CLI's JSON carries the table's fix.
     expect(messages.length, "the goldens have messages").toBeGreaterThan(0);

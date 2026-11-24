@@ -1,14 +1,13 @@
 import { describe, expect, it } from "vitest";
+import type { ResolvedPolicy } from "../src/policy/resolved.js";
+import type { PolicyDocument } from "../src/policy/types.js";
+import type { Report } from "../src/report.js";
 import { fixture } from "./helpers.js";
 import { expectValidReport } from "./schema.js";
-import { withoutFix } from "./v090-codes.js";
+import { withoutFix } from "./without-fix.js";
 
 // E3 item 23 (policy settings), AC-14. check() is loaded inside the test body: the AC test is written before the build
 // adds the settings rules, so nothing the build adds may run while this file loads.
-
-type Violation = { id: string; severity: string; path: string | null; line: number | null; detail: string };
-type Message = { level: string; code: string; text: string };
-type Report = { verdict: string; messages: Message[]; policy?: { violations: Violation[] } };
 
 const REPO_ROOT = "/home/runner/work/demo/demo";
 const REASON = "the checkout is not the pull request head";
@@ -27,8 +26,8 @@ const DIFF = [
 const SETUP = { forbidden_permissions: ["Bash(curl:*)"], required_hooks: [{ event: "Stop" }] };
 const FORBID_ONLY = { forbidden_permissions: ["Bash(curl:*)"] };
 
-async function run(policy: unknown): Promise<Report> {
-  const { check } = await import("@pharn-ci/core");
+async function run(policy: ResolvedPolicy): Promise<Report> {
+  const { check } = await import("./text-coverage.js");
   const report = check({
     version: "0.1.0",
     coverage: { text: fixture("golden/coverage.info"), format: "lcov" },
@@ -38,12 +37,17 @@ async function run(policy: unknown): Promise<Report> {
     repoFiles: ["AGENTS.md", "src/a.ts", ".claude/settings.json"],
     policy,
     policySettingsSources: { unavailable: REASON },
-  } as never);
+  });
   expectValidReport(report);
-  return report as unknown as Report;
+  return report;
 }
 
-const app = (document: unknown) => ({ source: "app", version: 3, fetchedAt: "2026-10-26T12:00:00.000Z", document });
+const app = (document: PolicyDocument): ResolvedPolicy => ({
+  source: "app",
+  version: 3,
+  fetchedAt: "2026-10-26T12:00:00.000Z",
+  document,
+});
 
 describe("POLICY_SETTINGS_INVALID: the files were not read", { timeout: 60_000 }, () => {
   it("AC-14: unavailable sources give no P02–P06 violation, one message naming the reason (warn; error for a required app policy or a rule P02–P06 whose list the policy sets at block), and P09 keeps item 22's warn", async () => {
@@ -51,7 +55,7 @@ describe("POLICY_SETTINGS_INVALID: the files were not read", { timeout: 60_000 }
     // holds it) are now an error when the files were not read; these rows said warn, which let a shallow checkout pass
     // a blocking P02 unchecked. The rows that turn P06 down keep their point with P02 turned down as well. A policy
     // with no list keeps the warn (policy-settings-unavailable-lists.test.ts; it has no P09 row to give here).
-    const cases: [label: string, policy: unknown, level: string][] = [
+    const cases: [label: string, policy: ResolvedPolicy, level: string][] = [
       [
         "file policy",
         { source: "file", version: null, path: "policy/org.json", document: { version: 1, setup: FORBID_ONLY } },

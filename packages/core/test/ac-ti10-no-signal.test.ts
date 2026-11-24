@@ -47,7 +47,7 @@ function deleteFile(path: string, lines: string[]): string {
 }
 
 async function run(diff: string) {
-  const { check } = await import("../src/check.js");
+  const { check } = await import("./text-coverage.js");
   const report = check({
     version: "0.1.0",
     coverage: { text: fixture("test-files-deleted/coverage.info"), format: "lcov" },
@@ -56,7 +56,7 @@ async function run(diff: string) {
     threshold: 80,
     repoFiles: REPO_FILES,
     testIntegrityMode: { input: "block" },
-  } as Parameters<typeof check>[0]);
+  });
   expectValidReport(report);
   return report;
 }

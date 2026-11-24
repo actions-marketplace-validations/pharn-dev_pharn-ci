@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import type { Report } from "@pharn-ci/core";
 import { describe, expect, it } from "vitest";
 import { expectValidReport } from "../../core/test/schema.js";
 import { harness } from "./harness.js";
@@ -33,7 +34,6 @@ const META_CONTEXT = {
   },
 };
 
-type Report = { verdict: string; messages: Array<{ code: string }>; meta?: Record<string, unknown> };
 type Answer = () => Response;
 interface Call {
   method: string;
@@ -66,7 +66,13 @@ function fakeApp(answers: { policy?: Answer; uploadUrl?: Answer }) {
     if (method === "PUT") return respond(200)();
     if (method === "GET" && url.startsWith(`${APP}/api/v1/policy?`) && answers.policy) return answers.policy();
     if (method === "POST" && url === `${APP}/api/v1/runs/upload-url`) return (answers.uploadUrl ?? UPLOAD_URL_OK)();
-    if (method === "POST" && url === `${APP}/api/v1/runs`) return respond(201, JSON.stringify({ url: RUN_URL }))();
+    // The app answers with the comment it posted (CORE-119), so an uploaded run carries no comment of pharn-ci's.
+    if (method === "POST" && url === `${APP}/api/v1/runs`) {
+      return respond(
+        201,
+        JSON.stringify({ url: RUN_URL, commentUrl: "https://github.com/acme/widgets/pull/7#issuecomment-77" }),
+      )();
+    }
     throw new TypeError("fetch failed");
   };
   return { fetch, calls };

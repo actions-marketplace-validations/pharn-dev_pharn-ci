@@ -2,28 +2,21 @@ import {
   byCodeUnit,
   type DiffFile,
   decodeTestSourceText,
-  isUnsafeTestSourcePath,
-  MAX_TIMESTAMP_FILES,
   type StaleInstructionSources,
   scanAgentSetup,
   staleInstructionPaths,
-  staleTimestampPaths,
 } from "@pharn-ci/core";
 import { readAgentConfigSources } from "./agentConfigSources.js";
-import { batchCheck, batchRead, type GitBatchDeps, OBJECT_ID } from "./gitBlobs.js";
+import { batchCheck, batchRead, type GitBatchDeps } from "./gitBlobs.js";
+import type { RunRevisions } from "./revisions.js";
 
-/** The git calls the stale-instruction reader makes: blobs by `cat-file`, and `git log` for SI04's commit times. */
-export interface StaleInstructionGitDeps extends GitBatchDeps {
-  /** Absent: SI04's commit times are not read, so SI04 does not run. */
-  git?(args: string[]): Promise<string>;
-}
+/** The git call the stale-instruction reader makes: blobs by `cat-file` (the merge base comes from the run's revisions). */
+export type StaleInstructionGitDeps = GitBatchDeps;
 
 /** The largest root package.json or Makefile that is read; a larger one counts as unreadable. */
 const MAX_MANIFEST_BYTES = 512 * 1024;
 /** The root manifests SI01 compares commands with. */
 const MANIFESTS = ["package.json", "Makefile"] as const;
-/** A `git log --format=%ct` answer: seconds since the epoch. */
-const SECONDS = /^\d{1,12}$/;
 
 /**
  * The text of each `<rev>:<path>` blob, or null when it is absent, too large, not a blob or binary. One
@@ -49,17 +42,17 @@ async function readBlobs(
 }
 
 /**
- * What the stale-instruction signals (SI01 to SI04) read, or undefined when the repository has no instruction file:
+ * What the stale-instruction signals (SI01 to SI03) read, or undefined when the repository has no instruction file:
  * the instruction files at HEAD (the inventory's instruction kinds, at most 50, through `readAgentConfigSources` and its
- * caps), the root `package.json` and `Makefile` at HEAD and, when the change touches them and `base` is given, at the
- * merge base, and, with a `git` runner, the last commit time of the instruction files `staleTimestampPaths` names (at
- * most 20) and HEAD's. Every read is of committed objects, never the working tree. A failed manifest read leaves the
- * manifests out (no command is checked) and a failed `git log` leaves the times out (SI04 does not run); an unreadable
- * instruction set is returned as `{ unavailable }`, which core reads as nothing. Never throws.
+ * caps), and the root `package.json` and `Makefile` at HEAD and, when the change touches them and the run's `revisions`
+ * are given, at their merge base. Every read is of committed objects, never the working tree; no commit time is read
+ * (SI04, which needed `git log`, is not emitted since CORE-144). A failed manifest read leaves the manifests out (no
+ * command is checked); an unreadable instruction set is returned as `{ unavailable }`, which core reads as nothing.
+ * Never throws.
  */
 export async function readStaleInstructionSources(
   deps: StaleInstructionGitDeps,
-  options: { repoFiles: readonly string[]; diff: readonly DiffFile[]; base?: string },
+  options: { repoFiles: readonly string[]; diff: readonly DiffFile[]; revisions?: RunRevisions | undefined },
 ): Promise<StaleInstructionSources | undefined> {
   const agentSetup = scanAgentSetup(options.repoFiles);
   const paths = staleInstructionPaths(agentSetup);
@@ -71,12 +64,14 @@ export async function readStaleInstructionSources(
   const tracked = new Set(options.repoFiles);
   const touched = (path: string) => options.diff.some((file) => file.path === path || file.oldPath === path);
   try {
-    // The base side is read at the merge base of `base` and HEAD, as the diff is, and only for a touched manifest.
+    // The base side is read at the merge base of the base and HEAD, as the diff is, and only for a touched manifest.
     let mergeBase: string | null = null;
-    const { base } = options;
-    if (base !== undefined && !base.startsWith("-") && deps.git !== undefined && MANIFESTS.some(touched)) {
-      const out = (await deps.git(["merge-base", base, "HEAD"])).trim();
-      if (OBJECT_ID.test(out)) mergeBase = out;
+    const { revisions } = options;
+    if (revisions !== undefined && !revisions.base.startsWith("-") && MANIFESTS.some(touched)) {
+      const resolved = await revisions.resolve();
+      // Not found: the manifests are left out, as for any failed read.
+      if ("unresolved" in resolved) throw new Error(resolved.unresolved);
+      mergeBase = resolved.mergeBase;
     }
     const requests: { rev: string; path: string; side: "head" | "base"; manifest: (typeof MANIFESTS)[number] }[] = [];
     for (const manifest of MANIFESTS) {
@@ -97,28 +92,6 @@ export async function readStaleInstructionSources(
     sources.makefile = sides.Makefile;
   } catch {
     // The manifests could not be read: no command is checked.
-  }
-
-  if (deps.git !== undefined) {
-    const timed = staleTimestampPaths({ instructions, diff: options.diff, repoFiles: options.repoFiles, agentSetup })
-      .filter((path) => !isUnsafeTestSourcePath(path))
-      .slice(0, MAX_TIMESTAMP_FILES);
-    if (timed.length > 0) {
-      try {
-        const head = (await deps.git(["log", "-1", "--format=%ct", "HEAD"])).trim();
-        if (SECONDS.test(head)) {
-          const files: { path: string; time: number }[] = [];
-          for (const path of timed) {
-            // `:(top,literal)` names the path from the repository root, with no glob characters.
-            const out = (await deps.git(["log", "-1", "--format=%ct", "HEAD", "--", `:(top,literal)${path}`])).trim();
-            if (SECONDS.test(out)) files.push({ path, time: Number(out) });
-          }
-          sources.commitTimes = { head: Number(head), files };
-        }
-      } catch {
-        // git log failed: SI04 does not run.
-      }
-    }
   }
   return sources;
 }

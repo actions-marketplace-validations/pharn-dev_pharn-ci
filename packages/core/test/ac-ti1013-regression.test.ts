@@ -1,9 +1,10 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
+import type { Report } from "../src/report.js";
 import { withCore95Ti14Before } from "./core95-ti14.js";
 import { fixture } from "./helpers.js";
 import { expectValidReport } from "./schema.js";
-import { withoutFix } from "./v090-codes.js";
+import { withoutFix } from "./without-fix.js";
 
 // check() is loaded inside the test body: the AC tests are written before TI10 and TI13 exist, so nothing the build
 // adds may run while the file loads.
@@ -122,7 +123,7 @@ const TI03_ADDS_BEFORE = "A skip was added to a test that this change adds, so n
 const asBefore = (json: string) => json.split(TI03_ADDS_NOW).join(TI03_ADDS_BEFORE);
 
 async function run(diff: string, exclude: string[] = [], files = "test-files-deleted/files.txt") {
-  const { check } = await import("../src/check.js");
+  const { check } = await import("./text-coverage.js");
   const report = check({
     version: "0.1.0",
     coverage: { text: fixture("test-files-deleted/coverage.info"), format: "lcov" },
@@ -132,12 +133,10 @@ async function run(diff: string, exclude: string[] = [], files = "test-files-del
     repoFiles: fixture(files).trim().split("\n"),
     exclude,
     testIntegrityMode: { input: "block" },
-  } as Parameters<typeof check>[0]);
+  });
   expectValidReport(report);
   return report;
 }
-
-type Report = Awaited<ReturnType<typeof run>>;
 
 const earlierSignals = (report: Report) =>
   report.testIntegrity.signals.filter((signal) => EARLIER.includes(String(signal.id)));

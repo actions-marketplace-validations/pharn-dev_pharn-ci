@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
+import type { Message, Report } from "../src/report.js";
 import { fixture } from "./helpers.js";
 import { expectValidReport } from "./schema.js";
+import type { TextCheckInput } from "./text-coverage.js";
 
 // check() and the fixtures are loaded inside the test body: the AC tests are written before setup.expect and
 // fixtures/setup-expect/ exist, so nothing that depends on them may run while the file loads.
@@ -9,14 +11,11 @@ const REPO_ROOT = "/home/runner/work/demo/demo";
 
 const lines = (path: string) => fixture(path).trim().split("\n");
 
-type Message = { level: string; code: string; text: string };
-type Report = { verdict: string; agentSetup: { missing?: unknown }; messages: Message[] };
-
 type Path = "normal" | "coverage missing" | "diff unavailable";
 
 async function runCheck(path: Path, requireAgentSetup: boolean): Promise<Report> {
-  const { check } = await import("../src/check.js");
-  const input = {
+  const { check } = await import("./text-coverage.js");
+  const input: TextCheckInput = {
     version: "0.1.0",
     coverage:
       path === "coverage missing"
@@ -32,7 +31,7 @@ async function runCheck(path: Path, requireAgentSetup: boolean): Promise<Report>
     requireAgentSetup,
     expectAgentSetup: ["cursor", "claude-code"],
   };
-  return check(input as Parameters<typeof check>[0]) as unknown as Report;
+  return check(input);
 }
 
 const SETUP_CODES = new Set(["NO_AGENT_SETUP_FILES", "AGENT_SETUP_EXPECTED_MISSING"]);

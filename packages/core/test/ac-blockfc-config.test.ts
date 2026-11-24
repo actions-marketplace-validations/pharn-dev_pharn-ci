@@ -8,16 +8,6 @@ import { expectValidReport } from "./schema.js";
 
 const CODE = "TEST_INTEGRITY_INDEX_UNAVAILABLE";
 
-interface Message {
-  code: string;
-  level: string;
-  text: string;
-}
-interface Report {
-  verdict: string;
-  messages: Message[];
-}
-
 /** A `--unified=0` diff that changes one line of the dedicated test-runner config `vitest.config.ts`. */
 const MODIFIES_CONFIG = `${[
   "diff --git a/vitest.config.ts b/vitest.config.ts",
@@ -31,7 +21,8 @@ const MODIFIES_CONFIG = `${[
 
 describe("block mode with test sources unavailable and a touched test-runner config", () => {
   it("AC-6: a diff that modifies vitest.config.ts gives TEST_INTEGRITY_INDEX_UNAVAILABLE at level error and verdict fail", async () => {
-    const { check, unavailableTestSources } = await import("@pharn-ci/core");
+    const { unavailableTestSources } = await import("@pharn-ci/core");
+    const { check } = await import("./text-coverage.js");
     const report = check({
       version: "0.1.0",
       coverage: { text: fixture("test-files-deleted/coverage.info"), format: "lcov" },
@@ -41,7 +32,7 @@ describe("block mode with test sources unavailable and a touched test-runner con
       repoFiles: ["src/app.ts", "vitest.config.ts"],
       testIntegrityMode: { input: "block" },
       testSources: unavailableTestSources("the base commit is not in the checkout"),
-    } as unknown as Parameters<typeof check>[0]) as unknown as Report;
+    });
     expectValidReport(report);
 
     const unavailable = report.messages.filter((m) => m.code === CODE);

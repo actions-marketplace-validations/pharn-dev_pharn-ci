@@ -1,3 +1,4 @@
+import type { Report } from "@pharn-ci/core";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { expectValidReport } from "../../core/test/schema.js";
 import { APP_RETRY_WAIT_MS, APP_TIMEOUT_MS } from "../src/app-client.js";
@@ -23,6 +24,7 @@ const TOKEN = ["oidc", "MED", "c0de", "7788"].join("-");
 const START = new Date("2026-11-03T09:00:00.000Z").getTime();
 const SIGNED = `https://${["bkt-m7", "blob-store", "example"].join(".")}/o/acme/m7-run.tgz?X-Sig=Zq8w2Lp0`;
 const RUN_URL = `${APP}/acme/widgets/runs/9-1`;
+const APP_COMMENT = "https://github.com/acme/widgets/pull/7#issuecomment-77";
 const UPLOAD_URL_OK = {
   uploadUrl: SIGNED,
   objectKey: "runs/acme/widgets/9-1.tar.gz",
@@ -47,12 +49,6 @@ const META_CONTEXT = {
   },
 };
 
-type Report = { verdict: string; messages: unknown[]; meta?: Record<string, unknown> };
-interface Outcome {
-  status: string;
-  reason?: string;
-  runUrl?: string;
-}
 type Kind = "upload-url" | "put" | "runs" | "other";
 
 /** How the fake app answers one request, given the timeout its attempt was started with. */
@@ -90,7 +86,10 @@ function recorder(behaviours: Partial<Record<Exclude<Kind, "other">, readonly Be
   const lists: Record<Exclude<Kind, "other">, readonly Behaviour[]> = {
     "upload-url": behaviours["upload-url"] ?? [{ kind: "answer", status: 200, body: UPLOAD_URL_OK, after: 0 }],
     put: behaviours.put ?? [{ kind: "answer", status: 200, after: 0 }],
-    runs: behaviours.runs ?? [{ kind: "answer", status: 201, body: { url: RUN_URL }, after: 0 }],
+    // The app answers with the comment it posted, so an ok upload means the App commented (CORE-119).
+    runs: behaviours.runs ?? [
+      { kind: "answer", status: 201, body: { url: RUN_URL, commentUrl: APP_COMMENT }, after: 0 },
+    ],
   };
   const counts = { "upload-url": 0, put: 0, runs: 0 };
   const r: Recorder = {
@@ -215,9 +214,7 @@ async function directUpload(
   behaviours: Partial<Record<Exclude<Kind, "other">, readonly Behaviour[]>>,
   extra: { uploadDeadlineMs?: number } = {},
 ) {
-  const { runUpload } = (await import("../src/upload.js")) as unknown as {
-    runUpload(deps: unknown, input: unknown): Promise<Outcome>;
-  };
+  const { runUpload } = await import("../src/upload.js");
   const report = await metaReport();
   const app = recorder(behaviours);
   const warnings: string[] = [];
@@ -347,7 +344,7 @@ describe("review finding 8: the upload has one overall deadline", { timeout: 120
   });
 
   it("the policy fetch, which passes no deadline, keeps its retry and its per-attempt timeout", async () => {
-    const { fetchPolicy } = await import("../src/policy-fetch.js");
+    const { fetchAppPolicy } = await import("../src/policy-fetch.js");
     const { appRequest } = await import("../src/app-client.js");
     const app = recorder();
     let policyCalls = 0;
@@ -369,7 +366,7 @@ describe("review finding 8: the upload has one overall deadline", { timeout: 120
       warning: () => {},
       timeoutMs: undefined,
     };
-    const policy = await fetchPolicy(deps as never, {
+    const { policy } = await fetchAppPolicy(deps as never, {
       mode: "auto",
       origin: new URL(APP),
       repository: "acme/widgets",

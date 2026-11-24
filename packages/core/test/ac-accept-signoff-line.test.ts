@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { Report } from "../src/report.js";
 import { fixture } from "./helpers.js";
 import { expectValidReport } from "./schema.js";
 
@@ -10,7 +11,7 @@ const HEADING = "### 🔍 Test integrity";
 
 /** A report with warn TI10 and TI13 signals and their warn messages, and the given `testIntegrity.accepted`. */
 async function reportWith(accepted: { label: string; by: string } | null) {
-  const { check } = await import("@pharn-ci/core");
+  const { check } = await import("./text-coverage.js");
   const base = check({
     version: "0.1.0",
     coverage: { text: fixture("golden/coverage.info"), format: "lcov" },
@@ -19,8 +20,8 @@ async function reportWith(accepted: { label: string; by: string } | null) {
     threshold: 80,
     repoFiles: fixture("golden/files.txt").trim().split("\n"),
     testIntegrityMode: { input: "block" },
-  } as Parameters<typeof check>[0]);
-  const report = {
+  });
+  const report: Report = {
     ...base,
     messages: [
       ...base.messages,
@@ -36,7 +37,7 @@ async function reportWith(accepted: { label: string; by: string } | null) {
       ],
       accepted,
     },
-  } as unknown as typeof base;
+  };
   expectValidReport(report);
   return report;
 }

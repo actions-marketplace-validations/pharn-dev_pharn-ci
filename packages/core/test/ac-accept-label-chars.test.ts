@@ -46,7 +46,7 @@ describe("label names compared as GitHub compares them", () => {
 
 describe("the renderer", () => {
   it("replaces bidirectional overrides and zero-width characters in a path with U+FFFD", async () => {
-    const { check } = await import("../src/check.js");
+    const { check } = await import("./text-coverage.js");
     const base = check({
       version: "0.2.0",
       coverage: { text: fixture("golden/coverage.info"), format: "lcov" },
@@ -54,7 +54,7 @@ describe("the renderer", () => {
       repoRoot: "/home/runner/work/demo/demo",
       threshold: 80,
       repoFiles: fixture("golden/files.txt").trim().split("\n"),
-    } as Parameters<typeof check>[0]);
+    });
     const report = {
       ...base,
       testIntegrity: {

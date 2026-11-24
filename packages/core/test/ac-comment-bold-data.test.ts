@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { fixture } from "./helpers.js";
 import { expectValidReport } from "./schema.js";
-import { withoutFix } from "./v090-codes.js";
+import { withoutFix } from "./without-fix.js";
 
 // pr-comment-bold-look AC-7. check() and the renderer are loaded inside the test body: the AC tests are written before
 // the build, so nothing the build changes may run while the file loads.
@@ -36,9 +36,10 @@ function asV1File(json: string): string {
  */
 const GOLDEN_MESSAGE_LINES = [
   "- ❌ `DIFF_COVERAGE_BELOW_THRESHOLD` Diff coverage 71.43% is below the threshold of 80%.",
-  "  - Hint: Add tests that exercise the uncovered lines listed in the table above.",
+  // CORE-140: the hint lines are each code's fix.hint. CORE-14 follow-up: the fix hint names `coverage.root` again.
+  "  - Hint: Add tests that run the changed lines listed in the report.",
   "- ℹ️ `COVERAGE_PATHS_PARTIALLY_UNMATCHED` 1 file path in the coverage report is not a tracked file in the repository; its coverage is not used.",
-  "  - Hint: Nothing to do if those files are generated or outside the repo; if changed files are missing from the table, check the coverage root.",
+  "  - Hint: Check that the coverage paths start at the repository root or at `coverage.root`, so every changed file is matched; generated files and files outside the repository need nothing.",
 ];
 
 /** The non-empty lines of the Messages section: from its heading to the next heading. */
@@ -51,7 +52,7 @@ function messageLines(lines: readonly string[]): string[] {
 
 describe("check() and renderMarkdown(): report data and message text unchanged", () => {
   it("AC-7: the golden report equals the committed report.json, and the Messages section carries the committed message and hint lines", async () => {
-    const { check } = await import("../src/check.js");
+    const { check } = await import("./text-coverage.js");
     const { renderMarkdown } = await import("../src/render/markdown.js");
 
     const committed = fixture("golden/report.json");

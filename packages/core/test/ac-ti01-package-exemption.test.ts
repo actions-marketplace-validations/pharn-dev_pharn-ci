@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
+import type { Report } from "../src/report.js";
 import { fixture } from "./helpers.js";
 import { expectValidReport } from "./schema.js";
+import type { TextCheckInput } from "./text-coverage.js";
 
 // check() and the case fixtures are loaded inside each test body: these AC tests are written before the build writes
 // the case directories under fixtures/test-integrity/TI01/, so nothing that depends on them may run while the file
@@ -16,8 +18,8 @@ const SAME_STEM_DETAIL = "Test file deleted together with a source file of the s
 type Mode = "block" | "warn";
 
 async function runCase(caseDir: string, mode: Mode) {
-  const { check } = await import("../src/check.js");
-  const input = {
+  const { check } = await import("./text-coverage.js");
+  const input: TextCheckInput = {
     version: "0.1.0",
     repoRoot: REPO_ROOT,
     threshold: 80,
@@ -29,12 +31,10 @@ async function runCase(caseDir: string, mode: Mode) {
       .filter((line) => line !== ""),
     testIntegrityMode: { input: mode },
   };
-  const report = check(input as Parameters<typeof check>[0]);
+  const report = check(input);
   expectValidReport(report);
   return report;
 }
-
-type Report = Awaited<ReturnType<typeof runCase>>;
 
 const ti01 = (report: Report) => report.testIntegrity.signals.filter((s) => s.id === "TI01");
 

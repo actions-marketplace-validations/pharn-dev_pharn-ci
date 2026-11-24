@@ -1,11 +1,13 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { check } from "../src/check.js";
 import { indexTestFile } from "../src/testIndex/indexTestFile.js";
+import type { PythonTestIndex } from "../src/testIndex/pythonSides.js";
+import type { TestSourceSide as Side, TestSourceFile as SourceFile, TestSourceDropReason } from "../src/testSources.js";
 import { FIXTURES, fixture } from "./helpers.js";
 import { expectValidReport } from "./schema.js";
-import { withoutFix } from "./v090-codes.js";
+import { check } from "./text-coverage.js";
+import { withoutFix } from "./without-fix.js";
 
 // fix/unparsed-added-test-file: an added test file whose head side cannot be indexed (refused by the test index, dropped,
 // missing, no Python index) used to be dropped with no trace, so nothing that reads the added files checked its tests
@@ -19,11 +21,6 @@ const DIR = `${FIXTURES}test-integrity/index-unavailable`;
 const CODE = "TEST_INTEGRITY_INDEX_UNAVAILABLE";
 
 type Mode = "block" | "warn" | "off";
-interface SourceFile {
-  path: string;
-  text: string;
-}
-type Side = { files: SourceFile[]; dropped: { path: string; reason: string }[] } | { unavailable: string };
 
 /** The `<logical path>.txt` files under one side of a fixture case. */
 function sideFiles(dir: string): SourceFile[] {
@@ -41,7 +38,7 @@ function sideFiles(dir: string): SourceFile[] {
 
 const diffOf = (name: string) => readFileSync(join(DIR, name, "change.diff"), "utf8");
 /** The kept files of one side of a case, less the paths given (they are dropped in the test). */
-const side = (name: string, which: "base" | "head", drop: Record<string, string> = {}): Side => ({
+const side = (name: string, which: "base" | "head", drop: Record<string, TestSourceDropReason> = {}): Side => ({
   files: sideFiles(join(DIR, name, which)).filter((file) => drop[file.path] === undefined),
   dropped: Object.entries(drop)
     .map(([path, reason]) => ({ path, reason }))
@@ -54,7 +51,14 @@ const diffWithout = (text: string, without: string[]) =>
     .filter((section) => !without.some((path) => section.startsWith(`diff --git a/${path} b/${path}\n`)))
     .join("");
 
-function run(input: { diff: string; base: Side; head: Side; mode: Mode; index?: unknown; repoFiles?: string[] }) {
+function run(input: {
+  diff: string;
+  base: Side;
+  head: Side;
+  mode: Mode;
+  index?: PythonTestIndex | undefined;
+  repoFiles?: string[];
+}) {
   const report = check({
     version: "0.1.0",
     coverage: { text: fixture("test-files-deleted/coverage.info"), format: "lcov" },
@@ -65,7 +69,7 @@ function run(input: { diff: string; base: Side; head: Side; mode: Mode; index?: 
     testIntegrityMode: { input: input.mode },
     testSources: { base: input.base, head: input.head },
     ...(input.index === undefined ? {} : { pythonTestIndex: input.index }),
-  } as Parameters<typeof check>[0]);
+  });
   expectValidReport(report);
   // fix-hints (H6): every message now carries a `fix`; the pinned literals are unchanged, so they are read without it.
   return { report, messages: withoutFix(report.messages.filter((message) => message.code === CODE)) };
@@ -163,12 +167,14 @@ describe("TEST_INTEGRITY_INDEX_UNAVAILABLE names an added test file whose tests 
     expect(messages[0]?.text.startsWith(`${COMPARED("`src/a.test.ts` (`too-large`)")} `)).toBe(true);
   });
 
+  // CORE-351: a Python run that gave no index fails an added .py file closed in mode block (an error); with no index
+  // passed at all it stays a warning.
   it.each([
-    ["no Python index", undefined, "python-not-found"],
-    ["a Python run that timed out", { available: false, reason: "timeout" }, "timeout"],
+    ["no Python index", undefined, "python-not-found", "warn"],
+    ["a Python run that timed out", { available: false, reason: "timeout" }, "timeout", "error"],
   ] as const)(
     "added-python with %s: the added .py file is named with the Python reason (nothing was said before)",
-    (_, index, reason) => {
+    (_, index, reason, level) => {
       const input = {
         diff: diffOf("added-python"),
         base: side("added-python", "base"),
@@ -178,7 +184,7 @@ describe("TEST_INTEGRITY_INDEX_UNAVAILABLE names an added test file whose tests 
       };
       const { messages } = run({ ...input, mode: "block" });
       expect(messages.map((message) => [message.level, message.text])).toEqual([
-        ["warn", ADDED(`\`tests/test_new.py\` (\`${reason}\`)`)],
+        [level, ADDED(`\`tests/test_new.py\` (\`${reason}\`)`)],
       ]);
       expect(run({ ...input, mode: "off" }).messages, "mode off adds no message").toEqual([]);
     },
@@ -261,7 +267,9 @@ describe("TEST_INTEGRITY_INDEX_UNAVAILABLE names an added test file whose tests 
           mode,
         });
         expect(messages, `${name} ${mode}`).toEqual([]);
-        expect(report.status).not.toBe("fail");
+        // The report verdict is fail here for a reason of its own (the shared coverage fixture names no tracked file:
+        // COVERAGE_PATHS_UNMATCHED); the unreadable sides add no test-integrity failure.
+        expect(report.testIntegrity.verdict, `${name} ${mode}`).not.toBe("fail");
       }
     }
   });

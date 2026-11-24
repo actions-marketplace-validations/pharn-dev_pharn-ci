@@ -4,17 +4,11 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import type { DiffFile } from "../src/diff/unified.js";
-import {
-  type CheckInput,
-  check,
-  detectStaleInstructions,
-  type StaleInstructionSources,
-  scanAgentSetup,
-  staleInstructionPaths,
-} from "../src/index.js";
+import { type StaleInstructionSources, scanAgentSetup, staleInstructionPaths } from "../src/index.js";
+import { detectStaleInstructions } from "../src/setup/stale.js";
 import { fixture } from "./helpers.js";
 import { expectValidReport } from "./schema.js";
-import { withoutFix } from "./v090-codes.js";
+import { type TextCheckInput as CheckInput, check } from "./text-coverage.js";
 
 // Stale instructions (Horizon 2 item H3) through check(): the report's setupHealth object and SETUP_STALE_* messages,
 // validated against schema/report.v2.json; nothing without a diff or without the sources.
@@ -86,21 +80,8 @@ describe("check() and stale instructions", () => {
     expect(stale[0]?.text).toContain("`CLAUDE.md:4`, `CLAUDE.md:5`, `CLAUDE.md:6`, `CLAUDE.md:7`, `CLAUDE.md:8`.");
   });
 
-  it("SI04 alone is info, so the verdict stays pass", () => {
-    const sources: StaleInstructionSources = {
-      ...SOURCES,
-      commitTimes: { head: 2_000_000_000, files: [{ path: "AGENTS.md", time: 1_000_000_000 }] },
-    };
-    const report = check(input({ parsed: [modified("src/index.ts")] }, sources));
-    expectValidReport(report);
-    // fix-hints (H6): every finding now carries a `fix`; the pinned literal is unchanged, so it is read without it.
-    expect(withoutFix(report.setupHealth?.stale)).toEqual([
-      { id: "SI04", path: "AGENTS.md", line: 1, kind: "path", token: "src/index.ts" },
-    ]);
-    expect(report.messages.filter((m) => m.code.startsWith("SETUP_STALE_")).map((m) => m.level)).toEqual(["info"]);
-    expect(report.verdict).toBe("pass");
-  });
-
+  // CORE-144 (decision Q6): the "SI04 alone is info" case, which fix-hints (H6) had re-pinned to read its findings
+  // without their `fix`, went with SI04; core144-not-emitted.test.ts asserts SI04 gives no finding now.
   it("must not trigger: without a diff, without the sources, or with an untouched file and nothing removed, the report is the one it was", () => {
     const touched: DiffFile[] = [modified("src/index.ts"), modified("CLAUDE.md")];
     const plain = check(input({ parsed: touched }));

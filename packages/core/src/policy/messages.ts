@@ -1,6 +1,7 @@
 import type { AgentPrIncomplete } from "../agents.js";
-import { formatNumber, type Message } from "../report.js";
-import { byCodeUnit } from "../text.js";
+import { codeSpan, formatNumber, type Message } from "../report.js";
+import { byCodeUnit, cutCodeUnits } from "../text.js";
+import { UNKNOWN_NAME_MAX_UNITS, UNKNOWN_NAMES_KEPT, type UnknownNames } from "./errors.js";
 import type { IgnoredSetting, ResolvedPolicy } from "./resolved.js";
 
 /** The most settings POLICY_OVERRIDE_IGNORED names; the rest are counted. */
@@ -23,6 +24,25 @@ export function policyUnavailableMessage(unavailable: NonNullable<ResolvedPolicy
 }
 
 /**
+ * The POLICY_KEYS_UNKNOWN message: the app served keys or ids this build does not know (a newer signal, rule, envelope
+ * key or tool), so they were left out and the rest of the policy applies. One warning for the whole list. The names come
+ * from the network and are untrusted: each is cut to 64 code units, then quoted as a code span (`codeSpan`: control,
+ * invisible and bidirectional characters become U+FFFD and backticks `'`); they are unique, sorted by code unit, at most
+ * 20 are named and the rest are counted.
+ */
+export function policyKeysUnknownMessage(unknown: UnknownNames): Message {
+  const unique = [...new Set(unknown.names.map((name) => cutCodeUnits(name, UNKNOWN_NAME_MAX_UNITS)))].sort(byCodeUnit);
+  const named = unique.slice(0, UNKNOWN_NAMES_KEPT).map(codeSpan);
+  const more = Math.max(unknown.total, unique.length) - named.length;
+  const list = more > 0 ? `${named.join(", ")}, and ${String(more)} more` : named.join(", ");
+  return {
+    level: "warn",
+    code: "POLICY_KEYS_UNKNOWN",
+    text: `The org policy holds keys this version of pharn-ci does not know, so they were skipped and the rest of the policy applies: ${list}. Update the pharn-ci pin to apply them.`,
+  };
+}
+
+/**
  * The AGENT_PR_DETECTION_INCOMPLETE message: the pull request counts as an agent PR because the detection could not
  * read all of its evidence, so the org policy's protected paths apply to it. A warning that names the reason as one
  * fixed word and nothing else.
@@ -36,25 +56,25 @@ export function agentPrIncompleteMessage(reason: AgentPrIncomplete): Message {
 }
 
 /**
- * The POLICY_OVERRIDE_IGNORED message: the settings of a layer that the policy's value beat, or that a policy file may
- * not set. One warning for the whole list, sorted by setting then layer in code-unit order, each setting and layer once,
- * at most 20 named and the rest counted. A threshold names both numbers; no pattern, root or label is ever named.
+ * The POLICY_OVERRIDE_IGNORED message: the settings that the policy's value beat, or that a policy file may not set. One
+ * warning for the whole list, sorted by setting in code-unit order, each setting once, at most 20 named and the rest
+ * counted. It names the setting and no layer (CORE-123). A threshold names both numbers; no pattern, root or label is
+ * ever named.
  */
 export function policyOverrideIgnoredMessage(ignored: readonly IgnoredSetting[]): Message {
   const seen = new Set<string>();
   const unique = ignored.filter((record) => {
-    const key = `${record.setting}\u0000${record.layer}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
+    if (seen.has(record.setting)) return false;
+    seen.add(record.setting);
     return true;
   });
-  unique.sort((a, b) => byCodeUnit(a.setting, b.setting) || byCodeUnit(a.layer, b.layer));
+  unique.sort((a, b) => byCodeUnit(a.setting, b.setting));
   const named = unique.slice(0, MAX_NAMED_SETTINGS).map((record) => {
     const numbers =
       record.given !== undefined && record.applied !== undefined
         ? ` ${formatNumber(record.given)} → ${formatNumber(record.applied)}`
         : "";
-    return `${record.setting} (${record.layer})${numbers}`;
+    return `${record.setting}${numbers}`;
   });
   const more = unique.length - MAX_NAMED_SETTINGS;
   const list = more > 0 ? `${named.join(", ")}, and ${String(more)} more` : named.join(", ");

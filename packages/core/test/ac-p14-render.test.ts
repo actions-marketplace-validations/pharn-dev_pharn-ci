@@ -1,24 +1,21 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import {
-  agentPolicyOf,
-  type Report as CoreReport,
-  detectAgentPr,
-  evaluatePolicyRules,
-  parseUnifiedDiff,
-  renderMarkdown,
-} from "../src/index.js";
+import { detectAgentPr, parseUnifiedDiff, renderMarkdown } from "../src/index.js";
+import { agentPolicyOf } from "../src/policy/agents.js";
+import { evaluatePolicyRules } from "../src/policy/rules/evaluate.js";
+import { codeRow } from "./codeTable.js";
 import { AGENT_FACTS, appPolicy, p14Messages, policyFixture, runP14 } from "./p14-run.js";
 import { purityViolations } from "./purity-check.js";
-import { V060_CODE_TEXT } from "./v060-codes.js";
 
 // Policy rule P14 (agent PR size cap): the PR comment's Policy section, the code in the report schema, and the purity
 // of the new module. (CORE-133: the README wording checks moved out; docs-contract.test.ts checks the README code row.)
 
 const ROOT = new URL("../../../", import.meta.url);
 const read = (path: string) => readFileSync(new URL(path, ROOT), "utf8");
+// CORE-140: the comment's hint is the code's fix.hint, the one advice text of POLICY_P14.
+// CORE-14 follow-up: the hint names the two caps and what does not count again.
 const HINT =
-  "Split the agent pull request into smaller ones, one per area named, or ask the policy owner to change `agents.max_files` or `agents.max_changed_lines`. Lockfiles, snapshots and `*.generated.*` files do not count.";
+  "Split the change into smaller pull requests within the org policy's size caps (`agents.max_files`, `agents.max_changed_lines`); lockfiles, snapshots and `*.generated.*` files do not count.";
 
 /** The lines of a `### ` section whose heading starts with `heading`, up to the next `### ` heading. */
 function section(md: string, heading: string): string[] {
@@ -32,7 +29,7 @@ function section(md: string, heading: string): string[] {
 describe("org policy rule P14 in the PR comment, the schema and the docs", () => {
   it("the Policy section lists each path-less P14 violation with the POLICY_P14 hint; the message is not repeated in Messages", () => {
     const report = runP14({ diff: "both/over-both.diff", policy: appPolicy(policyFixture("both/policy.json")) });
-    const markdown = renderMarkdown(report as unknown as CoreReport);
+    const markdown = renderMarkdown(report);
     const policy = section(markdown, "### 📜 Policy");
     const filesLine = policy.findIndex((l) => l.startsWith("- ❌ **P14** — agent PR changes 4 files (cap 3)"));
     expect(filesLine, "the files violation").toBeGreaterThanOrEqual(0);
@@ -68,13 +65,11 @@ describe("org policy rule P14 in the PR comment, the schema and the docs", () =>
     ]);
   });
 
-  it("schema/report.v2.json names POLICY_P14 among the codes added in v0.6.0, and schema/policy.v1.json describes the caps", () => {
-    const schema = JSON.parse(read("schema/report.v2.json"));
-    const description: string = schema.$defs.message.properties.code.description;
-    // Re-pinned when main (P14) was merged with policy-p13: the one v0.6.0 sentence lists POLICY_P13 first, then
-    // POLICY_P14 with P14's own words (v060-codes.ts pins the whole sentence).
-    expect(description).toContain(V060_CODE_TEXT);
-    expect(description).toContain(", POLICY_P14 (error, or the level the org policy sets for P14:");
+  it("the code table documents POLICY_P13 and POLICY_P14 with their levels, and schema/policy.v1.json describes the caps", () => {
+    // CORE-132: the byte-for-byte pin of the whole v0.6.0 sentence (v060-codes.ts, a history-pin helper) is removed.
+    // CORE-140: the schema's code description is one sentence and a link to the code table, so the rows are read.
+    expect(codeRow("POLICY_P13")).toContain("(`error`, or the level an app policy sets for P13)");
+    expect(codeRow("POLICY_P14")).toContain("(`error`, or the level the policy sets for P14)");
     const policySchema = JSON.parse(read("schema/policy.v1.json"));
     for (const key of ["max_files", "max_changed_lines"]) {
       const text: string = policySchema.properties.agents.properties[key].description;

@@ -1,19 +1,19 @@
 import { describe, expect, it } from "vitest";
+import type { PolicySettingsDrop } from "../src/policy/settings/types.js";
+import type { PolicyDocument } from "../src/policy/types.js";
+import type { Report, ReportPolicyViolation as Violation } from "../src/report.js";
 import { fixture } from "./helpers.js";
 import { expectValidReport } from "./schema.js";
-import { withoutFix } from "./v090-codes.js";
+import { withoutFix } from "./without-fix.js";
 
 // settings-unparseable-fails-closed (review A3-F2), AC-2 to AC-6. Each case under fixtures/policy-settings/unparseable/
 // holds policy.json, files.json (repo path → text file in the case directory) and edits.json (the repo paths the change
 // edits); the test builds one "modify" hunk per edited path. check() and every fixture are loaded inside the test body,
 // the test-first convention.
 
-type Violation = { id: string; severity: string; path: string | null; line: number | null; detail: string };
-type Message = { level: string; code: string; text: string };
-type Report = { verdict: string; messages: Message[]; policy?: { violations: Violation[] } };
-type Drop = { path: string; reason: string };
+type Drop = PolicySettingsDrop;
 type Case = {
-  document: unknown;
+  document: PolicyDocument;
   map: Record<string, string>;
   edits: string[];
   read: (file: string) => string;
@@ -49,7 +49,7 @@ function loadCase(name: string): Case {
 }
 
 async function run(c: Case, files: { path: string; text: string }[], dropped: Drop[] = []): Promise<Report> {
-  const { check } = await import("@pharn-ci/core");
+  const { check } = await import("./text-coverage.js");
   const report = check({
     version: "0.1.0",
     coverage: { text: fixture("golden/coverage.info"), format: "lcov" },
@@ -59,16 +59,16 @@ async function run(c: Case, files: { path: string; text: string }[], dropped: Dr
     repoFiles: [...new Set(["AGENTS.md", "policy/org.json", "src/a.ts", ...Object.keys(c.map), ...c.edits])],
     policy: { source: "file", version: null, path: "policy/org.json", document: c.document },
     policySettingsSources: { files, dropped },
-  } as never);
+  });
   expectValidReport(report);
-  return report as unknown as Report;
+  return report;
 }
 
 const textFiles = (c: Case) => Object.entries(c.map).map(([path, from]) => ({ path, text: c.read(from) }));
 // fix-hints (H6): every message and finding now carries a `fix`; the pinned literals are unchanged, so these read without it.
 const p09 = (report: Report) => withoutFix((report.policy?.violations ?? []).filter((v) => v.id === "P09"));
 const invalid = (report: Report) => withoutFix(report.messages.filter((m) => m.code === "POLICY_SETTINGS_INVALID"));
-const finding = (severity: string, path: string, detail: string): Violation => ({
+const finding = (severity: Violation["severity"], path: string, detail: string): Violation => ({
   id: "P09",
   severity,
   path,
@@ -152,13 +152,13 @@ describe("unparseable agent settings and MCP files fail closed under an org poli
     expect(p09(report).filter((v) => v.path === SETTINGS)).toEqual([]);
   });
 
-  it("AC-6: complies — unpadded compliant settings and MCP files raise no settings problem, and P09 says both edits comply", async () => {
+  // CORE-123 (R5.6): an edit of a compliant file was a P09 `info` entry ("it complies"); it is no entry now.
+  it("AC-6: complies — unpadded compliant settings and MCP files raise no settings problem, and P09 gives no entry for either edit", async () => {
     const c = loadCase("complies");
     expect(new Set(c.edits)).toEqual(new Set([SETTINGS, MCP]));
     const report = await run(c, textFiles(c));
     expect(invalid(report)).toEqual([]);
-    const found = p09(report);
-    expect(found).toContainEqual(finding("info", SETTINGS, COMPLIES));
-    expect(found).toContainEqual(finding("info", MCP, COMPLIES));
+    expect(report.policy).toBeDefined();
+    expect(p09(report)).toEqual([]);
   });
 });

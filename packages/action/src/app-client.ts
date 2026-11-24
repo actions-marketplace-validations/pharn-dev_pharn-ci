@@ -5,8 +5,9 @@
  * and the run upload (upload.ts, POST).
  *
  *   parseAppUrl(value)          the `app-url` input as an https origin, or one fixed Error that never repeats the value
- *   requestAppToken(deps, line) the OIDC token for the audience `pharn.dev`, masked, or null with one fixed info line
- *                               (the caller's own line when it gives one)
+ *   requestAppToken(deps, line) the OIDC token for the audience `pharn.dev`, masked; or `not-offered` (the job did not
+ *                               grant `id-token: write`) or `failed` (it did, and the request failed), each with one
+ *                               fixed info line (the caller's own line when it gives one)
  *   appRequest(deps, request)   one GET or POST with a timeout, no redirect, one retry on a network error or a 5xx,
  *                               and a response body read only up to a cap
  *
@@ -14,6 +15,7 @@
  * come back besides the body, and the callers decide what to say.
  */
 import { VERSION } from "@pharn-ci/core";
+import { readCapped } from "@pharn-ci/node-io";
 
 /** The audience of the OIDC token. Fixed: the `app-url` input never changes it. */
 export const APP_AUDIENCE = "pharn.dev";
@@ -29,17 +31,17 @@ export const APP_RETRY_WAIT_MS = 1000;
  */
 export const APP_RETRY_MIN_MS = 1000;
 /**
- * The OIDC token request is given up after this long, and the run goes on as if no token were offered. `@actions/core`
- * has no deadline of its own: it retries up to ten times, each with a three-minute socket timeout.
+ * The OIDC token request is given up after this long, and the request counts as failed (`failed`, not `not-offered`).
+ * `@actions/core` has no deadline of its own: it retries up to ten times, each with a three-minute socket timeout.
  */
 export const APP_TOKEN_TIMEOUT_MS = 30_000;
 /** The most bytes of a response body read; a longer body is refused. */
 export const APP_MAX_BODY_BYTES = 1_048_576;
 
-/** What the client reads from the Action's deps. All optional: an absent one means there is no OIDC. */
+/** What the client reads from the Action's deps. An absent `getIDToken`, `setSecret` or `hasOidcEnv` means there is no OIDC. */
 export interface AppClientDeps {
   info(message: string): void;
-  fetch?: ((input: string, init: RequestInit) => Promise<Response>) | undefined;
+  fetch(input: string, init: RequestInit): Promise<Response>;
   getIDToken?: ((audience?: string) => Promise<string>) | undefined;
   setSecret?: ((secret: string) => void) | undefined;
   /** True when the runner offers an OIDC token (both request variables are set). */
@@ -106,32 +108,56 @@ async function tokenWithin(getIDToken: (audience?: string) => Promise<string>, m
 }
 
 /**
- * The OIDC token for the audience `pharn.dev`, registered as a secret before anything else sees it. Null, with one
- * fixed info line, when the runner offers no OIDC, or `getIDToken` rejects, answers nothing or does not answer within
- * `deps.tokenTimeoutMs` (`APP_TOKEN_TIMEOUT_MS`): the error text is never logged.
+ * The outcome of the OIDC token request. `not-offered`: the runner offers no OIDC (the job did not grant
+ * `id-token: write`, or a fork pull request), the normal state of a repository with no account. `failed`: the runner
+ * offers OIDC and the request rejected, returned no token or timed out; `errorClass` is the error's class name
+ * (`Error`, `TypeError`, ...) or `empty token`, never its text.
  */
-export async function requestAppToken(
-  deps: AppClientDeps,
-  noTokenLine: string = NO_TOKEN_LINE,
-): Promise<string | null> {
+export type AppToken =
+  | { kind: "token"; token: string }
+  | { kind: "not-offered" }
+  | { kind: "failed"; errorClass: string };
+
+/** An error's class name when it is a plain identifier; anything else is `Error`. The message is never read. */
+const ERROR_CLASS = /^[A-Za-z][A-Za-z0-9]{0,63}$/;
+
+/** The class name of a thrown value as a log line may carry it (`ERROR_CLASS`); never its message. */
+export function errorClassOf(error: unknown): string {
+  const name: unknown = error instanceof Error ? error.name : undefined;
+  return typeof name === "string" && ERROR_CLASS.test(name) ? name : "Error";
+}
+
+/** The default info line of a failed request: it names the error class and nothing else of the error. */
+function tokenFailedLine(errorClass: string): string {
+  return `pharn-ci: the job grants \`id-token: write\`, but the OIDC token request for the org policy failed (${errorClass})`;
+}
+
+/**
+ * The OIDC token for the audience `pharn.dev`, registered as a secret before anything else sees it. `not-offered` when
+ * the runner offers no OIDC; `failed` when `getIDToken` rejects, answers nothing or does not answer within
+ * `deps.tokenTimeoutMs` (`APP_TOKEN_TIMEOUT_MS`). Either logs one info line: `noTokenLine` when the caller gives one,
+ * otherwise the org policy's own line for each case. The error text is never logged; the default failed line names the
+ * error class only.
+ */
+export async function requestAppToken(deps: AppClientDeps, noTokenLine?: string): Promise<AppToken> {
   const { getIDToken, setSecret } = deps;
   if (!oidcOffered(deps) || getIDToken === undefined || setSecret === undefined) {
-    deps.info(noTokenLine);
-    return null;
+    deps.info(noTokenLine ?? NO_TOKEN_LINE);
+    return { kind: "not-offered" };
   }
+  const failed = (errorClass: string): AppToken => {
+    deps.info(noTokenLine ?? tokenFailedLine(errorClass));
+    return { kind: "failed", errorClass };
+  };
   let token: string;
   try {
     token = await tokenWithin(getIDToken, deps.tokenTimeoutMs ?? APP_TOKEN_TIMEOUT_MS);
-  } catch {
-    deps.info(noTokenLine);
-    return null;
+  } catch (error) {
+    return failed(errorClassOf(error));
   }
-  if (typeof token !== "string" || token === "") {
-    deps.info(noTokenLine);
-    return null;
-  }
+  if (typeof token !== "string" || token === "") return failed("empty token");
   setSecret(token);
-  return token;
+  return { kind: "token", token };
 }
 
 export interface AppRequest {
@@ -188,8 +214,6 @@ export async function appRequest(deps: AppClientDeps, request: AppRequest): Prom
 }
 
 async function attempt(deps: AppClientDeps, request: AppRequest): Promise<AppResult> {
-  const doFetch = deps.fetch;
-  if (doFetch === undefined) return { kind: "network" };
   let timeoutMs = deps.timeoutMs ?? request.timeoutMs ?? APP_TIMEOUT_MS;
   if (request.remainingMs !== undefined) {
     const left = request.remainingMs();
@@ -200,7 +224,7 @@ async function attempt(deps: AppClientDeps, request: AppRequest): Promise<AppRes
   const post = request.method === "POST";
   let response: Response;
   try {
-    response = await doFetch(request.url.href, {
+    response = await deps.fetch(request.url.href, {
       method: post ? "POST" : "GET",
       headers: {
         Accept: "application/json",
@@ -227,34 +251,9 @@ async function attempt(deps: AppClientDeps, request: AppRequest): Promise<AppRes
     return answer;
   }
   try {
-    const read = await readCapped(response);
+    const read = await readCapped(response, APP_MAX_BODY_BYTES);
     return read === null ? { ...answer, tooLarge: true as const } : { ...answer, body: read };
   } catch {
     return signal.aborted ? { kind: "timeout" } : { kind: "network" };
   }
-}
-
-/** The body as UTF-8 text, or null when it is longer than the cap (the stream is cancelled at once). */
-async function readCapped(response: Response): Promise<string | null> {
-  if (response.body === null) return "";
-  const reader = response.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    total += value.byteLength;
-    if (total > APP_MAX_BODY_BYTES) {
-      await reader.cancel().catch(() => {});
-      return null;
-    }
-    chunks.push(value);
-  }
-  const bytes = new Uint8Array(total);
-  let at = 0;
-  for (const chunk of chunks) {
-    bytes.set(chunk, at);
-    at += chunk.byteLength;
-  }
-  return new TextDecoder("utf-8").decode(bytes);
 }

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { Report } from "../src/report.js";
 import { runDiff } from "./ac-e1-fix-shared.js";
 import { fixture } from "./helpers.js";
 import { expectValidReport } from "./schema.js";
@@ -51,8 +52,6 @@ const DIFF =
   add("src/discount.ts", [`  if (code === "${SUMMER}") return 0;`]) +
   TI16_ONLY;
 
-type Report = Awaited<ReturnType<typeof runDiff>>;
-
 const severities = (report: Report, id: string) => [
   ...new Set(report.testIntegrity.signals.filter((s) => String(s.id) === id).map((s) => String(s.severity))),
 ];
@@ -71,19 +70,15 @@ describe("TI08, TI15 and TI16 in the three modes and through the streaming reade
     expect(severities(block, TI04)).toEqual(["block"]);
     expect(severities(block, TI08)).toEqual(["warn"]);
     // precision-v030: TI15 became an info signal (0 of 30 sampled findings were right); TI08 still warns.
-    expect(severities(block, TI15)).toEqual(["info"]);
+    // CORE-144 (decision Q6): TI15 is no longer emitted, so the matching test and source literal give nothing.
+    expect(severities(block, TI15)).toEqual([]);
     expect(severities(block, TI16)).toEqual(["info"]);
     expect(block.testIntegrity.verdict).toBe("fail");
-    expect(ours(block)).toEqual([
-      `${code(TI04)} error`,
-      `${code(TI08)} warn`,
-      `${code(TI15)} info`,
-      `${code(TI16)} info`,
-    ]);
+    expect(ours(block)).toEqual([`${code(TI04)} error`, `${code(TI08)} warn`, `${code(TI16)} info`]);
 
     const warn = await runDiff(DIFF, "warn");
     expect(severities(warn, TI08)).toEqual(["warn"]);
-    expect(severities(warn, TI15)).toEqual(["info"]);
+    expect(severities(warn, TI15)).toEqual([]);
     expect(severities(warn, TI16)).toEqual(["info"]);
     expect(warn.testIntegrity.verdict).toBe("warn");
 
@@ -97,7 +92,8 @@ describe("TI08, TI15 and TI16 in the three modes and through the streaming reade
     }
 
     // The same diff through the streaming reader in chunks of 7 characters gives the same signals and messages.
-    const { check, readDiffChunks } = await import("@pharn-ci/core");
+    const { readDiffChunks } = await import("@pharn-ci/core");
+    const { check } = await import("./text-coverage.js");
     const base = {
       version: "0.1.0",
       coverage: { text: fixture("test-files-deleted/coverage.info"), format: "lcov" as const },
@@ -107,11 +103,12 @@ describe("TI08, TI15 and TI16 in the three modes and through the streaming reade
       testIntegrityMode: { input: "block" as const },
     };
     const parsed = await readDiffChunks(chunksOf(DIFF, 7));
-    const streamed = check({ ...base, diff: { parsed } } as Parameters<typeof check>[0]);
-    const whole = check({ ...base, diff: { text: DIFF } } as Parameters<typeof check>[0]);
+    const streamed = check({ ...base, diff: { parsed } });
+    const whole = check({ ...base, diff: { text: DIFF } });
     expectValidReport(streamed);
     expectValidReport(whole);
-    for (const id of NEW_IDS) expect(severities(whole, id).length, id).toBe(1);
+    // CORE-144: TI15 is not emitted, so only TI08 and TI16 give a severity.
+    for (const id of NEW_IDS) expect(severities(whole, id).length, id).toBe(id === TI15 ? 0 : 1);
     expect(streamed.testIntegrity.signals).toEqual(whole.testIntegrity.signals);
     expect(streamed.messages).toEqual(whole.messages);
 

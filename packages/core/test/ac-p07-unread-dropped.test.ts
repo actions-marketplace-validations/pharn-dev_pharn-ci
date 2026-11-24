@@ -1,17 +1,14 @@
 import { describe, expect, it } from "vitest";
+import type { Report } from "../src/report.js";
 import { fixture } from "./helpers.js";
 import { expectValidReport } from "./schema.js";
+import type { TextCheckInput } from "./text-coverage.js";
 
 // E3 item 24 (P07), AC-12. check() is loaded inside the test body and fixtures/policy-rules/p07/ is read there too: the
 // AC test is written before the build adds rule P07 and its fixtures, so nothing the build adds may run while this
 // file loads.
 
-type Violation = { id: string; severity: string; path: string | null; line: number | null; detail: string };
-type Message = { level: string; code: string; text: string };
-type Report = { verdict: string; messages: Message[]; policy?: { violations: Violation[] } };
-type Sources =
-  | { files: { path: string; text: string }[]; dropped: { path: string; reason: string }[] }
-  | { unavailable: string };
+type Sources = NonNullable<TextCheckInput["agentInstructionSources"]>;
 
 const REPO_ROOT = "/home/runner/work/demo/demo";
 const NOW = "2026-10-26T12:00:00.000Z";
@@ -33,7 +30,7 @@ const DROP_SENTENCE =
   " 1 agent instruction file was not compared: binary, too large, past the read caps, an unsafe path or not a file at HEAD.";
 
 async function run(policy: PolicyName, sources: Sources): Promise<Report> {
-  const { check } = await import("@pharn-ci/core");
+  const { check } = await import("./text-coverage.js");
   const report = check({
     version: "0.1.0",
     coverage: { text: fixture("golden/coverage.info"), format: "lcov" },
@@ -43,9 +40,9 @@ async function run(policy: PolicyName, sources: Sources): Promise<Report> {
     repoFiles: ["AGENTS.md", "CLAUDE.md", "GEMINI.md", ".pharn/policy.json", "src/a.ts"],
     policy: POLICIES[policy],
     agentInstructionSources: sources,
-  } as never);
+  });
   expectValidReport(report);
-  return report as unknown as Report;
+  return report;
 }
 
 const p07 = (report: Report) => (report.policy?.violations ?? []).filter((v) => v.id === "P07");

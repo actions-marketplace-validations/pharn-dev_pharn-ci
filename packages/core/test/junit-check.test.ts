@@ -1,7 +1,5 @@
 import { describe, expect, it } from "vitest";
 import {
-  type CheckInput,
-  check,
   type JunitSources,
   parseJunitSources,
   type Report,
@@ -10,6 +8,7 @@ import {
 } from "../src/index.js";
 import { fixture } from "./helpers.js";
 import { expectValidReport } from "./schema.js";
+import { type TextCheckInput as CheckInput, check } from "./text-coverage.js";
 
 // Flaky tests (A6) through check(): the report's flaky object, the JUnit messages and the Flaky section, validated
 // against schema/report.v2.json. Test results never make a check fail.
@@ -202,6 +201,7 @@ describe("the Flaky section", () => {
     const bad = { ...report, flaky: { ...report.flaky, testCount: -1 } } as Report;
     expect(renderMarkdown(bad)).not.toContain("🧫");
     expect(
+      // Invalid on purpose: a number in the quarantined list.
       renderMarkdown({ ...report, flaky: { ...report.flaky, quarantined: [1] } } as unknown as Report),
     ).not.toContain("🧫");
   });

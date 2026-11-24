@@ -5,14 +5,14 @@ import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { EXIT_ERROR, EXIT_FAIL, EXIT_OK, main } from "../src/main.js";
 import { nodeDeps } from "../src/nodeDeps.js";
-import { coverage, fakeDeps } from "./fake-deps.js";
+import { coverage, fakeDeps, TEST_SOURCES_NOT_READ } from "./fake-deps.js";
 
 describe("cli main", () => {
   it("prints JSON to stdout and exits 1 when below the threshold", async () => {
     const deps = fakeDeps(coverage);
     const code = await main(["check", "--coverage", "lcov.info", "--threshold", "80", "--format", "json"], deps);
     expect(code).toBe(EXIT_FAIL);
-    expect(deps.err).toBe("coverage: lcov (auto-detected)\n");
+    expect(deps.err).toBe(`coverage: lcov (auto-detected)\n${TEST_SOURCES_NOT_READ}`);
     const report = JSON.parse(deps.out);
     expect(report.verdict).toBe("fail");
     expect(report.diffCoverage.percent).toBe(71.43);
@@ -39,6 +39,9 @@ describe("cli main", () => {
     await main(["check", "--coverage", "lcov.info", "--base", "topic/-x"], deps);
     expect(deps.gitCalls).toEqual([
       ["rev-parse", "--show-toplevel"],
+      // CORE-143: the run's revisions, resolved once, before the diff (CORE-14 follow-up). This fake prints no commit id,
+      // so the diff names the base as given; with a commit id it names the ids (`ac-diff-by-commit.test.ts`).
+      ["rev-parse", "--verify", "--quiet", "--end-of-options", "topic/-x^{commit}"],
       [
         "diff",
         "--unified=0",

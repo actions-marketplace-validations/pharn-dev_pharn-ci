@@ -7,10 +7,10 @@ const EXPECTED = ["js", "jsx", "ts", "tsx", "mjs", "cjs", "mts", "cts"];
 
 describe("@pharn-ci/core: JS_TS_EXTENSIONS", () => {
   it("AC-5: JS_TS_EXTENSIONS is exactly the eight JS/TS extensions, and each gives a test file by name read as jsts", async () => {
-    const core = (await import("@pharn-ci/core")) as unknown as {
-      JS_TS_EXTENSIONS: readonly string[];
-      isTestFile(path: string): boolean;
-      testLanguage(path: string): "jsts" | "python" | "go" | null;
+    const core = {
+      ...(await import("../src/jsTsExtensions.js")),
+      ...(await import("../src/signals/testLines.js")),
+      ...(await import("../src/testFiles.js")),
     };
 
     expect(Array.isArray(core.JS_TS_EXTENSIONS), "JS_TS_EXTENSIONS is an exported list").toBe(true);

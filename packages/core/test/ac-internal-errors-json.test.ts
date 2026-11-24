@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { Report } from "../src/report.js";
 import { fixture } from "./helpers.js";
 import { expectValidReport } from "./schema.js";
+import type { TextCheckInput } from "./text-coverage.js";
 
 // check() is loaded inside the test body: the AC test is written before the build narrows the JSON config reader's
 // catch, so nothing the build changes may run while the file loads. The fault is injected into our conversion of the
@@ -16,10 +18,6 @@ const BASE = '{\n  "passWithNoTests": false\n}\n';
 const HEAD = `{\n  "passWithNoTests": false,\n  "${MARKER}": true\n}\n`;
 const NOT_JSON = '{\n  "passWithNoTests": true,\n';
 
-interface Report {
-  messages: { code: string; level: string; text: string }[];
-}
-
 const linesOf = (text: string) => text.replace(/\n$/, "").split("\n");
 
 /** A `--unified=0` diff of `path` that replaces every base line by every head line. */
@@ -31,7 +29,7 @@ function diffOf(path: string, base: string, head: string): string {
   return `${lines.join("\n")}\n`;
 }
 
-function inputOf(head: string) {
+function inputOf(head: string): TextCheckInput {
   return {
     version: "0.1.0",
     coverage: { text: fixture("test-files-deleted/coverage.info"), format: "lcov" },
@@ -53,7 +51,10 @@ afterEach(() => {
 
 describe("check(): an exception from our own JSON value conversion", () => {
   it("AC-6: a TypeError thrown while converting a parsed jest.config.json escapes check() in mode block and is never reported as invalid-json; a jest.config.json that is not JSON is still refused as invalid-json", async () => {
-    const core = (await import("@pharn-ci/core")) as unknown as { check: (input: unknown) => unknown };
+    const core = {
+      ...(await import("@pharn-ci/core")),
+      check: (await import("./text-coverage.js")).check,
+    };
     expect(() => JSON.parse(HEAD), "the head config is valid JSON").not.toThrow();
 
     const injected = new TypeError("AC-6 injected fault in the JSON value conversion");

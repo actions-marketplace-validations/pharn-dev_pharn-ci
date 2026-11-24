@@ -1,9 +1,11 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { check } from "../src/check.js";
+import type { TestSourceDrop, TestSourceDropReason } from "../src/testSources.js";
+
 import { FIXTURES } from "./helpers.js";
 import { expectValidReport } from "./schema.js";
+import { check } from "./text-coverage.js";
 
 // CORE-50 (binary-diff-not-blind), not an AC test: the statuses the acceptance criteria do not name, each pinned by a
 // fixture. A renamed binary package.json (judged from the sources when both texts read as JSON, else one fixed
@@ -16,7 +18,7 @@ const BINARY = "git shows this file as binary, so its changes could not be read.
 
 interface Side {
   files: { path: string; text: string }[];
-  dropped: { path: string; reason: string }[];
+  dropped: TestSourceDrop[];
 }
 
 const byPath = (a: { path: string }, b: { path: string }) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
@@ -31,7 +33,7 @@ function readSide(dir: string): Side {
     const text = readFileSync(join(dir, name), "utf8");
     if (name.endsWith(".txt")) side.files.push({ path: name.slice(0, -".txt".length), text });
     else if (name.endsWith(".dropped"))
-      side.dropped.push({ path: name.slice(0, -".dropped".length), reason: text.trim() });
+      side.dropped.push({ path: name.slice(0, -".dropped".length), reason: text.trim() as TestSourceDropReason });
   }
   side.files.sort(byPath);
   side.dropped.sort(byPath);

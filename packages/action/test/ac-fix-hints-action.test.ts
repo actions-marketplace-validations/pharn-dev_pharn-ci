@@ -1,8 +1,10 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import type { Report } from "@pharn-ci/core";
 import { describe, expect, it } from "vitest";
 import { VERSION } from "../../core/src/version.js";
 import { expectValidReport } from "../../core/test/schema.js";
+import { requiredDeps } from "../../node-io/test/required-deps.js";
 
 // fix-hints (H6), AC-11. run(), main() and the core's fix table are loaded inside the test body: the AC test is written
 // before the build adds the `fix` objects and regenerates fixtures/golden/report.json. The Action and the CLI run
@@ -15,9 +17,6 @@ const REPO_ROOT = "/home/runner/work/demo/demo";
 const BASE_SHA = "1111111111111111111111111111111111111111";
 const HEAD_SHA = "2222222222222222222222222222222222222222";
 const COVERAGE = "coverage/lcov.info";
-
-type Fix = { kind: string; target?: string; hint: string };
-type Report = { tool: { name: string; version: string }; messages: { code: string; fix?: Fix }[] };
 
 /** fixtures/golden/report.json as this build reports it: the CLI and the Action report the package VERSION. */
 const goldenReport = () => {
@@ -41,7 +40,10 @@ function commonDeps() {
   const coverage = fixture("golden/coverage.info");
   const streamCalls: string[][] = [];
   const deps: Record<string, unknown> = {
+    ...requiredDeps(() => deps as never),
     git: async (args: string[]) => {
+      // No history (CORE-143): the run's revisions stay unresolved, so no test file is read from git.
+      if (args.includes("HEAD^{commit}")) throw new Error("fatal: no history in this fake");
       if (args[0] === "ls-files") return `${tracked.join("\0")}\0`;
       if (args[0] === "ls-tree") return "";
       if (args[0] === "diff") throw new Error("the whole-text git call was used for the diff");
@@ -138,9 +140,7 @@ describe("the Action and the CLI write fix hints", { timeout: 120_000 }, () => {
     expect(cli.streamCalls.length, "the CLI streamed its diff").toBeGreaterThan(0);
     expect(cli.report).toEqual(goldenReport());
 
-    const core = (await import("@pharn-ci/core")) as unknown as {
-      MESSAGE_FIXES?: Record<string, { kind: string; hint: string }>;
-    };
+    const core = await import("../../core/src/fix/table.js");
     expect(core.MESSAGE_FIXES, "MESSAGE_FIXES is exported").toBeDefined();
     for (const [who, report] of [
       ["Action", action.report],

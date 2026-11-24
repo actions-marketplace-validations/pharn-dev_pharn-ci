@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { fixture, foldCallout, foldCoverageBar, foldIntegrityColumn } from "./helpers.js";
+import { foldHintsToBase } from "./hints-at-base.js";
 import { expectValidReport } from "./schema.js";
-import { withoutFix } from "./v090-codes.js";
+import { withoutFix } from "./without-fix.js";
 
 /** Remove the Test integrity section: its heading, an empty line, one fixed line and an empty line. */
 function foldTestIntegrity(markdown: string): string {
@@ -33,14 +34,16 @@ const REPO_ROOT = "/home/runner/work/demo/demo";
 // report, and so its hash, did not change.
 // pr-comment-verdict-callout turned the overview line into a callout on purpose; the markdown hash below is taken
 // after folding the callout back into the bare sentence, so it is unchanged.
-const GOLDEN_MD_SHA256 = "a55ed107a7e2f29761b965f4a8a993dfc069807cea5e7fcc19944da3b01fa6fc";
+// CORE-124 then updated the markdown hash on purpose: the logo line's raw URL names a commit SHA instead of `main`;
+// nothing else in the markdown changed, and the JSON report, and so its hash, did not change.
+const GOLDEN_MD_SHA256 = "fcc60e1e74d69799902997a2afc4b607110bb446a781cf3b3329b6c26c06458a";
 const GOLDEN_JSON_SHA256 = "a455705f65d678d9c059231ba36bed7241155cd5063744d2effd8df8d8116c24";
 
 const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
 const asFile = (report: unknown) => `${JSON.stringify(report, null, 2)}\n`;
 
 async function load() {
-  const { check } = await import("../src/check.js");
+  const { check } = await import("./text-coverage.js");
   const { renderMarkdown } = await import("../src/render/markdown.js");
   return { check, renderMarkdown };
 }
@@ -108,7 +111,10 @@ describe("golden reports and the coverage format", () => {
     // test-integrity-mode added the "🔍 Test integrity" section on purpose: its four lines are folded out too.
     // The comment-layout change added the summary table's Test integrity column on purpose: it is folded out too.
     // The comment-coverage-bar change added the diff-coverage bar line on purpose: it is folded out too.
-    const markdownLines = foldCallout(foldTestIntegrity(foldIntegrityColumn(foldCoverageBar(markdown)))).split("\n");
+    // CORE-140 made each hint its code's fix.hint on purpose: the hint lines are folded back too.
+    const markdownLines = foldHintsToBase(
+      foldCallout(foldTestIntegrity(foldIntegrityColumn(foldCoverageBar(markdown)))),
+    ).split("\n");
     expect(markdownLines.filter((line) => line.includes(`\`${partialCode}\``))).toHaveLength(1);
     const partialAt = markdownLines.findIndex((line) => line.includes(`\`${partialCode}\``));
     expect(markdownLines[partialAt + 1]).toMatch(/^ {2}- Hint: \S/);

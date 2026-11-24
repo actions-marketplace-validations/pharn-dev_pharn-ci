@@ -6,14 +6,17 @@ carries in a file. This release applies the coverage, setup (including the lists
 `setup.consistency` for P07) and test-integrity keys, and `agents.labels`, `agents.extra_logins`,
 `agents.protected_paths`, `agents.protected_paths_mode`, `agents.max_files` and `agents.max_changed_lines`, and
 `flaky.quarantine` (whether the app's quarantine list applies to the [JUnit results](checks/flaky-tests.md)),
-and the `dependencies` keys ([Dependency safety](checks/dependencies.md)); the other `agents` keys are validated but not
-applied yet.
+and the `dependencies` keys ([Dependency safety](checks/dependencies.md)). The one other `agents` key,
+`agents.require_human_approval`, and rule P12 that it is meant for are validated and not applied: they change nothing.
 
 **What is sent.** With `policy: auto` (the default) or `required`, and only when the job grants `id-token: write`, the
 Action makes one `GET` of `/api/v1/policy?repo=<owner>/<name>` on the pharn.dev app. Only the OIDC token and the repository name
 leave the job: no file content, diff, coverage file or log. The token is for the audience `pharn.dev` and is masked in
 the log. Without `id-token: write` (a fork pull request never gets it) nothing is sent, one info line says why, and the
-check runs with the workflow inputs and `.pharn/ci.yml`. The `policy` and `app-url` inputs are in the
+check runs with the workflow inputs and `.pharn/ci.yml`. When the job grants `id-token: write` but the token request
+fails, times out (30 s) or returns no token, nothing is sent either, and the report says so: one `POLICY_UNAVAILABLE`
+warning with the reason `no-oidc-token` (an error with `policy: required`), and one info line that names the error's
+class and nothing else of it. The `policy` and `app-url` inputs are in the
 [Action reference](action.md). `app-url` takes an `https` origin only: no credentials, path, query or fragment.
 The CLI never fetches a policy.
 
@@ -36,10 +39,23 @@ warning (a threshold with both numbers; never a pattern, root, label or registry
 **No policy, or no way to read it.** A repository with no policy (`204` or `404`) is silent under `auto` and its report is the
 same as with `policy: never`; after a `404` (the Pharn GitHub App is not installed) the PR comment and the job summary
 end with the install hint. Any other failure (a network error, a timeout, a `429`, a `5xx`, a response over 1 MiB, one that does
-not validate) is one `POLICY_UNAVAILABLE` warning, last in the report, and the check runs with the workflow inputs and
+not validate, a failed token request) is one `POLICY_UNAVAILABLE` warning, last in the report, and the check runs with the workflow inputs and
 `.pharn/ci.yml`. With `policy: required` every one of these, and a missing token, is a `POLICY_UNAVAILABLE` error and
 the check fails. A request is retried once after a network error or a `5xx`; it never follows a redirect, and nothing the
 app answers is quoted in the report.
+
+**A policy newer than the pinned Action.** The app serves one policy to every version of the Action, and a repository
+pinned to an older commit may meet keys that version does not know: a newer signal id in `test_integrity.signals`, a
+newer rule in `policy.rules`, a new key anywhere in the policy or in the response around it, or a new tool in
+`setup.expect`. That version skips them and applies the rest of the policy (the threshold, the mode, the protected
+paths and every other key it knows), and one `POLICY_KEYS_UNKNOWN` warning names what it skipped: up to 20 dotted
+paths such as `policy.test_integrity.signals.TI18` or `policy.setup.expect[new-tool]`, sorted, each cut to 64
+characters, and a count of the rest. A skipped key is not enforced until the pin is updated. A key it knows with a value
+it cannot use (a threshold that is a string, a mode it has no name for) still makes the response invalid: that is a
+`POLICY_UNAVAILABLE` warning, or an error under `policy: required`. The envelope's `version`, `policy`, `quarantine`,
+`settings.uploadJunit` and `settings.messageMaxBytes` are required; `etag`, `updatedAt` and `settings.redactMessages`
+are not read, so they are optional and whatever they hold is skipped (versions up to 0.11 still require them, so the
+app keeps sending them). A `file:` policy is not lenient: an unknown key there fails the step, as before.
 
 **`policy: file:<path>`.** A policy document read from the workspace (in the CLI, `--policy-file <path>`). The pull
 request carries the file, so it can only tighten: a higher threshold, `setup.require: true`, a stricter mode, more
@@ -48,6 +64,43 @@ allowed from a file, and a value lower than the workflow inputs give is ignored;
 `POLICY_OVERRIDE_IGNORED`. Nothing is fetched. The path is relative, stays inside the repository, goes through no
 symbolic link and names a regular file of at most 1 MiB; anything else fails the step (the CLI exits `2`) with a fixed
 message that never names the path. What the policy does not cover is in [`docs/LIMITS.md`](LIMITS.md).
+
+**Changing a `file:` policy.** Every pull request that edits the policy file, or renames it away, gets a P09 violation
+at `block` (a `POLICY_P09` error), whatever the edit does, a tightening included. The file can only raise P09's
+severity, never lower or switch it off, and the accept label does not lift it, so that pull request always fails the
+check. Change the policy in a pull request of its own, have it reviewed, and have an admin merge it past the failing
+check as your branch protection allows. The pull requests after it are checked against the merged file. A policy
+served by the app is changed in the app, where no pull request can edit it.
+
+The Action and the CLI also read the file at the base commit the diff is taken against (the base branch's copy), and
+unite that copy with the pull request's, key by key, before anything is applied, so a pull request that edits the file cannot loosen any setting the file may carry. The
+stricter of the two copies applies:
+
+- Lists are unions (the pull request's entries, then the base's the pull request lacks): `setup.expect`,
+  `setup.forbidden_permissions`, `setup.required_permissions_deny`, `setup.forbidden_mcp_servers`,
+  `setup.required_hooks` (an entry is its event and matcher), `setup.forbidden_files`, `agents.labels`,
+  `agents.extra_logins`, `agents.protected_paths` and `injection.phrases`. At most 100 policy phrases are scanned; the
+  base copy's are kept first, so phrases the pull request adds cannot push them out.
+- `setup.allowed_mcp_servers` is the servers both copies name; when they share none it is the base's list, and when
+  only one copy sets it, that copy's.
+- Numbers: `coverage.threshold`, `dependencies.min_age_days` and `dependencies.min_weekly_downloads` take the higher
+  value; `agents.max_files` and `agents.max_changed_lines` the smaller.
+- Switches: `setup.require`, `dependencies.lookup` and `agents.require_human_approval` are on when either copy says
+  `true`; `flaky.quarantine` is off when either says `false`.
+- Severities take the stricter value: `setup.consistency`, `test_integrity.mode`, `test_integrity.signals.<id>`,
+  `policy.rules.<id>`, `agents.protected_paths_mode` and `injection.signals.<id>`.
+- Head copy only, because a file may not set them: `coverage.exclude`, `coverage.root`, `test_integrity.accept_label`,
+  `policy.required`, `dependencies.registries`, `dependencies.allowed_hosts` and `injection.exempt`. The base's value
+  of these is neither applied nor named.
+
+A setting the pull request's copy has looser than the base copy's (a lower value, a deleted key or object, a list that
+lost an entry, a wider allowlist) is named in `POLICY_OVERRIDE_IGNORED` and not applied; a lower threshold is named
+with both numbers. Looser is judged on what applies, the default included: a base value equal to the setting's default
+that the pull request deletes is not named. Two exceptions: a base `agents.protected_paths_mode: block` the pull
+request deletes or lowers is named, though `block` is the default; and a `test_integrity.mode` the pull request sets
+below the base's mode is named, even when the inputs give `off`. Where the base copy is `absent` (a pull request that adds the file), cannot be read, or
+there is no local diff to name the base (the Action in PR-number mode, a compare-API diff), only the pull request's copy
+applies, as before.
 
 **Rules.** A policy also runs rules. P01, P08, P09, P10, P11 and P14 read what the check already has (the agent setup
 inventory, the tracked files, the diff, the pull request's metadata and the policy itself). P02 to P06 read the agent
@@ -65,8 +118,9 @@ agent settings, MCP, workflow and CODEOWNERS files an agent pull request touches
 - **P06**, required hook missing: a settings directory has no command hook for a `setup.required_hooks` event whose matcher covers the required one, or `disableAllHooks` is on (`POLICY_P06`, `error`).
 - **P07**, agent instruction files disagree: instruction files in one directory name different package managers or JavaScript test runners (`POLICY_P07`, `warn`; `setup.consistency` sets its severity). See [Policy mode](#policy-mode).
 - **P08**, forbidden file tracked: a tracked file matches a `setup.forbidden_files` pattern (`POLICY_P08`, `error`).
-- **P09**, the pull request loosens the policy it is graded by: it edits the policy file, the config or a workflow that sets a value looser than the policy, or an agent settings or MCP file the policy checks (`POLICY_P09`; `error` when the file fails P02 to P06 or could not be checked, `warn` when it only warns or supplies a required deny rule or hook, `info` when it complies, and `warn` when the files were not read).
-- **P10**, policy unavailable: the policy could not be read (`POLICY_UNAVAILABLE`).
+- **P09**, the pull request loosens the policy it is graded by: it edits the policy file, the config while it sets a value looser than the policy, a workflow while a workflow input is looser than the policy, or an agent settings or MCP file the policy checks (`POLICY_P09`; `error` when the file fails P02 to P06 or could not be checked, `warn` when it only warns, and `warn` when the files were not read; an edited file that complies or supplies a required deny rule or hook is no finding).
+- **P10**, policy unavailable: the policy could not be read (`POLICY_UNAVAILABLE`). It fails the check only under the workflow input `policy: required`: a policy that could not be read cannot ask for that. The policy's own `policy.required` (app policy only) makes agent settings files that could not be read a `POLICY_SETTINGS_INVALID` error instead of a warning.
+- **P12**, agent PR needs a human approval: validated and not applied. `agents.require_human_approval` and `policy.rules.P12` are accepted and change nothing; no P12 finding is produced.
 - **P11**, agent PR changes a protected path: an agent pull request changes a path that `agents.protected_paths` lists (`POLICY_P11`, `error`).
 - **P13**, agent self-modification: an agent pull request widens its own or another agent's powers in an agent settings file, an MCP config, a workflow or CODEOWNERS (`POLICY_P13`, `error`). See [P13](#p13-agent-self-modification).
 - **P14**, agent PR too large: an agent pull request changes more files than `agents.max_files` or more lines than `agents.max_changed_lines` (`POLICY_P14`, `error`). Off until the policy sets a cap; lockfiles, snapshots and generated files do not count.
@@ -90,7 +144,7 @@ Every path of the diff that matches a glob is one violation (a rename counts by 
 never a glob, label or login. A person's pull request is never subject to P11. A missing diff fails closed: an agent
 pull request whose diff is unavailable gets one violation that says so. A `file:` policy always blocks: a lower
 `protected_paths_mode` or `policy.rules.P11` is named in `POLICY_OVERRIDE_IGNORED` and does not apply, and the policy
-file is also read at the merge base so that editing it removes nothing. Dependabot and Renovate count as agent PRs, so
+file is also read at the base commit so that editing it removes nothing. Dependabot and Renovate count as agent PRs, so
 protecting `package.json` or a lockfile blocks them: do not protect files those bots must update. At most 50 violations
 are listed (the rest are counted in the message). The accept label never touches P11.
 
@@ -152,8 +206,8 @@ evidence that made the pull request an agent PR, as fixed words. A person's pull
 missing diff fails closed with one violation that says so. The severity is `block`; an app policy may set
 `policy.rules.P14` to `warn`, `info` or `off`, and a `file:` policy can only raise it (a lower value is named in
 `POLICY_OVERRIDE_IGNORED`). A `file:` policy can lower a cap but never raise or remove one: when the pull request edits
-the file, each cap is the smaller of its value at the merge base and at head (a cap set on one side only applies), and
-an edited file that cannot be read at the merge base fails closed. What P14 misses is in
+the file, each cap is the smaller of its value at the base commit and at head (a cap set on one side only applies), and
+an edited file that cannot be read at the base commit fails closed. What P14 misses is in
 [`docs/LIMITS.md`](LIMITS.md).
 
 ## Policy mode

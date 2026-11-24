@@ -1,22 +1,17 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import type { ResolvedPolicy } from "../src/policy/resolved.js";
+import type { PolicyDocument } from "../src/policy/types.js";
+import type { Report } from "../src/report.js";
 import { fixture } from "./helpers.js";
 import { expectValidReport } from "./schema.js";
+import type { TextCheckInput } from "./text-coverage.js";
 
 // E3 item 22 (policy rules), AC-17. check() and renderMarkdown() are loaded inside the test body and
 // fixtures/policy-rules/ is read there too: the AC test is written before the build adds the Policy column and the
 // fixtures, so nothing the build adds may run while this file loads. The golden inputs are passed as
 // packages/core/test/golden.test.ts passes them, and the no-policy comment is compared byte for byte with the
 // committed golden, never through a file snapshot.
-
-type Violation = { id: string; severity: string; path: string | null; line: number | null; detail: string };
-type Message = { level: string; code: string; text: string };
-type Report = Record<string, unknown> & { messages: Message[]; policy?: { violations: Violation[] } };
-
-interface Core {
-  check(input: unknown): Report;
-  renderMarkdown(report: Report, options?: { maxRows?: number }): string;
-}
 
 const ROOT = new URL("../../../", import.meta.url);
 const REPO_ROOT = "/home/runner/work/demo/demo";
@@ -38,9 +33,12 @@ const codes = (report: Report) => report.messages.map((m) => m.code);
 
 describe("the summary table and the Messages section with a policy", { timeout: 60_000 }, () => {
   it("AC-17: without a policy the comment is the golden byte for byte; with one the table gains a Policy column and Messages leaves out the policy codes, and the P01 codes when a P01 is listed", async () => {
-    const core = (await import("@pharn-ci/core")) as unknown as Core;
+    const core = {
+      ...(await import("@pharn-ci/core")),
+      check: (await import("./text-coverage.js")).check,
+    };
     const goldenFiles = fixture("golden/files.txt").trim().split("\n");
-    const run = (extra: Record<string, unknown>) => {
+    const run = (extra: Partial<TextCheckInput>) => {
       const report = core.check({
         version: "0.1.0",
         coverage: { text: fixture("golden/coverage.info"), format: "lcov" },
@@ -53,7 +51,7 @@ describe("the summary table and the Messages section with a policy", { timeout: 
       expectValidReport(report);
       return report;
     };
-    const app = (document: unknown) => ({
+    const app = (document: PolicyDocument): ResolvedPolicy => ({
       source: "app",
       version: 3,
       fetchedAt: "2026-10-26T12:00:00.000Z",

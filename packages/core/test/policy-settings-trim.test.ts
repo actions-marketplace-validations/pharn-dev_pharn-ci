@@ -1,8 +1,9 @@
-import { check, overlapsForbidden, parsePermissionRule } from "@pharn-ci/core";
 import { describe, expect, it } from "vitest";
-import { asciiTrim } from "../src/policy/settings/permissionRule.js";
+import { asciiTrim, parsePermissionRule } from "../src/policy/settings/permissionRule.js";
 import { fixture } from "./helpers.js";
+import { overlapsForbidden } from "./permission-rules.js";
 import { expectValidReport } from "./schema.js";
+import { check } from "./text-coverage.js";
 
 // The allow side trims ASCII whitespace before it parses an entry. It used a `^[ \t…]+|[ \t…]+$` regular expression,
 // which is quadratic on a long run of whitespace that is not at the end (CodeQL js/polynomial-redos on PR #116). The
@@ -54,7 +55,7 @@ describe("a hostile allow entry with a long run of inner whitespace", () => {
         document: { version: 1, setup: { forbidden_permissions: ["Bash(curl:*)"] } },
       },
       policySettingsSources: { files: [{ path: ".claude/settings.json", text: settings }], dropped: [] },
-    } as never);
+    });
     expectValidReport(report);
     const p02 = (report.policy?.violations ?? []).filter((v) => v.id === "P02");
     expect(p02.map((v) => v.detail)).toEqual(["allow rule overlaps forbidden permission Bash(curl:*)"]);

@@ -45,13 +45,14 @@ function glob(pattern: string, text: string, question: boolean): boolean {
   for (const p of pattern) {
     const next = new Array<boolean>(text.length + 1).fill(false);
     if (p === "*") {
-      for (let j = 0; j <= text.length; j++) next[j] = prev[j] || (j > 0 && next[j - 1]);
+      for (let j = 0; j <= text.length; j++) next[j] = (prev[j] || (j > 0 && next[j - 1])) as boolean;
     } else {
-      for (let j = 1; j <= text.length; j++) next[j] = prev[j - 1] && ((question && p === "?") || p === text[j - 1]);
+      for (let j = 1; j <= text.length; j++)
+        next[j] = (prev[j - 1] && ((question && p === "?") || p === text[j - 1])) as boolean;
     }
     prev = next;
   }
-  return prev[text.length];
+  return prev[text.length] as boolean;
 }
 
 // ---- Bash ----
@@ -115,13 +116,14 @@ function segmentsMatch(pattern: readonly string[], path: readonly string[]): boo
   for (const seg of pattern) {
     const next = new Array<boolean>(path.length + 1).fill(false);
     if (seg === "**") {
-      for (let j = 0; j <= path.length; j++) next[j] = prev[j] || (j > 0 && next[j - 1]);
+      for (let j = 0; j <= path.length; j++) next[j] = (prev[j] || (j > 0 && next[j - 1])) as boolean;
     } else {
-      for (let j = 1; j <= path.length; j++) next[j] = prev[j - 1] && glob(seg, path[j - 1] as string, true);
+      for (let j = 1; j <= path.length; j++)
+        next[j] = (prev[j - 1] && glob(seg, path[j - 1] as string, true)) as boolean;
     }
     prev = next;
   }
-  return prev[path.length];
+  return prev[path.length] as boolean;
 }
 
 function pathMatches(text: string, broad: boolean, path: readonly string[]): boolean {
@@ -160,9 +162,9 @@ function counterexample(sub: boolean[], sup: boolean[]): number {
 
 describe("covers is reflexive and sound", { timeout: 120_000 }, () => {
   it("AC-5: against brute-force enumeration in both readings and both argument orders, plus the fixed two-direction rows", async () => {
-    const rules = (await import("@pharn-ci/core")) as unknown as Rules;
-    expect(typeof rules.covers, "covers is exported").toBe("function");
-    expect(typeof rules.overlapsForbidden, "overlapsForbidden is exported").toBe("function");
+    // CORE-123 (R5.6): `covers` and `overlapsForbidden` left core, where nothing called them; they are the test
+    // wrappers over `coversPrepared` and `overlapsPrepared`, the comparisons P02 and P03 run (./permission-rules.ts).
+    const rules: Rules = await import("./permission-rules.js");
 
     // The fixed rows (C1): an allow entry inside a forbidden one triggers; a partial overlap neither direction can
     // prove does not, in either order.

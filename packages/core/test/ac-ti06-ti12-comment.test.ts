@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { Report, TestIntegritySignal as Signal } from "../src/report.js";
 import { fixture } from "./helpers.js";
 import { expectValidReport } from "./schema.js";
 
@@ -11,14 +12,6 @@ const REPO_ROOT = "/home/runner/work/demo/demo";
 const HEADING = "### 🔍 Test integrity";
 /** A backtick, a mention, raw HTML and a markdown link. */
 const HOSTILE = 'vi.mock("./x`y") replaces src/x.ts @octocat <img src=x> [x](https://example.com), a source file.';
-
-interface Signal {
-  id: string;
-  severity: "block" | "warn" | "info";
-  path: string;
-  line: number | null;
-  detail: string;
-}
 
 const SIGNALS: Signal[] = [
   {
@@ -88,11 +81,8 @@ const FINDING = /^- \S+ \*\*(TI\d\d)\*\* `([^`]+)`/;
 
 describe("renderMarkdown(): TI06 and TI12 in the Test integrity section", () => {
   it("AC-14: the TI02 block finding comes before the TI06 and TI12 warn findings, each with the id in bold, path:line in a code span and the detail; the TI06 and TI12 warn hints do not offer the accept label; a hostile detail stays on one line, inert", async () => {
-    const { check } = await import("../src/check.js");
-    const { testIntegritySignalMessages, verdictOf } = (await import("../src/report.js")) as unknown as {
-      testIntegritySignalMessages(signals: Signal[]): { code: string; level: string; text: string }[];
-      verdictOf(messages: unknown[]): string;
-    };
+    const { check } = await import("./text-coverage.js");
+    const { testIntegritySignalMessages, verdictOf } = await import("../src/report.js");
     const base = check({
       version: "0.1.0",
       coverage: { text: fixture("golden/coverage.info"), format: "lcov" },
@@ -101,7 +91,7 @@ describe("renderMarkdown(): TI06 and TI12 in the Test integrity section", () => 
       threshold: 80,
       repoFiles: fixture("golden/files.txt").trim().split("\n"),
       testIntegrityMode: { input: "block" },
-    } as Parameters<typeof check>[0]);
+    });
     const signalMessages = testIntegritySignalMessages(SIGNALS);
     for (const code of ["TEST_INTEGRITY_TI02", "TEST_INTEGRITY_TI06", "TEST_INTEGRITY_TI12"]) {
       expect(
@@ -114,12 +104,12 @@ describe("renderMarkdown(): TI06 and TI12 in the Test integrity section", () => 
     }
     const others = base.messages.filter((m) => !/^TEST_INTEGRITY_TI\d\d$/.test(String(m.code)));
     const messages = [...others, ...signalMessages];
-    const report = {
+    const report: Report = {
       ...base,
       verdict: verdictOf(messages),
       messages,
       testIntegrity: { ...base.testIntegrity, mode: "block", source: "input", verdict: "fail", signals: SIGNALS },
-    } as unknown as typeof base;
+    };
     expectValidReport(report);
 
     const { renderMarkdown } = await import("../src/render/markdown.js");

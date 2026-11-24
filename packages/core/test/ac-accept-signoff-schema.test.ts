@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import { codeRow } from "./codeTable.js";
 import { fixture } from "./helpers.js";
 import { expectValidReport, validateReport } from "./schema.js";
 
@@ -38,7 +39,8 @@ const UNCOVERED = "TN:\nSF:src/a.ts\nDA:12,0\nend_of_record\n";
 
 describe("Report v2 with the accept label", () => {
   it("AC-11: the accepted, ignored and labelled reports validate, a numeric acceptLabel does not, v2 documents the additions and v1 is unchanged", async () => {
-    const { check, acceptTestIntegrity, ignoreAcceptLabel, withAcceptLabel } = await import("@pharn-ci/core");
+    const { acceptTestIntegrity, ignoreAcceptLabel, withAcceptLabel } = await import("@pharn-ci/core");
+    const { check } = await import("./text-coverage.js");
     const checkWith = (coverage: string) =>
       check({
         version: "0.1.0",
@@ -48,7 +50,7 @@ describe("Report v2 with the accept label", () => {
         threshold: 80,
         repoFiles: REPO_FILES,
         testIntegrityMode: { input: "block" },
-      } as Parameters<typeof check>[0]);
+      });
     const block = checkWith(fixture("golden/coverage.info"));
     const below = checkWith(UNCOVERED);
     expect(block.testIntegrity.signals.map((s) => `${s.id} ${s.severity}`)).toEqual(["TI10 block", "TI13 block"]);
@@ -81,10 +83,11 @@ describe("Report v2 with the accept label", () => {
     expect(validateReport(withString), JSON.stringify(validateReport.errors)).toBe(true);
     expect(validateReport(withNumber)).toBe(false);
 
-    // The v2 schema documents the two codes and the field; the v1 schema is the base commit's bytes.
-    const v2 = read("schema/report.v2.json");
-    for (const name of ["TEST_INTEGRITY_ACCEPTED", "TEST_INTEGRITY_ACCEPT_IGNORED", "acceptLabel"]) {
-      expect(v2, name).toContain(name);
+    // The v2 schema documents the field and the code table the two codes (CORE-140: the schema's code description is
+    // one sentence and a link to that table); the v1 schema is the base commit's bytes.
+    expect(read("schema/report.v2.json"), "acceptLabel").toContain("acceptLabel");
+    for (const code of ["TEST_INTEGRITY_ACCEPTED", "TEST_INTEGRITY_ACCEPT_IGNORED"]) {
+      expect(codeRow(code), code).toMatch(/`(?:info|warn)`/);
     }
     const v1 = readFileSync(new URL("schema/report.v1.json", ROOT));
     expect(createHash("sha256").update(v1).digest("hex")).toBe(V1_AT_BASE);

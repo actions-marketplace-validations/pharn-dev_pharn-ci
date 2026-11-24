@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { TestIndex } from "../src/testIndex/types.js";
 import { measureGrowth, threadCpuMs } from "./growth.js";
 import { fixture } from "./helpers.js";
 import { expectValidReport } from "./schema.js";
@@ -14,7 +15,10 @@ import { expectValidReport } from "./schema.js";
 
 const REPO_ROOT = "/home/runner/work/demo/demo";
 const PATH = "src/big.test.ts";
-const FULL = 524_288;
+// The 512 KiB cap: one run at it holds the 15 s ceiling. The growth is measured at half of it (CORE-134, half the
+// cost), from a quarter of that.
+const CAP = 524_288;
+const FULL = CAP / 2;
 const QUARTER = FULL / 4;
 const CEILING_MS = 15_000;
 const HEADER = 'import { expect, it } from "vitest";\n\n';
@@ -69,7 +73,7 @@ function input(bytes: number) {
   return {
     data: {
       version: "0.1.0",
-      coverage: { text: fixture("test-files-deleted/coverage.info"), format: "lcov" },
+      coverage: { text: fixture("test-files-deleted/coverage.info"), format: "lcov" as const },
       diff: { text: diff },
       repoRoot: REPO_ROOT,
       threshold: 80,
@@ -78,45 +82,44 @@ function input(bytes: number) {
         base: { files: [{ path: PATH, text: base }], dropped: [] },
         head: { files: [{ path: PATH, text: head }], dropped: [] },
       },
-      testIntegrityMode: { input: "block" },
+      testIntegrityMode: { input: "block" as const },
     },
     sizes: { base: base.length, head: head.length, count },
   };
 }
 
-describe("TI06: the comparison of one file grows less than eightfold from a quarter of the cap", () => {
-  it("AC-17: 512 KiB base and head files full of unbalanced toThrow( openings, unterminated quotes and deep nesting give TI06 findings, take less than 8 times the median of 128 KiB ones, and finish each run within 15 s", async () => {
-    const { check } = await import("../src/check.js");
-    type Input = Parameters<typeof check>[0];
+describe("TI06: the comparison of one file finishes within 15 s at the cap and grows less than eightfold", () => {
+  it("AC-17: base and head files full of unbalanced toThrow( openings, unterminated quotes and deep nesting give TI06 findings and finish each run within 15 s at 512 KiB, 256 KiB and 64 KiB, and 256 KiB ones take less than 8 times the median of 64 KiB ones", async () => {
+    const { check } = await import("./text-coverage.js");
+    const cap = input(CAP);
     const full = input(FULL);
     const quarter = input(QUARTER);
     for (const [run, bytes] of [
+      [cap, CAP],
       [full, FULL],
       [quarter, QUARTER],
     ] as const) {
       expect(run.sizes.base).toBeLessThanOrEqual(bytes);
       expect(run.sizes.head).toBeLessThanOrEqual(bytes);
-      expect(Math.max(run.sizes.base, run.sizes.head), "the larger file fills the size").toBeGreaterThan(bytes - 400);
+      // Filled up to the next test, which did not fit (a fixed 400 bytes held at 512 and 128 KiB only by chance).
+      const next = testText(run.sizes.count, "toBeTruthy()").length;
+      expect(Math.max(run.sizes.base, run.sizes.head), "the larger file fills the size").toBeGreaterThan(bytes - next);
       expect(run.sizes.count).toBeGreaterThan(100);
     }
     // The generated files are valid TypeScript: the existing test index parses them with no syntax error.
-    const core = (await import("@pharn-ci/core")) as unknown as {
-      indexTestFile(path: string, text: string): { parsed: boolean; syntaxErrors?: number };
-    };
+    const core = await import("../src/testIndex/indexTestFile.js");
     for (const run of [full, quarter]) {
       for (const side of [run.data.testSources.base, run.data.testSources.head]) {
         const result = core.indexTestFile(PATH, (side.files[0] as { text: string }).text);
         expect(result.parsed, JSON.stringify(result)).toBe(true);
-        expect(result.syntaxErrors).toBe(0);
+        expect((result as TestIndex).syntaxErrors).toBe(0);
       }
     }
 
     const all: number[] = [];
     const time = (run: ReturnType<typeof input>) => {
       const started = threadCpuMs();
-      const report = check(run.data as unknown as Input) as unknown as {
-        testIntegrity: { signals: { id: string; path: string }[]; languages: string[] };
-      };
+      const report = check(run.data);
       const ms = threadCpuMs() - started;
       all.push(ms);
       const ti06 = report.testIntegrity.signals.filter((s) => String(s.id) === "TI06");
@@ -125,7 +128,7 @@ describe("TI06: the comparison of one file grows less than eightfold from a quar
       return { ms, report };
     };
 
-    for (const run of [full, quarter]) {
+    for (const run of [cap, full, quarter]) {
       const warm = time(run);
       expectValidReport(warm.report);
       expect(warm.report.testIntegrity.languages, "the file was indexed").toEqual(["ts"]);

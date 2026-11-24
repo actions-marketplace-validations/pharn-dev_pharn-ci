@@ -12,7 +12,7 @@ const asFile = (report: unknown) => `${JSON.stringify(report, null, 2)}\n`;
 const lines = (path: string) => fixture(path).trim().split("\n");
 
 async function load() {
-  const { check } = await import("../src/check.js");
+  const { check } = await import("./text-coverage.js");
   const { parseConfig } = await import("../src/config.js");
   const { renderMarkdown } = await import("../src/render/markdown.js");
   return { check, parseConfig, renderMarkdown };
@@ -21,8 +21,8 @@ async function load() {
 type Check = Awaited<ReturnType<typeof load>>["check"];
 type Input = Parameters<Check>[0];
 
-function golden(check: Check, dir: string, coverage: unknown, extra: Record<string, unknown> = {}) {
-  const input = {
+function golden(check: Check, dir: string, coverage: Input["coverage"], extra: Partial<Input> = {}) {
+  const input: Input = {
     version: "0.1.0",
     coverage,
     diff: { text: fixture(`${dir}/pr.diff`) },
@@ -31,7 +31,7 @@ function golden(check: Check, dir: string, coverage: unknown, extra: Record<stri
     repoFiles: lines(`${dir}/files.txt`),
     ...extra,
   };
-  return check(input as Input);
+  return check(input);
 }
 
 describe("golden reports and the multi-file coverage input", () => {

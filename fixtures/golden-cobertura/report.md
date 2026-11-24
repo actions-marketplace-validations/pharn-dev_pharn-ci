@@ -1,4 +1,4 @@
-<img src="https://raw.githubusercontent.com/pharn-dev/pharn-ci/main/docs/assets/pharn-logo.svg" alt="pharn" width="48" height="48">
+<img src="https://raw.githubusercontent.com/pharn-dev/pharn-ci/515998146a22a1886341d94236e4138e1777c13a/docs/assets/pharn-logo.svg" alt="pharn" width="48" height="48">
 
 ## 🛡️ pharn-ci · ❌ Fail
 
@@ -33,9 +33,9 @@ No test-integrity findings (mode: warn).
 ### 💬 Messages (2)
 
 - ❌ `DIFF_COVERAGE_BELOW_THRESHOLD` Diff coverage 71.43% is below the threshold of 80%.
-  - Hint: Add tests that exercise the uncovered lines listed in the table above.
+  - Hint: Add tests that run the changed lines listed in the report.
 - ℹ️ `COVERAGE_PATHS_PARTIALLY_UNMATCHED` 1 file path in the coverage report is not a tracked file in the repository; its coverage is not used.
-  - Hint: Nothing to do if those files are generated or outside the repo; if changed files are missing from the table, check the coverage root.
+  - Hint: Check that the coverage paths start at the repository root or at `coverage.root`, so every changed file is matched; generated files and files outside the repository need nothing.
 
 ### 🤖 Agent setup (8 files)
 

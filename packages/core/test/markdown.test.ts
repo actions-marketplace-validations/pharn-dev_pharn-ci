@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { check } from "../src/check.js";
+
+import { MESSAGE_FIXES } from "../src/fix/table.js";
 import { logoMarkup } from "../src/render/logo.js";
 import { formatRanges, renderMarkdown } from "../src/render/markdown.js";
 import { buildReport } from "../src/report.js";
 import { fixture } from "./helpers.js";
-import { expectValidReport, validateReport } from "./schema.js";
+import { expectValidReport, validateReportV1 } from "./schema.js";
+import { check } from "./text-coverage.js";
 
 describe("formatRanges", () => {
   it("collapses consecutive lines", () => {
@@ -133,7 +135,8 @@ describe("renderMarkdown", () => {
     expect(message).toBe(
       "- ❌ `DIFF_UNAVAILABLE` Diff coverage was not computed: could not get the diff for main " +
         "\\[verify your account\\](https:\\/\\/evil.example) @\u200Boctocat \\*\\*urgent\\*\\* \\~\\~x\\~\\~ " +
-        "\\!\\[i\\](www\\.evil.example/i.png) \\_em\\_ \\`t\\` \\#1 \\\\...HEAD (use actions/checkout with fetch-depth: 0)",
+        // "#1" gets a zero-width space before the number so GitHub does not link the issue (CORE-124).
+        "\\!\\[i\\](www\\.evil.example/i.png) \\_em\\_ \\`t\\` \\#\u200B1 \\\\...HEAD (use actions/checkout with fetch-depth: 0)",
     );
     expectInert(message);
   });
@@ -233,9 +236,10 @@ describe("renderMarkdown explainability (F-32)", () => {
       "DIFF_UNAVAILABLE",
       "NO_AGENT_SETUP_FILES",
     ] as const;
-    // Every code the schema documents has a hint.
-    const schemaCodes = /Known codes: ([A-Z_, ]+)\./.exec(JSON.stringify(validateReport.schema))?.[1]?.split(", ");
-    expect(schemaCodes).toEqual([...codes]);
+    // The v1 known codes (schema/report.v1.json's "Known codes:" list) are these eight. CORE-140: the v2 schema's code
+    // description is one sentence and a link, so the list is read from v1; every v2 code is checked below.
+    const v1Codes = /Known codes: ([A-Z_, ]+)\./.exec(JSON.stringify(validateReportV1.schema))?.[1]?.split(", ");
+    expect(v1Codes).toEqual([...codes]);
 
     const report = buildReport({
       version: "0.1.0",
@@ -249,6 +253,17 @@ describe("renderMarkdown explainability (F-32)", () => {
     for (const code of codes) {
       const at = lines.findIndex((l) => l.includes(`\`${code}\``));
       expect(lines[at + 1], code).toMatch(/^ {2}- Hint: \S.{10,}$/);
+    }
+
+    // Every message code the core knows renders a hint that starts with the code's fix.hint (CORE-140).
+    const all = Object.keys(MESSAGE_FIXES) as (keyof typeof MESSAGE_FIXES)[];
+    expect(all.length).toBeGreaterThan(80);
+    report.messages = all.map((code) => ({ level: "info", code, text: `text of ${code}` }));
+    const allLines = renderMarkdown(report).split("\n");
+    for (const code of all) {
+      const at = allLines.findIndex((l) => l.includes(`\`${code}\` text of ${code}`));
+      if (at === -1) continue; // a code the comment shows in its own section, not under Messages
+      expect(allLines[at + 1]?.startsWith(`  - Hint: ${MESSAGE_FIXES[code].hint}`), code).toBe(true);
     }
 
     // A code from a newer producer renders without a hint instead of failing.

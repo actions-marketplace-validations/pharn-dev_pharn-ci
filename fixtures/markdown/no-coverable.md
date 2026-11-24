@@ -1,4 +1,4 @@
-<img src="https://raw.githubusercontent.com/pharn-dev/pharn-ci/main/docs/assets/pharn-logo.svg" alt="pharn" width="48" height="48">
+<img src="https://raw.githubusercontent.com/pharn-dev/pharn-ci/515998146a22a1886341d94236e4138e1777c13a/docs/assets/pharn-logo.svg" alt="pharn" width="48" height="48">
 
 ## 🛡️ pharn-ci · ✅ Pass
 
@@ -20,7 +20,7 @@ No test-integrity findings (mode: warn).
 ### 💬 Messages (1)
 
 - ℹ️ `NO_COVERABLE_CHANGES` No added lines are tracked by the coverage report; nothing to measure.
-  - Hint: Nothing to do if the change has no code; otherwise check that the coverage report includes the changed files.
+  - Hint: Check that the coverage report tracks the source files this change edits.
 
 ### 🤖 Agent setup (1 file)
 

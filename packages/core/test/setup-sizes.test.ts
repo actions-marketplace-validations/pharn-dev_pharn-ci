@@ -1,10 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { check } from "../src/check.js";
+
 import { renderMarkdown } from "../src/render/markdown.js";
 import { parseLsTreeSizes } from "../src/setup/sizes.js";
 import { fixture } from "./helpers.js";
 import { expectValidReport } from "./schema.js";
-import { withoutFix } from "./v090-codes.js";
+import { check } from "./text-coverage.js";
+import { withoutFix } from "./without-fix.js";
 
 const BLOB = "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391";
 const record = (size: string, path: string, type = "blob") =>
@@ -140,6 +141,7 @@ describe("check(): empty agent setup files", () => {
     const report = runCheck(tracked(), new Map([["CLAUDE.md", 0]]));
     const markdown = renderMarkdown(report);
     expect(markdown).toContain("1 agent setup file is empty");
-    expect(markdown).toContain("Fill in the empty file or delete it");
+    // CORE-140: the hint is the code's fix.hint.
+    expect(markdown).toContain("  - Hint: Check why the agent setup file is empty and add its instructions.");
   });
 });

@@ -1,5 +1,6 @@
 import { resolve } from "node:path";
 import {
+  fileStamp,
   GIT_TIMEOUT_MS,
   listDir,
   lstatPath,
@@ -16,14 +17,11 @@ import type { CliDeps } from "./main.js";
 export { GIT_TIMEOUT_MS };
 
 /** Real I/O for the CLI. */
-export function nodeDeps(
-  cwd: string = process.cwd(),
-  opts: { gitTimeoutMs?: number } = {},
-): CliDeps & Required<Pick<CliDeps, "gitStream" | "gitBatch" | "readFileStream">> {
+export function nodeDeps(cwd: string = process.cwd(), opts: { gitTimeoutMs?: number } = {}): CliDeps {
   const timeout = opts.gitTimeoutMs ?? GIT_TIMEOUT_MS;
   const realGit: CliDeps["git"] = (args) => runGit(cwd, args, timeout);
   const realReadFile: CliDeps["readFile"] = (path) => readFile(path);
-  const deps: CliDeps & Required<Pick<CliDeps, "gitStream" | "gitBatch" | "readFileStream">> = {
+  const deps: CliDeps = {
     cwd,
     gitBatch: (args, input) => runGitBatch(cwd, args, input, timeout),
     // A caller that replaced `git` or `readFile` on these deps (a test double, a wrapper) keeps getting its own
@@ -43,6 +41,7 @@ export function nodeDeps(
     resolvePath: (...segments) => resolve(...segments),
     // `pharn-ci test`: the command runs without a shell, so no argument is ever read as shell syntax.
     runCommand: (command, args) => runCommand(cwd, command, args),
+    fileStamp,
     stdout: (text) => process.stdout.write(text),
     stderr: (text) => process.stderr.write(text),
   };

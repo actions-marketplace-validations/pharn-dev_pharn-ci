@@ -1,16 +1,14 @@
 import { describe, expect, it } from "vitest";
+import type { AgentPrFacts } from "../src/agents.js";
+import type { Report } from "../src/report.js";
 import { fixture } from "./helpers.js";
 import { expectValidReport } from "./schema.js";
 
 // E3 item 24a part B (P11), AC-9. check() is loaded inside the test body: the AC test is written before the build adds
 // rule P11, so nothing the build adds may run while this file loads. The diffs are generated here.
 
-type Violation = { id: string; severity: string; path: string | null; line: number | null; detail: string };
-type Message = { level: string; code: string; text: string };
-type Report = { verdict: string; messages: Message[]; policy?: { violations: Violation[] } };
-
 const REPO_ROOT = "/home/runner/work/demo/demo";
-const AGENT_FACTS = {
+const AGENT_FACTS: AgentPrFacts = {
   pr: {
     author: { login: "claude[bot]", type: "Bot" },
     labels: [],
@@ -30,7 +28,7 @@ const modification = (path: string) =>
   ].join("\n");
 
 async function run(count: number): Promise<{ report: Report; paths: string[] }> {
-  const { check } = await import("@pharn-ci/core");
+  const { check } = await import("./text-coverage.js");
   const paths = Array.from({ length: count }, (_, i) => name(i));
   const report = check({
     version: "0.1.0",
@@ -47,9 +45,9 @@ async function run(count: number): Promise<{ report: Report; paths: string[] }> 
       document: { version: 1, agents: { protected_paths: ["gen/**"] } },
     },
     agentPrFacts: AGENT_FACTS,
-  } as never);
+  });
   expectValidReport(report);
-  return { report: report as unknown as Report, paths };
+  return { report: report, paths };
 }
 
 const p11 = (report: Report) => (report.policy?.violations ?? []).filter((v) => v.id === "P11");

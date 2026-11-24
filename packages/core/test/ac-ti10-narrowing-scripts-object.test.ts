@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { TestSourceDrop, TestSourceFile } from "../src/testSources.js";
 import { fixture } from "./helpers.js";
 import { expectValidReport } from "./schema.js";
 
@@ -12,8 +13,8 @@ const REPO_FILES = ["package.json", "src/a.ts", "src/a.test.ts"];
 const PATH = "package.json";
 
 interface SideSources {
-  files: Array<{ path: string; text: string }>;
-  dropped: Array<{ path: string; reason: string }>;
+  files: TestSourceFile[];
+  dropped: TestSourceDrop[];
 }
 interface Sources {
   base: SideSources;
@@ -57,7 +58,7 @@ function addedTestLine(diff: string): { line: number; text: string } {
 }
 
 async function ti10Of(diff: string, sources: Sources | undefined) {
-  const { check } = await import("../src/check.js");
+  const { check } = await import("./text-coverage.js");
   const report = check({
     version: "0.1.0",
     coverage: { text: fixture("test-files-deleted/coverage.info"), format: "lcov" },
@@ -67,7 +68,7 @@ async function ti10Of(diff: string, sources: Sources | undefined) {
     repoFiles: REPO_FILES,
     testIntegrityMode: { input: "block" },
     ...(sources === undefined ? {} : { testSources: sources }),
-  } as Parameters<typeof check>[0]);
+  });
   expectValidReport(report);
   return report.testIntegrity.signals.filter((signal) => String(signal.id) === "TI10");
 }

@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import type { PolicyDocument } from "../src/policy/types.js";
+import type { Report } from "../src/report.js";
 import { fixture } from "./helpers.js";
 import { expectValidReport } from "./schema.js";
 
@@ -6,14 +8,10 @@ import { expectValidReport } from "./schema.js";
 // AC test is written before the build adds rule P07 and its fixtures, so nothing the build adds may run while this
 // file loads.
 
-type Violation = { id: string; severity: string; path: string | null; line: number | null; detail: string };
-type Message = { level: string; code: string; text: string };
-type Report = { verdict: string; messages: Message[]; policy?: { violations: Violation[] } };
-
 const REPO_ROOT = "/home/runner/work/demo/demo";
 
-async function run(extra: Record<string, unknown>): Promise<Report> {
-  const { check } = await import("@pharn-ci/core");
+async function run(extra: Omit<PolicyDocument, "version">): Promise<Report> {
+  const { check } = await import("./text-coverage.js");
   const report = check({
     version: "0.1.0",
     coverage: { text: fixture("golden/coverage.info"), format: "lcov" },
@@ -29,9 +27,9 @@ async function run(extra: Record<string, unknown>): Promise<Report> {
       ],
       dropped: [],
     },
-  } as never);
+  });
   expectValidReport(report);
-  return report as unknown as Report;
+  return report;
 }
 
 const p07 = (report: Report) => (report.policy?.violations ?? []).filter((v) => v.id === "P07");
@@ -40,8 +38,9 @@ const withCode = (report: Report, code: string) => report.messages.filter((m) =>
 describe("org policy rule P07: a file: policy only tightens", { timeout: 60_000 }, () => {
   it("AC-10: under a file: policy, setup.consistency off and policy.rules.P07 info leave P07 at warn and are each named in one POLICY_OVERRIDE_IGNORED; setup.consistency block blocks with no POLICY_OVERRIDE_IGNORED", async () => {
     for (const [extra, named] of [
-      [{ setup: { consistency: "off" } }, "setup.consistency (policy-file)"],
-      [{ policy: { rules: { P07: "info" } } }, "policy.rules.P07 (policy-file)"],
+      // CORE-123: the message names the setting and no layer (it was "setup.consistency (policy-file)").
+      [{ setup: { consistency: "off" } }, "applies: setup.consistency."],
+      [{ policy: { rules: { P07: "info" } } }, "applies: policy.rules.P07."],
     ] as const) {
       const report = await run(extra);
       expect(

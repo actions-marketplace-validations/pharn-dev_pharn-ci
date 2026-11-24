@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import type { Report } from "../src/report.js";
 import { FIXTURES } from "./helpers.js";
 import { expectValidReport } from "./schema.js";
 
@@ -14,22 +15,6 @@ const REPO_ROOT = "/home/runner/work/demo/demo";
 const PATHS = ["assets/logo.png", "src/__snapshots__/cart.test.ts.snap", "tests/data.bin", "tests/fixtures/cart.png"];
 /** The verdict each AC-4 input gave at the base commit 0942691 (recorded there with these check() inputs). */
 const BASE_VERDICT = "pass";
-
-interface Signal {
-  id: string;
-  severity: string;
-  path: string;
-  detail: string;
-}
-interface Message {
-  code: string;
-  level: string;
-}
-interface Report {
-  verdict: string;
-  messages: Message[];
-  testIntegrity: { signals: Signal[] };
-}
 
 interface Entry {
   path: string;
@@ -50,7 +35,7 @@ function entries(diff: string): Entry[] {
 }
 
 async function run(diff: string): Promise<Report> {
-  const { check } = await import("../src/check.js");
+  const { check } = await import("./text-coverage.js");
   const report = check({
     version: "0.1.0",
     coverage: { text: readFileSync(`${FIXTURES}test-files-deleted/coverage.info`, "utf8"), format: "lcov" },
@@ -59,9 +44,9 @@ async function run(diff: string): Promise<Report> {
     threshold: 80,
     repoFiles: readFileSync(`${FIXTURES}test-files-deleted/files.txt`, "utf8").trim().split("\n"),
     testIntegrityMode: { input: "block" },
-  } as unknown as Parameters<typeof check>[0]);
+  });
   expectValidReport(report);
-  return report as unknown as Report;
+  return report;
 }
 
 const DELETED_TEST = `${[

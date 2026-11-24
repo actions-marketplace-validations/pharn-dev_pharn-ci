@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { Message, Report, TestIntegritySignal } from "../src/report.js";
 import { fixture } from "./helpers.js";
 
 // check() and renderMarkdown() are loaded inside the test body: the AC tests are written before the accept label
@@ -12,11 +13,12 @@ const CUSTOM = "team/tests-ok";
 const HOSTILE = "a`b <!-- @x |";
 
 /** The TI01, TI04, TI11 and TI14 hints as renderMarkdown() gave them at the base commit a1089fd. */
+// CORE-140: each hint is its code's fix.hint now, on purpose; these four still name no accept label.
 const UNCHANGED: Record<string, string> = {
-  TI01: "  - Hint: Restore the deleted tests, or say in the PR why they go so a reviewer can confirm it.",
-  TI04: "  - Hint: Remove the marker so the whole suite runs, or say in the PR why only the marked tests should run.",
-  TI11: "  - Hint: Restore the test step or trigger, or say in the PR why CI stops running these tests so a reviewer can confirm it.",
-  TI14: "  - Hint: Restore the threshold or the exclusions, or say in the PR why they change so a reviewer can confirm it.",
+  TI01: "  - Hint: Restore the deleted test file, or move its tests to a test file that still runs them.",
+  TI04: "  - Hint: Remove the focused-run marker (.only, fit or fdescribe) so every test in the file runs again.",
+  TI11: "  - Hint: Revert the workflow change so CI runs the tests on pull requests as before.",
+  TI14: "  - Hint: Revert the change to the coverage settings of the pharn-ci config so the gate measures the same files as before.",
 };
 
 /** The words the existing render tests look for in each hint. */
@@ -28,7 +30,7 @@ const KEPT_WORDS: Record<string, RegExp[]> = {
 
 /** A report with one block signal and one error message for each of the seven ids, and `acceptLabel` when given. */
 async function reportWith(acceptLabel: string | undefined) {
-  const { check } = await import("@pharn-ci/core");
+  const { check } = await import("./text-coverage.js");
   const base = check({
     version: "0.1.0",
     coverage: { text: fixture("golden/coverage.info"), format: "lcov" },
@@ -37,16 +39,18 @@ async function reportWith(acceptLabel: string | undefined) {
     threshold: 80,
     repoFiles: fixture("golden/files.txt").trim().split("\n"),
     testIntegrityMode: { input: "block" },
-  } as Parameters<typeof check>[0]);
-  const signals = IDS.map((id, i) => ({
-    id,
-    severity: "block",
-    path: `src/f${i}.test.ts`,
-    line: i + 1,
-    detail: `detail-${id}`,
-  }));
-  const messages = IDS.map((id) => ({ level: "error", code: `TEST_INTEGRITY_${id}`, text: `text-${id}` }));
-  return {
+  });
+  const signals = IDS.map(
+    (id, i): TestIntegritySignal => ({
+      id,
+      severity: "block",
+      path: `src/f${i}.test.ts`,
+      line: i + 1,
+      detail: `detail-${id}`,
+    }),
+  );
+  const messages = IDS.map((id): Message => ({ level: "error", code: `TEST_INTEGRITY_${id}`, text: `text-${id}` }));
+  const report: Report = {
     ...base,
     verdict: "fail",
     messages: [...base.messages, ...messages],
@@ -56,7 +60,8 @@ async function reportWith(acceptLabel: string | undefined) {
       signals,
       ...(acceptLabel === undefined ? {} : { acceptLabel }),
     },
-  } as unknown as typeof base;
+  };
+  return report;
 }
 
 /** The lines of the Test integrity section: from its heading to the line before the next `### ` heading. */

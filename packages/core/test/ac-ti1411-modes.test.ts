@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { Report } from "../src/report.js";
 import { fixture } from "./helpers.js";
 import { expectValidReport } from "./schema.js";
 
@@ -37,7 +38,7 @@ const DIFF =
   ]);
 
 async function run(mode: "block" | "warn" | "off") {
-  const { check } = await import("../src/check.js");
+  const { check } = await import("./text-coverage.js");
   const report = check({
     version: "0.1.0",
     coverage: { text: fixture("test-files-deleted/coverage.info"), format: "lcov" },
@@ -46,12 +47,10 @@ async function run(mode: "block" | "warn" | "off") {
     threshold: 80,
     repoFiles: fixture("test-files-deleted/files.txt").trim().split("\n"),
     testIntegrityMode: { input: mode },
-  } as Parameters<typeof check>[0]);
+  });
   expectValidReport(report);
   return report;
 }
-
-type Report = Awaited<ReturnType<typeof run>>;
 
 const summary = (report: Report) =>
   report.testIntegrity.signals.map((s) => `${s.id} ${s.severity} ${s.path}${s.line === null ? "" : `:${s.line}`}`);

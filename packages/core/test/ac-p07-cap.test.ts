@@ -1,17 +1,21 @@
 import { describe, expect, it } from "vitest";
+import type { ResolvedPolicy } from "../src/policy/resolved.js";
+import type { Report } from "../src/report.js";
 import { fixture } from "./helpers.js";
 import { expectValidReport } from "./schema.js";
 
 // E3 item 24 (P07), AC-13. check() is loaded inside the test body: the AC test is written before the build adds rule
 // P07, so nothing the build adds may run while this file loads. The instruction files are generated here.
 
-type Violation = { id: string; severity: string; path: string | null; line: number | null; detail: string };
-type Message = { level: string; code: string; text: string };
-type Report = { verdict: string; messages: Message[]; policy?: { violations: Violation[] } };
 type Source = { path: string; text: string };
 
 const REPO_ROOT = "/home/runner/work/demo/demo";
-const APP = { source: "app", version: 3, fetchedAt: "2026-10-26T12:00:00.000Z", document: { version: 1 } };
+const APP: ResolvedPolicy = {
+  source: "app",
+  version: 3,
+  fetchedAt: "2026-10-26T12:00:00.000Z",
+  document: { version: 1 },
+};
 /** `pnpm install` on line 3. */
 const AGENTS: Source = { path: "AGENTS.md", text: "# Agents\n\nRun `pnpm install`.\n" };
 /** `npm install` on line 1. */
@@ -21,7 +25,7 @@ const rule = (i: number): Source => ({
 });
 
 async function run(files: Source[]): Promise<Report> {
-  const { check } = await import("@pharn-ci/core");
+  const { check } = await import("./text-coverage.js");
   const report = check({
     version: "0.1.0",
     coverage: { text: fixture("golden/coverage.info"), format: "lcov" },
@@ -31,9 +35,9 @@ async function run(files: Source[]): Promise<Report> {
     repoFiles: [...files.map((f) => f.path), "src/a.ts"],
     policy: APP,
     agentInstructionSources: { files, dropped: [] },
-  } as never);
+  });
   expectValidReport(report);
-  return report as unknown as Report;
+  return report;
 }
 
 const p07 = (report: Report) => (report.policy?.violations ?? []).filter((v) => v.id === "P07");

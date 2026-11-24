@@ -11,6 +11,154 @@ Releases are cut by a maintainer; see [`docs/RELEASING.md`](./docs/RELEASING.md)
 
 ### Changed
 
+- The TI01 and TI02 test pairing is one bounded loop (CORE-145): the prefix index, the moved-test-file matcher and the
+  first-unused-entry list are replaced by one walk over the new-at-head tests, and each rule compares a removed test
+  with at most 256 not-yet-paired new tests, in head order. Below 256 new tests the pairs are the same as before. A test
+  whose match lies past the bound is reported, where the old index (which counted 256 posting entries) could sometimes
+  still find it: a TI02 at the mode's level, and a deleted test file holding such a test stays at the mode's level for
+  TI01. The accept label clears such a block when the test was in fact renamed or moved. See `docs/LIMITS.md`.
+- A test file that pharn-ci could not read now fails `test-integrity: block` instead of warning (CORE-351). In mode
+  `warn` nothing changes. Each case is a per-file `TEST_INTEGRITY_INDEX_UNAVAILABLE` error that the accept label lowers
+  to a warning; the whole-run error for a modified `.py` test file with no Python interpreter (`python-not-found`)
+  stays and the label never lowers it. The cases:
+  - a runner whose `python3` is older than 3.8, or a Python index run that crashed, timed out, wrote too much output
+    or wrote output it could not read (`python-too-old`, `python-failed`, `timeout`, `output-too-large`,
+    `bad-output`), when the change modifies or adds a `.py` test file;
+  - a `.py` test file whose head `python3` cannot parse (`syntax-error`, Python 2 syntax included, or `too-deep`,
+    `too-large`, `parser-threw`), whatever the merge base held;
+  - added `.py` test files, for every reason above and for `python-not-found`;
+  - a modified test file of any language that the sources reader dropped as `over-file-cap` or `over-total-cap` on
+    either side (this closes the 16 MiB padding evasion), or as `too-large`, `binary` or `unsafe-path` on one side
+    while the other side was read; `too-large` or `binary` on both sides and `missing` stay warnings.
+
+  A file renamed from a non-test path into a test path is now read at HEAD only and counts as an added test file.
+  The log line for an unavailable Python index names the reason and says the run fails in mode `block`. No message
+  code, field or reason changes. See [`docs/LIMITS.md`](./docs/LIMITS.md).
+- A `file:` policy a pull request edits can no longer loosen any setting the file may carry (CORE-348): the Action and
+  the CLI read the file at the base commit (the base branch's copy) before applying it and unite the two copies key by
+  key, so the stricter value applies for the threshold, the mode, `setup.require`, `setup.expect`, `setup.consistency`,
+  the signal and rule severities, the agent-settings and file lists, the MCP allowlist, `flaky.quarantine`,
+  `agents.protected_paths_mode` and the other `agents` and `dependencies` keys. Until now only the agent lists, the P14
+  caps and the injection settings were united. A value the pull request has looser than the base is named in
+  `POLICY_OVERRIDE_IGNORED`, with both numbers for a threshold; the keys a file may not set stay as they were. The base
+  copy's injection phrases are now scanned first, so a pull request can no longer push them out of the 100-phrase scan
+  by adding phrases that sort earlier. The union needs the base copy: when it is absent (the pull request adds the
+  file), unreadable or not a valid policy, or there is no local diff to name the base (the Action in PR-number mode, a
+  compare-API diff), only the pull request's copy applies, as before. See [`docs/policy.md`](./docs/policy.md).
+- A `file:` policy a pull request edits can no longer drop the injection phrases its copy at the base commit names by
+  removing the whole `injection` key (CORE-14 follow-up): the base's phrases were united with the head's only when the
+  head copy still had the key, in the Action and the CLI. The base's raised `injection.signals` severities now apply
+  the same way, whether or not the head has the key, and a head value below one is listed as not applied. A base that
+  cannot be read or has no policy file changes nothing, as before.
+- P07 and the stale-instruction check (SI01 to SI03) read instruction files with one set of line helpers (CORE-142),
+  so the two no longer differ on the same line. The stale check now reads PowerShell, `pwsh`, `ps1`, `cmd` and `bat`
+  fences and a PowerShell `PS …> ` prompt in a console block, as P07 did, and no longer takes "no" out of "Noël" as a
+  negation (a word may hold any letter, not only ASCII). P07 now reads a span after a word such as `docs/not.md`,
+  which it read as the negation "not"; a word may hold a dot after its first letter, as in the stale check.
+- P07 and the stale-instruction check (SI01 to SI03) read code fences with one reader, as CommonMark reads them
+  (CORE-14). A fence line with text after it (`` ```text `` inside a block) is a line of the block, not its end: P07
+  ended the block there, so the closing fence opened an unmarked (shell) block and the prose after it could declare a
+  tool. A fence inside a list item, indented 4 spaces or more under `1. Install:` or written on the marker's line
+  (`` - ```bash ``), is read by both: the stale check skipped the first, and both scans took the second's closing fence
+  for a new unmarked block. A fence line in an indented code block outside a list opens nothing, where P07 opened a
+  block. A fence's language is its first word cut at `{`, or the word in a leading `{…}`: `js{1,3}`, `{bash}` and
+  `{.sh}` are their language for both, where P07 read them as examples, and `{.text}`, `{r}` and `{=html}` are
+  examples, where the stale check read them as shell.
+- TI09 reads the pytest tables of `pyproject.toml` with the TOML reader of dependency safety (CORE-142), so a table
+  reads the same in every TOML spelling, as CORE-114 made it for dependencies. A `[tool.pytest.ini_options]` table
+  moved to dotted keys (`[tool]` then `pytest.ini_options.testpaths = …`) or an inline table, or written with a quoted
+  header part, was not seen at all, so narrowing `testpaths` that way passed; it is now read and judged. A file that is
+  not valid TOML anywhere is refused as `invalid-toml`, as pytest refuses it, where before only the pytest tables had
+  to parse, and a multi-line string value is compared whole, where only its first line was.
+- One extension-to-language mapper for the test-integrity signals (CORE-142). Every extension maps as before; a file
+  whose whole name is an extension (`tests/.ts`, `.py`) is now JS/TS or Python for the test pairing and the source-file
+  signals too, as the one-line test readers (TI03, TI04) already read it.
+- Each message code has one advice text (CORE-140). The `Hint:` line in the PR comment and the job summary is now the
+  same sentence as the report's `fix.hint` for that code or finding, so the two can no longer disagree; for the
+  test-integrity codes whose findings the accept label can lower, a clause at its end names the label, as before.
+  The hint texts of the comment change. `fix.hint` keeps its text except for TI03, TI09, TI10, TI13, TI17,
+  `TEST_INTEGRITY_ACCEPTED`, D05 and `DEPENDENCY_CHECK_INCOMPLETE`, whose one text carries what the comment's hint said
+  (say in the PR why, a raised retry is a warning only, remove the accept label to judge a later push again,
+  `dependency-allowed-hosts` for a registry your team runs, the 32 MiB cap). Every message code is unchanged. The
+  test-integrity signal ids are written once, in one registry in the core, and the policy's signal ids, the message
+  codes, their fix hints and messages derive from it. The message `code` description in `schema/report.v2.json` is now
+  one sentence that links to the code table in `docs/output.md`; no field, type or pattern changes.
+- PR comment hints carry the setting or key to change again (CORE-14 follow-up). The fix hints of 51 message codes
+  (and of the findings of their 16 signal ids) now name what the comment's own hints named before CORE-140: the input,
+  config key or flag (`coverage.file`, `coverage-root`, `--base`, `junit-paths`, `setup.expect`, `test-integrity`),
+  the workflow setting (`fetch-depth: 0`, `permissions: id-token: write`, `if: always()`), the cap (512 KiB, 200 test
+  files, 250 commits, the JUnit caps) or the concrete cause (Python 3.8 or newer, a `binary` attribute, a truncated
+  coverage file). The `Hint:` line and `fix.hint` change together; every code and kind is unchanged.
+- The local `git diff` of the CLI and the Action names the base and `HEAD` commit ids the run resolved once (CORE-14
+  follow-up), not the base ref, so a ref that moves during the run can no longer make the diff and the check for a
+  base that is `HEAD` or after it judge different commits. A base that does not resolve is diffed by name as before,
+  and git's own error is still the one reported. The CLI now also reads a `--policy-file` at the base commit, as the
+  Action does, so a branch that removes an `injection.phrases` entry from the file is still checked for that phrase.
+- The CLI and the Action gather what the checks read with one shared function (CORE-136), so they no longer differ on
+  the same repository. The Action now scans the agent config files for secrets (A7), and reads the agent instruction
+  (P07) and settings files (P02 to P06), at `HEAD` also when there is no diff to measure because the checkout is still
+  the head under review: a `base-ref` that resolves to `HEAD` or after it, or a run with no base (a push without
+  `base-ref`). Before, it reported `AGENT_CONFIG_SECRET_UNSCANNED` there; the CLI already scanned. PR-number mode, a
+  compare-API diff and a `pull_request_target` checkout of the base still read nothing and say so. The CLI now logs a
+  missing Python interpreter (or another unavailable Python test index) on stderr, as the Action logs it; it was
+  silent. Under `--policy-file` the CLI also reads the files rule P13 compares, which it does not run without a pull
+  request, and `--dependencies lookup` always says on stderr that the CLI makes no registry lookups.
+- TI15 and SI04 are no longer emitted (CORE-144, decision Q6). TI15 (a source condition that compares with a value
+  the tests add) was `info`, 0 of 30 sampled findings were right (`docs/PRECISION.md`), and it missed its own Skylos
+  case; SI04 (an old instruction file that names a file the change edits) was `info` and silent on the default
+  shallow checkout, and it cost a `git log` call per instruction file, which is gone: the stale-instruction reader no
+  longer runs `git log`. `TEST_INTEGRITY_TI15` and `SETUP_STALE_SI04` stay in `schema/report.v2.json`, so an older
+  report that holds them still validates, and a policy's `test_integrity.signals.TI15` still validates and changes
+  nothing. The Skylos nine stay at 8 of 9.
+- Policy findings and messages are simpler (CORE-123). P09 no longer reports an edited agent settings or MCP file that
+  complies (`info`) or that supplies a required deny rule or hook (`warn`); its block and warn entries for a file that
+  fails P02 to P06 or could not be checked are unchanged. `POLICY_OVERRIDE_IGNORED` names each setting and no longer
+  the layer it came from (`(input)`, `(config)`, `(policy-file)`); P09's verdicts on an edit of the config or a
+  workflow are unchanged. An exception inside the upload no longer fails the step under debug logging (`RUNNER_DEBUG=1`): it is logged by its
+  error class and the upload ends `failed`, as in every other run. The policy response's `etag`, `updatedAt` and
+  `settings.redactMessages` are optional and not read.
+- `pharn-ci test` trusts only a JUnit file this run wrote (CORE-121). After a failed command it exited `0` when every
+  failed test in the matched JUnit files was quarantined, also when a file was left by an earlier run, a cache or a
+  commit, so a command that crashed before any test ran could exit `0`. Now it records each matched file's
+  modification time and sha256 before the command starts; after a non-zero exit, a file with both unchanged is stale,
+  the command's own code is kept, and one stderr line names the stale files. A file rewritten with the same bytes (a
+  new time) or with new bytes (the old time) is fresh. A command that exits `0` still exits `0`.
+- The Action no longer adopts a marker comment written by a bot that wrote the pull request (CORE-120). With a token
+  whose login is unknown (the default `GITHUB_TOKEN`, an App installation token), any bot's comment with pharn-ci's
+  marker and scope line counted as pharn-ci's own, so a coding agent that opened the pull request could post one and
+  edit the report pharn-ci wrote into it. Now a bot that is the pull request's author, or the author or committer of
+  one of its commits, is never adopted, and when the author or the commits cannot all be read only
+  `github-actions[bot]` is; pharn-ci posts its own comment instead and never edits or deletes the other one.
+  `github-actions[bot]` is still adopted, also on a pull request a workflow opened. A known login is unchanged.
+- Docs: the policy docs say what each key does today (CORE-125). The `policy.required` description says it makes
+  unreadable agent settings files an error in an app policy, and that only the `policy: required` input makes a policy
+  fetch failure block; `agents.require_human_approval` and P12 are validated and not applied; `docs/policy.md` explains
+  how a `file:` policy is changed (every edit is a P09 block); `docs/LIMITS.md` says the `dependencies` keys are
+  applied; P13 and P14, like P11, use the agent-PR flag.
+- A failed OIDC token request is reported (CORE-122). When the job granted `id-token: write` and the token request
+  threw, timed out or returned no token, `policy: auto` skipped the org policy with no message, so the team believed
+  its policy applied. That is now a `POLICY_UNAVAILABLE` warning with the reason `no-oidc-token` (an error under
+  `policy: required`, as before); a job that does not grant `id-token: write` stays silent. The message names no token,
+  URL or error text, and the one job-log line names the error class only. The upload still skips such a run with one
+  info line and no message. No new message code and no schema change.
+- An uploaded run keeps the Action's own pull request comment unless the Pharn GitHub App says it commented
+  (CORE-119). After every successful upload the Action posted nothing and turned its earlier comment into a pointer,
+  so when the App's comment failed the pull request had no comment at all. The Action now reads `commentUrl` from the
+  answer to `POST /api/v1/runs` and skips its comment only when it is an `https` URL of at most 2,048 characters;
+  `null`, a missing field (an older app) or any other value means it posts or updates its comment as a run without an
+  upload does. The value is never logged or written to the report, the comment or an output; `comment: false` still
+  posts nothing.
+- The PR comment no longer turns issue references in message text into links, and its logo is pinned to a commit
+  (CORE-124). GitHub linked `#1`, `org/repo#1`, `GH-1` and `org/repo/issues/1` (also `/pull/`, `/discussions/`) in
+  message text after the backslash escapes, and a link to another repository's issue adds a "mentioned this" entry
+  there; each now gets a zero-width space before the number, as `@` gets one after it. Text in code spans is
+  unchanged. The logo URL named `main`, so a change to the file changed the image in every comment ever posted; it
+  now names a 40-character commit SHA.
+- A policy the app serves with keys this version does not know is no longer dropped whole (CORE-118): a newer signal
+  id, rule, response key or `setup.expect` tool is skipped, the rest of the policy (threshold, mode, protected paths)
+  applies, and one new `POLICY_KEYS_UNKNOWN` warning names up to 20 skipped keys. A known key with a bad value still
+  makes the policy unavailable, a `file:` policy with an unknown key still fails the step, and `updatedAt` may carry a
+  numeric offset such as `+00:00`.
 - Docs: `docs/LIMITS.md` lists, in one place, the files and spellings dependency safety (D04 and D05) still does not
   read (CORE-117). The spellings closed by the lockfile and manifest readers stay described as read.
 - Dependency safety judges a `uv.lock` package's sdist and wheel URLs (CORE-9 R4.8). D05 judged a uv package by its

@@ -10,7 +10,7 @@ import { expectValidReport } from "./schema.js";
 
 /** The one fixed logo line, written here so the test does not reuse the renderer's own constant. */
 const LOGO =
-  '<img src="https://raw.githubusercontent.com/pharn-dev/pharn-ci/main/docs/assets/pharn-logo.svg" alt="pharn" width="48" height="48">';
+  '<img src="https://raw.githubusercontent.com/pharn-dev/pharn-ci/515998146a22a1886341d94236e4138e1777c13a/docs/assets/pharn-logo.svg" alt="pharn" width="48" height="48">';
 
 /** U+1F6E1 U+FE0F, the brand mark, and U+00B7, the separator, as the SPEC writes them. */
 const HEADING_PREFIX = "## \u{1F6E1}\u{FE0F} pharn-ci · ";
@@ -52,7 +52,7 @@ interface Hostile {
 
 /** Reports built by check() from the PR-controlled inputs of fixtures/render/hostile-paths.json. */
 async function hostileReports(): Promise<Report[]> {
-  const { check } = await import("../src/check.js");
+  const { check } = await import("./text-coverage.js");
   const hostile = JSON.parse(fixture("render/hostile-paths.json")) as Hostile;
   const reports = [
     // A missing coverage file whose path is hostile, with hostile tracked paths.
@@ -138,7 +138,8 @@ describe("renderMarkdown(): the logo line opens every rendering, and is the only
     expect(pass.messages).toHaveLength(0);
 
     const warn = await build({
-      diffCoverage: { ...met, threshold: null, meetsThreshold: null },
+      // meetsThreshold null is not a DiffCoverageResult value (it is never null): kept as written, the cast says so.
+      diffCoverage: { ...met, threshold: null, meetsThreshold: null as unknown as boolean },
       threshold: null,
       changedConfigPaths: [".pharn/ci.yml"],
     });

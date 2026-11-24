@@ -1,8 +1,11 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import type { TestIntegritySignal as Signal } from "../src/report.js";
+import type { TestSourceFile as SourceFile } from "../src/testSources.js";
 import { FIXTURES, fixture } from "./helpers.js";
 import { expectValidReport } from "./schema.js";
+import type { TextCheckInput } from "./text-coverage.js";
 
 // check() and the fixtures are loaded inside each test body: the AC tests are written before the new TI01 and TI02
 // rules exist, so nothing that depends on them may run while the file loads. The Skylos cases and the existing
@@ -35,18 +38,6 @@ const CAUGHT: ReadonlyMap<string, string> = new Map([
   ["edited-expected-value", "TI07"],
 ]);
 
-interface SourceFile {
-  path: string;
-  text: string;
-}
-interface Signal {
-  id: string;
-  severity: string;
-  path: string;
-  line: number | null;
-  detail: string;
-}
-
 const byPath = (a: SourceFile, b: SourceFile) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
 
 /** The `<logical path>.txt` files under one side of a case, as test-source files sorted by logical path. */
@@ -65,7 +56,7 @@ function sideFiles(dir: string): SourceFile[] {
     .sort(byPath);
 }
 
-const sourcesAt = (dir: string) => {
+const sourcesAt = (dir: string): Partial<TextCheckInput> => {
   const base = sideFiles(`${dir}/base`);
   const head = sideFiles(`${dir}/head`);
   return base.length + head.length === 0
@@ -73,8 +64,8 @@ const sourcesAt = (dir: string) => {
     : { testSources: { base: { files: base, dropped: [] }, head: { files: head, dropped: [] } } };
 };
 
-async function run(diff: string, repoFiles: string[], extra: Record<string, unknown>): Promise<Signal[]> {
-  const { check } = await import("../src/check.js");
+async function run(diff: string, repoFiles: string[], extra: Partial<TextCheckInput>): Promise<Signal[]> {
+  const { check } = await import("./text-coverage.js");
   const report = check({
     version: "0.1.0",
     coverage: { text: fixture("test-files-deleted/coverage.info"), format: "lcov" },
@@ -84,9 +75,9 @@ async function run(diff: string, repoFiles: string[], extra: Record<string, unkn
     repoFiles,
     testIntegrityMode: { input: "block" },
     ...extra,
-  } as unknown as Parameters<typeof check>[0]);
+  });
   expectValidReport(report);
-  return report.testIntegrity.signals as unknown as Signal[];
+  return report.testIntegrity.signals;
 }
 
 const skylos = (name: string) =>

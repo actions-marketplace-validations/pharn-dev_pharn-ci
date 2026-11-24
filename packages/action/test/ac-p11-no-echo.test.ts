@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import type { Report } from "@pharn-ci/core";
 import { describe, expect, it } from "vitest";
 import { expectValidReport } from "../../core/test/schema.js";
 import { harness, PR_CONTEXT } from "./harness.js";
@@ -24,14 +25,6 @@ const DIFF = [
   "",
 ].join("\n");
 
-type Violation = { id: string; severity: string; path: string | null; line: number | null; detail: string };
-type Message = { level: string; code: string; text: string };
-type Report = Record<string, unknown> & { messages: Message[]; policy?: { violations: Violation[] } };
-interface Core {
-  check(input: unknown): Report;
-  renderMarkdown(report: Report): string;
-}
-
 function expectNoSentinel(text: string, label: string) {
   const lower = text.toLowerCase();
   for (const sentinel of SENTINELS) expect(lower.includes(sentinel.toLowerCase()), `${label}: ${sentinel}`).toBe(false);
@@ -46,7 +39,10 @@ describe("P11 never echoes a glob, label, login or commit text", { timeout: 120_
     expect(JSON.stringify(document)).toContain("secret-SENTINEL-glob");
 
     // check() and renderMarkdown().
-    const core = (await import("@pharn-ci/core")) as unknown as Core;
+    const core = {
+      ...(await import("@pharn-ci/core")),
+      check: (await import("../../core/test/text-coverage.js")).check,
+    };
     const report = core.check({
       version: "0.1.0",
       coverage: { text: read("fixtures/golden/coverage.info"), format: "lcov" },

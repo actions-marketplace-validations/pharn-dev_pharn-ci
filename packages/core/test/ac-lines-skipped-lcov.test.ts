@@ -1,12 +1,11 @@
 import { describe, expect, it } from "vitest";
+import type { Message } from "../src/report.js";
 import { expectValidReport } from "./schema.js";
 
 // check() is imported inside the test body: this AC test is written before the skipped-records message exists,
 // so nothing that depends on it may run while the file loads.
 
 const CODE = "COVERAGE_LINES_SKIPPED";
-
-type Message = { level: string; code: string; text: string };
 
 // A diff that adds lines 3 to 5 of src/math.ts.
 const DIFF = [
@@ -43,7 +42,7 @@ const MALFORMED = [
 
 describe("check(): malformed lcov records are counted", () => {
   it("AC-1: reports one info COVERAGE_LINES_SKIPPED message with the count 5 and leaves verdict and percent unchanged", async () => {
-    const { check } = await import("../src/check.js");
+    const { check } = await import("./text-coverage.js");
     const run = (text: string) =>
       check({
         version: "0.1.0",

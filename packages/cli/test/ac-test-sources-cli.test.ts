@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { CheckInput, TestSourceFile } from "@pharn-ci/core";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 // check() is observed, not replaced: the mock calls the real check() and records the input the CLI built, which
@@ -12,18 +13,10 @@ vi.mock("@pharn-ci/core", async (importOriginal) => {
   return { ...actual, check: vi.fn(actual.check as (input: unknown) => unknown) };
 });
 
-type Input = Record<string, unknown> & {
-  testSources?: {
-    base: { files?: { path: string; text: string }[] };
-    head: { files?: { path: string; text: string }[] };
-  };
+/** check()'s input, with `files` readable on either side whether or not that side was available. */
+type Input = CheckInput & {
+  testSources?: { base: { files?: TestSourceFile[] }; head: { files?: TestSourceFile[] } };
 };
-interface Deps {
-  git(args: string[]): Promise<string>;
-  gitBatch?(args: string[], input: string): Promise<Uint8Array>;
-  stdout(text: string): void;
-  stderr(text: string): void;
-}
 
 const MAIN_TEXT = 'import { it } from "vitest";\nit("adds", () => {});\n';
 const FEATURE_TEXT = 'import { expect, it } from "vitest";\nit("adds", () => expect(1 + 1).toBe(2));\n';
@@ -74,7 +67,7 @@ describe("pharn-ci check: test sources", () => {
     const actual = await vi.importActual<{ check(input: unknown): unknown }>("@pharn-ci/core");
 
     async function runCli(extra: string[]) {
-      const deps = nodeDeps(dir) as unknown as Deps;
+      const deps = nodeDeps(dir);
       const calls: string[][] = [];
       const realGit = deps.git;
       deps.git = (args) => {
@@ -96,11 +89,11 @@ describe("pharn-ci check: test sources", () => {
       spy.mockClear();
       const code = await main(
         ["check", "--base", "main", "--coverage", "coverage/lcov.info", "--format", "json", ...extra],
-        deps as never,
+        deps,
       );
       expect(code, `exit code with ${extra.join(" ") || "no extra flags"}`).not.toBe(2);
       expect(spy).toHaveBeenCalled();
-      const input = spy.mock.calls.at(-1)?.[0] as unknown as Input;
+      const input = spy.mock.calls.at(-1)?.[0] as Input;
       return { input, calls, report: JSON.parse(out) };
     }
 
@@ -118,7 +111,10 @@ describe("pharn-ci check: test sources", () => {
     expect(gathered.report).toEqual(actual.check(gathered.input));
 
     const off = await runCli(["--test-integrity", "off"]);
-    expect(off.calls.filter((args) => args[0] === "merge-base" || args[0] === "cat-file")).toEqual([]);
+    // The run resolves the base, HEAD and their merge base once before the diff, which names those commit ids (CORE-14
+    // follow-up), so one merge-base call is the diff's own; no git object is read.
+    expect(off.calls.filter((args) => args[0] === "cat-file")).toEqual([]);
+    expect(off.calls.filter((args) => args[0] === "merge-base")).toHaveLength(1);
     expect(Object.hasOwn(off.input, "testSources")).toBe(false);
     expect(off.report).toEqual(actual.check(withoutSources(off.input)));
   }, 30_000);

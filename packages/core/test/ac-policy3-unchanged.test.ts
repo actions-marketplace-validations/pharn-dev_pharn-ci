@@ -1,9 +1,11 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import type { ResolvedPolicy } from "../src/policy/resolved.js";
 import { fixture } from "./helpers.js";
 import { expectValidReport } from "./schema.js";
-import { withoutFix, withoutFixJson } from "./v090-codes.js";
+import type { TextCheckInput } from "./text-coverage.js";
+import { withoutFix, withoutFixJson } from "./without-fix.js";
 
 // check() is loaded inside the test body: the AC test is written before CheckInput has `policy`, so nothing the
 // build adds may run while the file loads. The golden inputs are passed as the existing golden tests pass them
@@ -30,7 +32,7 @@ const WHOLE_REPORT_ASSERTIONS: Array<[string, string]> = [
   ["packages/cli/test/ac-stream-adapters.test.ts", "expect(action.report()).toEqual(goldenReport());"],
 ];
 
-function goldenInputs(dir: string): Record<string, unknown> {
+function goldenInputs(dir: string): TextCheckInput {
   const base = {
     version: "0.1.0",
     diff: { text: fixture(`${dir}/pr.diff`) },
@@ -65,12 +67,13 @@ function goldenInputs(dir: string): Record<string, unknown> {
 
 describe("reports with no policy, or a policy of source none", () => {
   it("AC-26: are byte-identical to the base goldens; a timeout policy appends one POLICY_UNAVAILABLE warning last", async () => {
-    const { check, parseConfig } = await import("@pharn-ci/core");
+    const { parseConfig } = await import("@pharn-ci/core");
+    const { check } = await import("./text-coverage.js");
     const config = parseConfig(fixture("golden-exclusions/ci.yml")) as { coverage?: { exclude?: string[] } };
     expect(config.coverage?.exclude).toEqual(["src/generated/**", "*.gen.ts"]);
 
-    const NONE = { source: "none", version: null, document: null };
-    const TIMEOUT = {
+    const NONE: ResolvedPolicy = { source: "none", version: null, document: null };
+    const TIMEOUT: ResolvedPolicy = {
       source: "none",
       version: null,
       document: null,
@@ -83,16 +86,16 @@ describe("reports with no policy, or a policy of source none", () => {
       expect(createHash("sha256").update(withoutFixJson(golden)).digest("hex"), dir).toBe(GOLDENS_AT_BASE[dir]);
       const inputs = goldenInputs(dir);
 
-      const plain = check(inputs as never);
+      const plain = check(inputs);
       expectValidReport(plain);
       expect(asFile(plain), dir).toBe(golden);
 
-      const none = check({ ...inputs, policy: NONE } as never);
+      const none = check({ ...inputs, policy: NONE });
       expectValidReport(none);
       expect(asFile(none), `${dir} with a policy of source none`).toBe(golden);
 
       // Control: an unavailable policy adds exactly one message, last, and nothing else.
-      const timedOut = check({ ...inputs, policy: TIMEOUT } as never);
+      const timedOut = check({ ...inputs, policy: TIMEOUT });
       expectValidReport(timedOut);
       const last = timedOut.messages.at(-1) as { level: string; code: string; text: string } | undefined;
       expect(last?.code, dir).toBe("POLICY_UNAVAILABLE");

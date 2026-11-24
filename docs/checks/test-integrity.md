@@ -9,7 +9,7 @@ tests weaker? The `test-integrity` input takes `block`, `warn` or `off`, and the
 
 `test_integrity.mode` in `.pharn/ci.yml` can only make the mode stricter, never looser, so a pull request cannot loosen
 its own gate by editing the config. The signals so far are TI01, TI02, TI03, TI04, TI05, TI06, TI07, TI08, TI09, TI10,
-TI11, TI12, TI13, TI14, TI15, TI16 and TI17:
+TI11, TI12, TI13, TI14, TI16 and TI17; TI15 is not emitted since the release after v0.11.0:
 
 | Signal | What it reports | Severity in mode `block` | JS/TS | Python |
 | --- | --- | --- | --- | --- |
@@ -27,12 +27,12 @@ TI11, TI12, TI13, TI14, TI15, TI16 and TI17:
 | TI12 | a module under test mocked: a new `vi.mock`, `jest.mock` or Python `patch` of a source file the change also edits | `warn` | yes | yes |
 | TI13 | a coverage-ignore comment added to source | block; `warn` for a hint that marks one line or branch (`# pragma: no cover`, or an Istanbul, V8 or C8 `ignore next`, `ignore if` or `ignore else`) in a file the change adds. A whole-file or range hint (`ignore file`, `ignore start`, `ignore next` with a count) in a new file, and any hint added to an existing file, is a block | yes | yes |
 | TI14 | a lower coverage threshold or a wider exclusion in the pharn-ci config | block | yes | not applicable |
-| TI15 | a source condition that compares with a value the tests add | `info` | yes | yes |
+| TI15 | not emitted since the release after v0.11.0 (it reported a source condition that compares with a value the tests add; 0 of 30 sampled findings were right) | none | no | no |
 | TI16 | a lint or type suppression comment added to a test file | `info` | yes | yes |
 | TI17 | an assertion that always passes: a custom matcher whose pass is always true, a Python helper that always returns True, or a wildcard in place of an expected value | `warn` | yes | yes |
 
-In mode `warn` every `block` above is a `warn`. TI06, TI07, TI08, TI12 and TI17 warn and TI15 and TI16 give an `info`
-finding in both `block` and `warn`, so those seven never fail the check. Each reads the diff, and TI02, TI05, TI06, TI07 and TI12
+In mode `warn` every `block` above is a `warn`. TI06, TI07, TI08, TI12 and TI17 warn and TI16 gives an `info`
+finding in both `block` and `warn`, so those six never fail the check. Each reads the diff, and TI02, TI05, TI06, TI07 and TI12
 also read the text of the JS/TS and Python test files the change modifies at the merge base and at HEAD, parsed without
 running them: a test counts as removed only when no test of the same name or a similar body is left in the touched test
 files (a test of the same name in another touched file counts only when it holds the removed test's body), and
@@ -67,15 +67,22 @@ packages, re-exports through another source file and per-test coverage are not f
 
 Python test files are parsed with the runner's own `python3` (or `python`), 3.8 or newer, and only when the change
 modifies one. When neither `python3` nor `python` is found on the runner, TI02 and TI05 do not run for that change
-(`TEST_INTEGRITY_INDEX_UNAVAILABLE`), and the diff-only signals still run; an added `.py` test file alone is only
-named (warn). A Python older than 3.8, or a Python run that fails, does not stop them: the modified `.py` test files
-are named in that message (warn) and the signals that compare test text skip them. When TI02 and TI05, or TI09, did
+(`TEST_INTEGRITY_INDEX_UNAVAILABLE`), and the diff-only signals still run; an added `.py` test file alone is named
+(an error in `block`, since no signal read its tests). A Python older than 3.8, a Python run that fails, times out or
+gives output pharn-ci cannot read, and a `.py` test file whose head the parser refuses (a syntax error, nested too
+deeply, too large) do not stop the other files: the modified and added `.py` test files are named in that message and the
+signals that compare test text skip them, and in `block` that message is an error, so the check fails closed (the
+accept label lowers it to a warning). A `.py` test file whose merge-base side alone the parser refuses stays a warning.
+The JS/TS test files of the same change are still compared. When TI02 and TI05, or TI09, did
 not run at all because the test text could not be read (a shallow checkout, or `pr-number` mode), or because no
 Python was found, that message is an error in `test-integrity: block`, so the check fails closed. A test file the
 change modifies that cannot be read at HEAD (nested too deeply, over 512 KiB, pushed past the 200-file cap) is an
 error in `block` too, and so is a JS/TS, Python or Go test file the change modifies that has
-more than 5000 changed lines; the accept label lowers both. An added test file and a file already unreadable at the
-merge base stay a warning. The test files the change modifies are read before the added and deleted ones.
+more than 5000 changed lines; the accept label lowers both. So is a modified test file the sources dropped on one side
+past the 200-file or the 16 MiB total cap, or as too large, non-UTF-8 or an unsafe path while the other side was read.
+An added JS/TS test file and a file already out of reach on both sides (too large or non-UTF-8 at the merge base and at
+HEAD) stay a warning. A file renamed into a test path from a path that is not a test file counts as an added one. The
+test files the change modifies are read before the added and deleted ones.
 The Python parser has its own cap of 200 files, shared by the merge base and HEAD: a modified `.py` test file counts once on each side and an added
 or deleted one once, so about 100 modified `.py` test files (fewer when the change also adds or deletes some) can push
 a modified one past it at HEAD, which is also an error in `block`.
@@ -90,13 +97,13 @@ This is the "Test integrity" section of the report for a change that turns `it(`
 > ### 🔍 Test integrity
 >
 > - ❌ **TI03** `src/cart.test.ts:12` — An unconditional skip was added to a test that the diff shows existed before this change, so that test no longer runs.
->   - Hint: Remove the skip so the test runs again, or say in the PR why it must stay, for example a test that fails in CI; a reviewer who is not the PR author can record that sign-off by applying the accept label `pharn/accepted`.
+>   - Hint: Remove the skipping of the test so it runs again, or say in the PR why it must stay, for example a test that fails in CI; a reviewer who is not the PR author can record that sign-off by applying the accept label `pharn/accepted`.
 
 The benchmark for this is Skylos's list of nine ways to hide a failing test. The nine cases are reproduced in vitest
 under `fixtures/skylos-nine/` and pinned by tests: the signals of v0.11.0 catch **8 of 9** (`deleted-test` by TI01,
 `added-skip` by TI03, `emptied-assertion` by TI05, `deselect-setting` by TI09, `replaced-test` by TI02,
 `loosened-assertion` by TI06, `edited-expected-value` by TI07 and `always-true-matcher` by TI17). The other one is
-missed: TI15 exists and misses `hard-coded-answer`. What each signal misses is in [docs/LIMITS.md](../LIMITS.md#what-test-integrity-does-not-catch).
+missed: `hard-coded-answer`, which TI15 also missed before it stopped being emitted. What each signal misses is in [docs/LIMITS.md](../LIMITS.md#what-test-integrity-does-not-catch).
 
 The same nine are reproduced for pytest under `fixtures/skylos-nine-pytest/`, where the signals catch **8 of 9**; the
 case-by-case table is in [docs/PRECISION.md](../PRECISION.md#3-skylos-nine-what-pharn-ci-catches).

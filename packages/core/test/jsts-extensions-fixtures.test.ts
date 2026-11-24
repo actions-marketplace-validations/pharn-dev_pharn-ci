@@ -1,9 +1,10 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { check } from "@pharn-ci/core";
+
 import { describe, expect, it } from "vitest";
 import { FIXTURES, fixture } from "./helpers.js";
 import { expectValidReport } from "./schema.js";
+import { check } from "./text-coverage.js";
 
 // The five case directories js-ts-extensions adds, each run through check() in block mode with its diff and its
 // base/head sources. The AC tests drive check() with their own inline inputs; this file runs the fixtures themselves.
@@ -46,7 +47,7 @@ function run(dir: string) {
     repoFiles: [...new Set([...head.map((f) => f.path), "src/cart.ts"])].sort(),
     testSources: { base: { files: base, dropped: [] }, head: { files: head, dropped: [] } },
     testIntegrityMode: { input: "block" },
-  } as unknown as Parameters<typeof check>[0]);
+  });
   expectValidReport(report);
   return report;
 }
@@ -55,7 +56,7 @@ describe("js-ts-extensions fixtures", () => {
   for (const c of CASES) {
     it(`${c.dir}: ${c.signal === null ? "no TI13 signal or message" : `${c.signal} at block naming ${c.path}`}`, () => {
       const report = run(c.dir);
-      const signals = report.testIntegrity.signals as unknown as Array<{ id: string; severity: string; path: string }>;
+      const signals = report.testIntegrity.signals;
       if (c.signal === null) {
         expect(signals.filter((s) => s.id === "TI13")).toEqual([]);
         expect(report.messages.filter((m) => String(m.code) === "TEST_INTEGRITY_TI13")).toEqual([]);

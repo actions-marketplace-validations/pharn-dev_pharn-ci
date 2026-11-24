@@ -1,9 +1,11 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import type { TestIntegritySignal as Signal } from "../src/report.js";
+import type { TestSourceFile as SourceFile } from "../src/testSources.js";
 import { FIXTURES, fixture } from "./helpers.js";
 import { expectValidReport } from "./schema.js";
-import { withoutFix } from "./v090-codes.js";
+import { withoutFix } from "./without-fix.js";
 
 // check() is loaded inside the test body: the AC test is written before TI09 reads the native [tool.pytest] table, so
 // nothing the build adds may run while the file loads. The new case directories are written by the build, so the test
@@ -29,23 +31,10 @@ const INI_OPTIONS_TODAY = [
   },
 ];
 
-interface SourceFile {
-  path: string;
-  text: string;
-}
 interface Case {
   diff: string;
   base: SourceFile[];
   head: SourceFile[];
-}
-interface Signal {
-  id: string;
-  severity: string;
-  path: string;
-  line: number | null;
-}
-interface Report {
-  testIntegrity: { signals: Signal[] };
 }
 
 const byPath = (a: SourceFile, b: SourceFile) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
@@ -95,7 +84,7 @@ function entry(text: string, header: RegExp, key: string): { line: number; value
 }
 
 async function run(c: Case): Promise<Signal[]> {
-  const { check } = await import("../src/check.js");
+  const { check } = await import("./text-coverage.js");
   const report = check({
     version: "0.1.0",
     coverage: { text: fixture("test-files-deleted/coverage.info"), format: "lcov" },
@@ -105,10 +94,10 @@ async function run(c: Case): Promise<Signal[]> {
     repoFiles: [...new Set([...c.head.map((f) => f.path), "src/cart.ts"])].sort(),
     testIntegrityMode: { input: "block" },
     testSources: { base: { files: c.base, dropped: [] }, head: { files: c.head, dropped: [] } },
-  } as unknown as Parameters<typeof check>[0]);
+  });
   expectValidReport(report);
   // fix-hints (H6): every finding now carries a `fix`; the pinned literals are unchanged, so they are read without it.
-  return withoutFix((report as unknown as Report).testIntegrity.signals.filter((s) => String(s.id) === "TI09"));
+  return withoutFix(report.testIntegrity.signals.filter((s) => String(s.id) === "TI09"));
 }
 
 const NARROWED = { base: '["tests"]', head: '["tests/unit"]' };

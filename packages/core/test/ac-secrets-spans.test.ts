@@ -44,9 +44,9 @@ const FORMS = ["RSA ", "EC ", "DSA ", "OPENSSH ", "ENCRYPTED ", "PGP ", ""];
 type Span = { id: string; start: number; end: number };
 
 async function load() {
-  const core = (await import("../src/index.js")) as unknown as {
-    findSecretSpans(text: string): Span[];
-    redactSecrets(text: string): string;
+  const core = {
+    ...(await import("../src/secrets/redact.js")),
+    ...(await import("../src/secrets/spans.js")),
   };
   const spans = (text: string) => core.findSecretSpans(text).map(({ id, start, end }) => ({ id, start, end }));
   return { spans, redactSecrets: (text: string) => core.redactSecrets(text) };

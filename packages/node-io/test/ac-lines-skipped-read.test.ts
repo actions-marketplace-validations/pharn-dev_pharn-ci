@@ -10,8 +10,6 @@ import { expectValidReport } from "../../core/test/schema.js";
 
 const CODE = "COVERAGE_LINES_SKIPPED";
 
-type Message = { level: string; code: string; text: string };
-
 // Valid DA records for src/a.ts plus 2 malformed ones (a zero line number and a non-integer line number).
 const LCOV = ["TN:", "SF:src/a.ts", "DA:1,1", "DA:0,1", "DA:2,3", "DA:x,1", "end_of_record", ""].join("\n");
 
@@ -60,7 +58,7 @@ const DIFF = [
 describe("readCoverageFiles + check(): skipped records summed across streamed files", () => {
   it("AC-3: two files read as parsed entries give one info COVERAGE_LINES_SKIPPED message with the count 3", async () => {
     const { readCoverageFiles } = await import("../src/coverage.js");
-    const { listDir, readFile, readFileStream } = await import("../src/io.js");
+    const { listDir, readFileStream } = await import("../src/io.js");
     const { check } = await import("../../core/src/check.js");
 
     const dir = mkdtempSync(join(tmpdir(), "pharn-ci-lines-skipped-"));
@@ -70,7 +68,7 @@ describe("readCoverageFiles + check(): skipped records summed across streamed fi
       writeFileSync(join(dir, "coverage", "coverage.xml"), COBERTURA);
 
       const files = await readCoverageFiles(
-        { listDir, readFile, readFileStream, resolvePath: (...segments: string[]) => resolve(...segments) },
+        { listDir, readFileStream, resolvePath: (...segments: string[]) => resolve(...segments) },
         {
           entries: ["coverage/lcov.info", "coverage/coverage.xml"],
           label: "coverage-file",
@@ -91,7 +89,7 @@ describe("readCoverageFiles + check(): skipped records summed across streamed fi
 
       const report = check({
         version: "0.1.0",
-        coverage: { files, format: "auto" },
+        coverage: { files },
         diff: { text: DIFF },
         repoFiles: ["src/a.ts", "src/b.py"],
         threshold: null,
@@ -99,7 +97,7 @@ describe("readCoverageFiles + check(): skipped records summed across streamed fi
       expectValidReport(report);
       expect(report.diffCoverage).not.toBeNull();
 
-      const skipped = (report.messages as readonly Message[]).filter((message) => message.code === CODE);
+      const skipped = report.messages.filter((message) => message.code === CODE);
       expect(skipped).toHaveLength(1);
       expect(skipped[0]?.level).toBe("info");
       expect(skipped[0]?.text).toContain("3");

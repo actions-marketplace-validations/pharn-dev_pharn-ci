@@ -1,12 +1,15 @@
 import { readFileSync } from "node:fs";
 import { Ajv2020 } from "ajv/dist/2020.js";
 import { describe, expect, it } from "vitest";
-import { check, injectionSettingsOf, type Report, validatePolicy } from "../src/index.js";
+import type { Report } from "../src/index.js";
+import { injectionSettingsOf } from "../src/injection/policy.js";
 import type { PolicyDocument } from "../src/policy/types.js";
+import { validatePolicy } from "../src/policy/validate.js";
 import { FIXTURES, fixture } from "./helpers.js";
 import { injectionFixture } from "./injection-fixture.js";
 import { expectValidReport } from "./schema.js";
-import { withoutFix } from "./v090-codes.js";
+import { check, type TextCheckInput } from "./text-coverage.js";
+import { withoutFix } from "./without-fix.js";
 
 // The `injection` policy key (schema/policy.v1.json, validatePolicy) and how each policy source applies it. Settings
 // the pull request carries can never loosen the scan: a `file:` policy's exemptions are not-allowed, its severities
@@ -18,7 +21,7 @@ const validateWithSchema = new Ajv2020({ strict: true, allErrors: true }).compil
 const app = (document: PolicyDocument) => ({ source: "app" as const, version: 3, document });
 const file = (document: PolicyDocument) => ({ source: "file" as const, version: null, path: "policy.json", document });
 
-function run(diffName: string, policy: unknown, over: Record<string, unknown> = {}): Report {
+function run(diffName: string, policy: TextCheckInput["policy"], over: Partial<TextCheckInput> = {}): Report {
   const report = check({
     version: "0.1.0",
     coverage: { text: fixture("golden/coverage.info"), format: "lcov" },
@@ -28,7 +31,7 @@ function run(diffName: string, policy: unknown, over: Record<string, unknown> = 
     repoFiles: ["AGENTS.md", "src/a.ts"],
     policy,
     ...over,
-  } as never);
+  });
   expectValidReport(report);
   return report;
 }
@@ -96,8 +99,9 @@ describe("injectionSettingsOf", () => {
       phrases: ["base", "head"],
       severities: { PI01: "block", PI02: "block", PI03: "warn", PI04: "warn", PI05: "warn" },
       ignored: [
-        { setting: "injection.exempt", layer: "policy-file", reason: "not-allowed" },
-        { setting: "injection.signals.PI01", layer: "policy-file", reason: "looser" },
+        // CORE-123: a policy file's record carries no layer (it was "policy-file").
+        { setting: "injection.exempt", reason: "not-allowed" },
+        { setting: "injection.signals.PI01", reason: "looser" },
       ],
     });
   });
@@ -136,8 +140,9 @@ describe("the injection policy through check()", () => {
     expect(report.verdict).toBe("fail");
     expect(report.injection?.signals.map((s) => s.severity)).toEqual(["block", "block"]);
     const ignored = report.messages.find((m) => m.code === "POLICY_OVERRIDE_IGNORED");
-    expect(ignored?.text).toContain("injection.exempt (policy-file)");
-    expect(ignored?.text).toContain("injection.signals.PI01 (policy-file)");
+    // CORE-123: the message names the setting and no layer.
+    expect(ignored?.text).toContain("applies: injection.exempt, injection.signals.PI01.");
+    expect(ignored?.text).not.toContain("(policy-file)");
   });
 
   it("a policy file can raise a warning signal to block", () => {

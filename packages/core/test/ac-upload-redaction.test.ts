@@ -72,7 +72,14 @@ interface UploadCore {
   redactSecrets(text: string): string;
 }
 
-const load = async () => (await import("@pharn-ci/core")) as unknown as UploadCore;
+// A looser view on purpose: the reports are hand-built JSON with a secret seeded in every place, including a key Report
+// does not have (`testIntegrity.testChanges`), and the meta passed on may be null.
+const load = async () =>
+  ({
+    ...(await import("../src/secrets/redact.js")),
+    ...(await import("../src/upload/bundle.js")),
+    ...(await import("../src/upload/meta.js")),
+  }) as unknown as UploadCore;
 
 const EXTRA = { version: "0.0.0-test", createdAt: "2026-10-26T12:00:00.000Z", commentUrl: null };
 const utf8 = (text: string) => Buffer.byteLength(text, "utf8");

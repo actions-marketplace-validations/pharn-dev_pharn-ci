@@ -1,10 +1,12 @@
 import { readFileSync } from "node:fs";
+import type { Report } from "@pharn-ci/core";
 import { describe, expect, it } from "vitest";
+import type { Message } from "../../core/src/report.js";
 import { expectValidReport } from "../../core/test/schema.js";
-import { withoutFix } from "../../core/test/v090-codes.js";
+import { withoutFix } from "../../core/test/without-fix.js";
 import { harness, PR_CONTEXT, WORKSPACE } from "./harness.js";
 
-// run(), fetchPolicy() and the fixtures under fixtures/policy-api/ are loaded inside each test body: the AC tests are
+// run(), fetchAppPolicy() and the fixtures under fixtures/policy-api/ are loaded inside each test body: the AC tests are
 // written before the org policy fetch exists, so nothing the build adds may run while the file loads. The Action runs
 // against the in-memory harness plus injected policy deps: a fake fetch that records every call and answers from
 // recorded responses, a fake getIDToken and setSecret, the OIDC-env flag, a recorded sleep and a fixed clock. No real
@@ -20,14 +22,6 @@ const NOW = new Date("2026-10-26T12:00:00.000Z");
 const CAP = 1_048_576;
 const CHUNK = 64 * 1024;
 const BODY_MARKER = "BODY-MARKER-7f3a";
-
-type Message = { level: string; code: string; text: string };
-type Report = {
-  verdict: string;
-  messages: Message[];
-  diffCoverage: { threshold: number | null; files: { path: string }[]; excludedFiles?: string[] } | null;
-  testIntegrity: { mode: string; source: string };
-};
 
 interface FetchCall {
   url: string;
@@ -176,12 +170,14 @@ function reportOf(r: PolicyRun): Report {
 const withCode = (report: Report, code: string) => report.messages.filter((m) => m.code === code);
 const policyCodes = (report: Report) => report.messages.filter((m) => m.code.startsWith("POLICY_"));
 
-/** fetchPolicy() called directly, with the deps a policy run gives run(). */
+/** The policy fetchAppPolicy() returns, called directly with the deps a policy run gives run(). CORE-123: fetchPolicy,
+ * the wrapper that returned only this policy, was removed as unused. */
 async function fetchDirect(mode: "auto" | "required", answers: readonly Answer[]) {
-  const { fetchPolicy } = await import("../src/policy-fetch.js");
+  const { fetchAppPolicy } = await import("../src/policy-fetch.js");
   const h = harness({ context: prContext() as never });
   policyDeps(h, answers);
-  return (await fetchPolicy(h.deps as never, { mode, origin: new URL("https://pharn.dev"), repository: REPO })) as {
+  const options = { mode, origin: new URL("https://pharn.dev"), repository: REPO };
+  return (await fetchAppPolicy(h.deps as never, options)).policy as {
     source: string;
     version: number | null;
     fetchedAt?: string;
@@ -288,9 +284,12 @@ const FAILURES: FailureCase[] = [
     reason: "invalid-response",
     body: BODY_MARKER,
   },
+  // CORE-118 (R5.1): an unknown envelope key no longer voids the policy (envelope-unknown-key.json is now applied with
+  // one POLICY_KEYS_UNKNOWN warning, policy-keys-unknown.test.ts); a known envelope key with a value of the wrong type
+  // still does, so that is the failing case here.
   {
-    name: "unknown key",
-    answers: () => [respond(200, apiFixture("envelope-unknown-key.json"))],
+    name: "known key, wrong type",
+    answers: () => [respond(200, apiFixture("envelope-bad-value.json"))],
     reason: "invalid-response",
   },
   {
@@ -320,8 +319,8 @@ describe("the org policy fetch outcomes", () => {
 
     const ignored = withCode(report, "POLICY_OVERRIDE_IGNORED");
     expect(ignored).toHaveLength(1);
-    expect(ignored[0]?.text).toContain("coverage.threshold (input) 70 → 85");
-    expect(ignored[0]?.text).toContain("coverage.exclude (input)");
+    // CORE-123: the settings and no layer (they were "coverage.threshold (input) 70 → 85" and "coverage.exclude (input)").
+    expect(ignored[0]?.text).toContain("applies: coverage.exclude, coverage.threshold 70 → 85.");
     expect(ignored[0]?.text).not.toContain("src/**");
 
     const policy = await fetchDirect("auto", [respond(200, apiFixture("envelope-valid.json"))]);

@@ -50,7 +50,7 @@ describe("CORE-50: pharn-ci does not add --text to its git diff arguments", () =
         `Binary files a/${TEST_PATH} and /dev/null differ`,
       );
 
-      const { check } = await import("../src/check.js");
+      const { check } = await import("./text-coverage.js");
       const report = check({
         version: "0.1.0",
         coverage: { text: readFileSync(`${FIXTURES}test-files-deleted/coverage.info`, "utf8"), format: "lcov" },
@@ -59,7 +59,7 @@ describe("CORE-50: pharn-ci does not add --text to its git diff arguments", () =
         threshold: null,
         repoFiles: [".gitattributes", "src/cart.ts"],
         testIntegrityMode: { input: "block" },
-      } as unknown as Parameters<typeof check>[0]);
+      });
       expectValidReport(report);
       expect(
         report.testIntegrity.signals.filter((s) => s.id === "TI01").map((s) => [s.path, s.severity]),

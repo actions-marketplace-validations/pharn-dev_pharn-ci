@@ -1,6 +1,7 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import type { TestSourceFile as SourceFile } from "../src/testSources.js";
 import { FIXTURES, fixture } from "./helpers.js";
 import { expectValidReport } from "./schema.js";
 
@@ -10,21 +11,6 @@ import { expectValidReport } from "./schema.js";
 
 const REPO_ROOT = "/home/runner/work/demo/demo";
 const PATH = "src/cart.test.ts";
-
-interface SourceFile {
-  path: string;
-  text: string;
-}
-interface Signal {
-  id: string;
-  severity: string;
-  path: string;
-  line: number | null;
-  detail: string;
-}
-interface Report {
-  testIntegrity: { signals: Signal[] };
-}
 
 const byPath = (a: SourceFile, b: SourceFile) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
 
@@ -74,7 +60,7 @@ describe("TI03 keeps the existing-test findings first under the per-file cap", (
     const lastFresh = Math.max(...fresh.map((line) => headLines.indexOf(line)));
     expect(lastFresh, "the new skipped tests come first, on lower lines").toBeLessThan(firstMoved);
 
-    const { check } = await import("../src/check.js");
+    const { check } = await import("./text-coverage.js");
     const report = check({
       version: "0.1.0",
       coverage: { text: fixture("test-files-deleted/coverage.info"), format: "lcov" },
@@ -84,11 +70,9 @@ describe("TI03 keeps the existing-test findings first under the per-file cap", (
       repoFiles: [PATH, "src/cart.ts"],
       testSources: { base: { files: base, dropped: [] }, head: { files: head, dropped: [] } },
       testIntegrityMode: { input: "block" },
-    } as unknown as Parameters<typeof check>[0]);
+    });
     expectValidReport(report);
-    const signals = (report as unknown as Report).testIntegrity.signals.filter(
-      (s) => String(s.id) === "TI03" && s.path === PATH,
-    );
+    const signals = report.testIntegrity.signals.filter((s) => String(s.id) === "TI03" && s.path === PATH);
     expect(signals).toHaveLength(20);
     expect(signals.map((s) => s.severity)).toEqual(Array.from({ length: 20 }, () => "block"));
   });

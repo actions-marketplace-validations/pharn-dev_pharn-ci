@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { Report } from "@pharn-ci/core";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { expectValidReport } from "../../core/test/schema.js";
 import { EXIT_FAIL, EXIT_OK, main } from "../src/main.js";
@@ -10,12 +11,6 @@ import { coverage, fakeDeps, fixture } from "./fake-deps.js";
 
 // Review finding 13: a --base that resolves to HEAD (or to a commit after it) gives an empty base...HEAD diff, which
 // used to pass as NO_COVERABLE_CHANGES while measuring nothing. It is now DIFF_UNAVAILABLE: a fail with a threshold.
-
-type Report = {
-  verdict: string;
-  diffCoverage: unknown;
-  messages: { code: string; level: string; text: string }[];
-};
 
 const codes = (report: Report) => report.messages.map((m) => m.code);
 
@@ -141,15 +136,16 @@ describe("cli: a --base that resolves to HEAD (real git repo)", () => {
 
 const HEAD_OID = "c".repeat(40);
 const OTHER_OID = "d".repeat(40);
+const BASE_OID = "e".repeat(40);
 
 /** The fake CLI deps with an empty diff (unless `diff` is given) and the given answers to the merge-base check. */
 function emptyDiffDeps(mergeBase: string | Error, head: string | Error = HEAD_OID, diff = "") {
   const deps = fakeDeps(coverage, { diff });
   const fallback = deps.git.bind(deps);
   deps.git = async (args) => {
-    if (args[0] === "merge-base" || (args[0] === "rev-parse" && args.includes("HEAD^{commit}"))) {
+    if (args[0] === "merge-base" || (args[0] === "rev-parse" && args.at(-1)?.endsWith("^{commit}"))) {
       deps.gitCalls.push(args);
-      const answer = args[0] === "merge-base" ? mergeBase : head;
+      const answer = args[0] === "merge-base" ? mergeBase : args.includes("HEAD^{commit}") ? head : BASE_OID;
       if (answer instanceof Error) throw answer;
       return `${answer}\n`;
     }
@@ -168,8 +164,10 @@ describe("cli: only a merge base equal to HEAD means nothing to measure", () => 
     const report = JSON.parse(deps.out) as Report;
     expectValidReport(report);
     expect(codes(report)).toContain("DIFF_UNAVAILABLE");
-    expect(deps.gitCalls).toContainEqual(["merge-base", "--end-of-options", "develop", "HEAD"]);
+    // The run's revisions (CORE-143): the base and HEAD by rev-parse after --end-of-options, then their merge base.
+    expect(deps.gitCalls).toContainEqual(["rev-parse", "--verify", "--quiet", "--end-of-options", "develop^{commit}"]);
     expect(deps.gitCalls).toContainEqual(["rev-parse", "--verify", "--quiet", "--end-of-options", "HEAD^{commit}"]);
+    expect(deps.gitCalls).toContainEqual(["merge-base", BASE_OID, HEAD_OID]);
   });
 
   it("AC-13: an empty diff whose merge base is another commit is NO_COVERABLE_CHANGES, as before", async () => {
@@ -192,11 +190,13 @@ describe("cli: only a merge base equal to HEAD means nothing to measure", () => 
     }
   });
 
-  it("AC-13: a non-empty diff never asks for the merge base", async () => {
+  it("AC-13: a non-empty diff never runs the base-is-HEAD check", async () => {
     const deps = emptyDiffDeps(HEAD_OID, HEAD_OID, fixture("golden/pr.diff"));
 
     await main(args, deps);
-    expect(deps.gitCalls.some((a) => a[0] === "merge-base")).toBe(false);
+    // CORE-143: the batch runner is required, so the readers of the merge base (the test sources) resolve the run's
+    // revisions once; the base-is-HEAD check adds no call of its own and, on a non-empty diff, decides nothing.
+    expect(deps.gitCalls.filter((a) => a[0] === "merge-base")).toHaveLength(1);
     expect(codes(JSON.parse(deps.out) as Report)).not.toContain("DIFF_UNAVAILABLE");
   });
 });

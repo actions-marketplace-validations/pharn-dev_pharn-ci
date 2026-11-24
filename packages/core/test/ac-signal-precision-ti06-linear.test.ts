@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { measureGrowth } from "./growth.js";
+import type { TestIndex } from "../src/testIndex/types.js";
+import { measureGrowth, threadCpuMs } from "./growth.js";
 import { fixture } from "./helpers.js";
 import { expectValidReport } from "./schema.js";
 
@@ -14,8 +15,13 @@ import { expectValidReport } from "./schema.js";
 
 const REPO_ROOT = "/home/runner/work/demo/demo";
 const PATH = "src/big.test.ts";
-const SMALL = 100_000;
+// The growth is measured at half the sizes used before CORE-134 (half the cost); one body as long as the 512 KiB cap
+// allows is still checked, within a 15 s CPU ceiling.
+const SMALL = 50_000;
 const LARGE = 4 * SMALL;
+const CAP = 524_288;
+const CAP_BODY = CAP - 1024;
+const CEILING_MS = 15_000;
 const KEY = "k".repeat(220);
 const SUBJECT = `registry.lookup("${KEY}").handler`;
 const BASE_CHAIN = `  expect(typeof ${SUBJECT}).toBe('function');`;
@@ -67,7 +73,7 @@ function input(bodyChars: number) {
   ].join("\n");
   return {
     version: "0.1.0",
-    coverage: { text: fixture("test-files-deleted/coverage.info"), format: "lcov" },
+    coverage: { text: fixture("test-files-deleted/coverage.info"), format: "lcov" as const },
     diff: { text: diff },
     repoRoot: REPO_ROOT,
     threshold: 80,
@@ -76,19 +82,18 @@ function input(bodyChars: number) {
       base: { files: [{ path: PATH, text: base }], dropped: [] },
       head: { files: [{ path: PATH, text: head }], dropped: [] },
     },
-    testIntegrityMode: { input: "block" },
+    testIntegrityMode: { input: "block" as const },
   };
 }
 
 describe("TI06: the expect-subject reader is linear", () => {
-  it("AC-12: a 100,000-character test body full of unclosed brackets, unterminated quotes and expect( calls, ending in a typeof chain with a subject over 200 code units rewritten to toBeTypeOf, gives no TI06, nor does the same body four times as long, which takes less than eight times as long", async () => {
-    const { check } = await import("../src/check.js");
-    type Input = Parameters<typeof check>[0];
+  it("AC-12: a 50,000-character test body full of unclosed brackets, unterminated quotes and expect( calls, ending in a typeof chain with a subject over 200 code units rewritten to toBeTypeOf, gives no TI06, nor does the same body four times as long, which takes less than eight times as long, nor one as long as the 512 KiB cap allows, within 15 s", async () => {
+    const { check } = await import("./text-coverage.js");
     expect(SUBJECT.length).toBeGreaterThan(200);
 
     // The long subject alone, in a short body, is read through its bounded head: the rewrite is equivalent.
     const short = input(0);
-    const shortReport = check(short as unknown as Input);
+    const shortReport = check(short);
     expectValidReport(shortReport);
     expect(
       shortReport.testIntegrity.signals.filter((s) => String(s.id) === "TI06"),
@@ -98,22 +103,30 @@ describe("TI06: the expect-subject reader is linear", () => {
     const small = input(SMALL);
     const large = input(LARGE);
     // The generated files are valid TypeScript: the existing test index parses them with no syntax error.
-    const core = (await import("@pharn-ci/core")) as unknown as {
-      indexTestFile(path: string, text: string): { parsed: boolean; syntaxErrors?: number };
-    };
+    const core = await import("../src/testIndex/indexTestFile.js");
     for (const run of [short, small, large]) {
       for (const side of [run.testSources.base, run.testSources.head]) {
         const result = core.indexTestFile(PATH, (side.files[0] as { text: string }).text);
         expect(result.parsed, JSON.stringify(result)).toBe(true);
-        expect(result.syntaxErrors).toBe(0);
+        expect((result as TestIndex).syntaxErrors).toBe(0);
       }
     }
 
+    const atCap = input(CAP_BODY);
+    for (const side of [atCap.testSources.base, atCap.testSources.head]) {
+      const text = (side.files[0] as { text: string }).text;
+      expect(text.length, "the cap-sized file fits the cap").toBeLessThanOrEqual(CAP);
+      expect(text.length, "and fills it").toBeGreaterThan(CAP_BODY);
+    }
+
     for (const [label, run] of [
-      ["100,000 characters", small],
-      ["400,000 characters", large],
+      ["the cap-sized body", atCap],
+      ["50,000 characters", small],
+      ["200,000 characters", large],
     ] as const) {
-      const report = check(run as unknown as Input);
+      const started = threadCpuMs();
+      const report = check(run);
+      expect(threadCpuMs() - started, `${label}: the run finishes within 15 s of CPU time`).toBeLessThan(CEILING_MS);
       expectValidReport(report);
       expect(report.testIntegrity.languages, `${label}: the file was indexed`).toEqual(["ts"]);
       expect(
@@ -122,12 +135,12 @@ describe("TI06: the expect-subject reader is linear", () => {
       ).toEqual([]);
     }
 
-    const smallInput = small as unknown as Input;
-    const largeInput = large as unknown as Input;
+    const smallInput = small;
+    const largeInput = large;
     const growth = await measureGrowth(
       () => check(smallInput),
       () => check(largeInput),
     );
-    expect(growth.ratio, `400,000 vs 100,000 characters: ${growth.detail}`).toBeLessThan(8);
+    expect(growth.ratio, `200,000 vs 50,000 characters: ${growth.detail}`).toBeLessThan(8);
   }, 300_000);
 });

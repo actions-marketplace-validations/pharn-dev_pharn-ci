@@ -1,9 +1,11 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { check } from "../src/check.js";
+import type { Report } from "../src/report.js";
+import type { TestSourceFile as SourceFile } from "../src/testSources.js";
 import { FIXTURES, fixture } from "./helpers.js";
 import { expectValidReport } from "./schema.js";
+import { check } from "./text-coverage.js";
 
 // The two evasions review named: a name is what a change controls, so a name alone must never loosen a gate. (1) A real
 // test deleted and a hollow test with a similar name added in its place (the file keeps its test count) is a TI02 block.
@@ -11,21 +13,6 @@ import { expectValidReport } from "./schema.js";
 // TI01 block: the TI01 moved-tests rule also needs each test's body to be found again.
 
 const REPO_ROOT = "/home/runner/work/demo/demo";
-
-interface SourceFile {
-  path: string;
-  text: string;
-}
-interface Signal {
-  id: string;
-  severity: string;
-  path: string;
-  line: number | null;
-  detail: string;
-}
-interface Report {
-  testIntegrity: { verdict: string; signals: Signal[] };
-}
 
 const byPath = (a: SourceFile, b: SourceFile) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
 
@@ -51,7 +38,7 @@ function run(dir: string): Report {
     repoFiles: [...new Set([...head.map((f) => f.path), "src/cart.ts"])].sort(),
     testSources: { base: { files: base, dropped: [] }, head: { files: head, dropped: [] } },
     testIntegrityMode: { input: "block" },
-  } as unknown as Parameters<typeof check>[0]) as unknown as Report;
+  });
   expectValidReport(report);
   return report;
 }

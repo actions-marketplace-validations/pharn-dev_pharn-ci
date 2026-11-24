@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { Report } from "../src/report.js";
 import { fixture } from "./helpers.js";
 import { expectValidReport } from "./schema.js";
 
@@ -6,17 +7,11 @@ import { expectValidReport } from "./schema.js";
 // read there too: the AC test is written before the build adds the POLICY_P07 hint and the golden, so nothing the
 // build adds may run while this file loads.
 
-type Violation = { id: string; severity: string; path: string | null; line: number | null; detail: string };
-type Message = { level: string; code: string; text: string };
-type Report = Record<string, unknown> & { messages: Message[]; policy?: { violations: Violation[] } };
-
-interface Core {
-  renderMarkdown(report: Report): string;
-}
-
 const HOSTILE = "packages/we`ird<!--|x/AGENTS.md";
+// CORE-140: the hint is the code's fix.hint.
+// CORE-14 follow-up: the hint says "in one directory" and offers moving a file again.
 const P07_HINT =
-  "Make the instruction files in one directory name the same package manager and test runner, or move a file into the package it describes; an agent follows whichever file it reads first.";
+  "A maintainer should make the agent instruction files in one directory agree on one package manager and test runner, or move a file into the package it describes.";
 const AGENTS_LINE = "- ⚠️ **P07** `AGENTS.md:3` — package manager: pnpm here, npm in CLAUDE.md:4";
 
 /** The lines of a `### ` section whose heading starts with `heading`, up to the next `### ` heading; [] when absent. */
@@ -33,7 +28,7 @@ const live = (line: string) => line.replace(/(`+)[\s\S]*?\1/g, "").replace(/\\[\
 
 describe("the P07 violations and message in the PR comment", { timeout: 60_000 }, () => {
   it("AC-15: the rendered report equals the golden; the Policy section lists the AGENTS.md:3 line with the POLICY_P07 hint and a path-less P07 line; Messages holds no POLICY_P07 text; the hostile path stays in one code span on one line", async () => {
-    const core = (await import("@pharn-ci/core")) as unknown as Core;
+    const core = await import("@pharn-ci/core");
     const report = JSON.parse(fixture("policy-rules/p07/render/report.json")) as Report;
     expectValidReport(report);
 
@@ -58,7 +53,10 @@ describe("the P07 violations and message in the PR comment", { timeout: 60_000 }
     // The renderer may backslash-escape message text; compare with the escapes taken out.
     const messages = section(markdown, "### 💬 Messages").join("\n").replace(/\\/g, "");
     expect(messages).not.toContain(p07Text);
-    expect(messages).not.toContain("agent instruction file");
+    // CORE-140: the NO_AGENT_SETUP_FILES hint (its fix.hint) names "an agent instruction file", so the check looks for
+    // the two parts of the P07 text instead of the bare phrase.
+    expect(messages).not.toContain("agent instruction files name");
+    expect(messages).not.toContain("agent instruction file was not compared");
 
     // The hostile path renders on one line, inside one code span, inert outside it.
     const hostile = markdown.split("\n").filter((l) => l.includes("ird") && l.includes("x/AGENTS.md"));

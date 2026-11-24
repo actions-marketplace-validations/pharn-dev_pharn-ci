@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { Report } from "../src/report.js";
 import { fixture } from "./helpers.js";
 import { expectValidReport } from "./schema.js";
 
@@ -6,19 +7,13 @@ import { expectValidReport } from "./schema.js";
 // is read there too: the AC test is written before the build adds rule P11 and its golden, so nothing the build adds
 // may run while this file loads.
 
-type Violation = { id: string; severity: string; path: string | null; line: number | null; detail: string };
-type Message = { level: string; code: string; text: string };
-type Report = Record<string, unknown> & { messages: Message[]; policy?: { violations: Violation[] } };
-
-interface Core {
-  renderMarkdown(report: Report): string;
-}
-
 const HOSTILE = "src/we`ird<!--|x.ts";
+// CORE-140: the hints are each code's fix.hint. CORE-14 follow-up: they name `agents.protected_paths` and the
+// 250-commit cap again.
 const P11_HINT =
-  "Agent PRs may not change these paths under the org policy. Move the change to a pull request by a person, or ask the policy owner to change `agents.protected_paths`.";
+  "Ask a person to review or make the change to the paths the org policy protects from agent pull requests (`agents.protected_paths`).";
 const INCOMPLETE_HINT =
-  "Re-run the job if the GitHub API failed. A pull request with more than 250 commits, an author GitHub does not name, or an edited policy file whose base cannot be read always counts as an agent PR.";
+  "Check that the token can read the pull request, its labels and its commits, then run the job again; a pull request with more than 250 commits always counts as an agent PR.";
 
 /** The lines of a `### ` section whose heading starts with `heading`, up to the next `### ` heading. */
 function section(md: string, heading: string): string[] {
@@ -34,7 +29,7 @@ const live = (line: string) => line.replace(/(`+)[\s\S]*?\1/g, "").replace(/\\[\
 
 describe("the P11 violations and messages in the PR comment", { timeout: 60_000 }, () => {
   it("AC-21: the rendered report equals the golden; the Policy section lists the P11 path line and a path-less P11 line with the POLICY_P11 hint; Messages holds the incomplete message and hint but no POLICY_P11 text; the hostile path stays in one code span", async () => {
-    const core = (await import("@pharn-ci/core")) as unknown as Core;
+    const core = await import("@pharn-ci/core");
     const report = JSON.parse(fixture("policy-rules/p11/render/report.json")) as Report;
     expectValidReport(report);
 
