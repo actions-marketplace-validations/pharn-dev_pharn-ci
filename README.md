@@ -19,7 +19,7 @@ behave. AI-agnostic, no telemetry, and stateless unless you opt in to the upload
 
 </div>
 
-> **Status:** pre-1.0; the latest release is `v0.11.0` ([changelog](CHANGELOG.md)). Pin the tag's
+> **Status:** pre-1.0; the latest release is `v0.12.0` ([changelog](CHANGELOG.md)). Pin the tag's
 > full commit SHA for integrity. The report schema is stable within a version (v2 from 0.2.0). Before 1.0, inputs, outputs and message
 > codes are never removed, and a renamed input keeps working under its old name, with a warning, for
 > at least one minor release; defaults change only in a minor release and the changelog says so. The
@@ -70,7 +70,7 @@ jobs:
           node-version: 24
       - run: npm ci
       - run: npx vitest run --coverage --coverage.reporter=lcov
-      - uses: pharn-dev/pharn-ci@v0.11.0 # or, better, the tag's full commit SHA
+      - uses: pharn-dev/pharn-ci@v0.12.0 # or, better, the tag's full commit SHA
         timeout-minutes: 5
         with:
           coverage-file: coverage/lcov.info
@@ -123,7 +123,7 @@ missing from most coverage reports unless the runner is told where the source is
 
 ### Test integrity
 
-Did the change make the tests weaker? Signals TI01 to TI17 report a deleted test file, a removed or skipped test, a
+Did the change make the tests weaker? Signals TI01 to TI17 (TI15 is not emitted) report a deleted test file, a removed or skipped test, a
 `.only`, emptied assertions, a loosened test-runner setting, a weakened test script, CI that stopped running tests, a
 coverage-ignore comment and more. The `test-integrity` input is `warn` by default; `block` fails the check on a
 block-level finding, and a reviewer who is not the author can sign one off with the accept label.
